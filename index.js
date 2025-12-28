@@ -5314,12 +5314,23 @@ const simbriefUrl =
   <td class="col-wf-sector">${r.wfSector}</td>
 
   <td class="col-callsign">
-    <input
-      class="callsign-input"
-      data-slotkey="${r.slotKey}"
-      data-original="${r.callsign}"
-      value="${r.callsign}">
-  </td>
+  <span class="callsign-text">${r.callsign}</span>
+  <button
+    class="callsign-edit-btn"
+    title="Edit callsign"
+    data-slotkey="${r.slotKey}"
+    data-callsign="${r.callsign}"
+    aria-label="Edit callsign">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+     stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 20h9"/>
+  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>
+</svg>
+
+  </button>
+</td>
+
 
   <td class="col-departure">${r.from}</td>
   <td class="col-destination">${r.to}</td>
@@ -5355,13 +5366,43 @@ const simbriefUrl =
 </tr>
 
 
+
   `).join('')}
 </tbody>
 
           </table>
         </div>
       `}
+      <div id="callsignModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+
+  <div class="modal-dialog">
+    <h3>Edit Callsign</h3>
+
+    <label>
+      Callsign
+      <input
+        id="callsignModalInput"
+        type="text"
+        maxlength="10"
+        autocomplete="off"
+      />
+    </label>
+
+    <div id="callsignModalError" class="modal-message error hidden"></div>
+
+    <div class="modal-actions">
+      <button type="button" class="modal-btn modal-btn-cancel">
+        Cancel
+      </button>
+      <button type="button" class="modal-btn modal-btn-submit">
+        Save
+      </button>
+    </div>
+  </div>
+</div>
     </section>
+    
     <script>
   function showBookingError(message) {
     const banner = document.getElementById('bookingErrorBanner');
@@ -5424,6 +5465,99 @@ return true;
     await saveCallsign(e.target);
     e.target.blur();
   });
+</script>
+<script>
+(() => {
+  const modal = document.getElementById('callsignModal');
+  const input = document.getElementById('callsignModalInput');
+  const errorBox = document.getElementById('callsignModalError');
+
+  let activeSlotKey = null;
+  let originalCallsign = null;
+
+  function openModal(slotKey, callsign) {
+    activeSlotKey = slotKey;
+    originalCallsign = callsign;
+
+    input.value = callsign;
+    errorBox.classList.add('hidden');
+    errorBox.textContent = '';
+
+    modal.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+    activeSlotKey = null;
+    originalCallsign = null;
+  }
+
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('.callsign-edit-btn');
+    if (!btn) return;
+
+    openModal(
+      btn.dataset.slotkey,
+      btn.dataset.callsign
+    );
+  });
+
+  modal.querySelector('.modal-btn-cancel').onclick = closeModal;
+  modal.querySelector('.modal-backdrop').onclick = closeModal;
+
+  modal.querySelector('.modal-btn-submit').onclick = async () => {
+    const newCallsign = input.value.trim().toUpperCase();
+
+    if (!newCallsign) {
+      errorBox.textContent = 'Callsign cannot be empty';
+      errorBox.classList.remove('hidden');
+      return;
+    }
+
+    const res = await fetch('/api/tobt/update-callsign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slotKey: activeSlotKey,
+        callsign: newCallsign
+      })
+    });
+
+    if (!res.ok) {
+      let msg = 'Failed to update callsign';
+      try {
+        const err = await res.json();
+        if (err?.error) msg = err.error;
+      } catch {}
+      errorBox.textContent = msg;
+      errorBox.classList.remove('hidden');
+      return;
+    }
+
+    // Success → reload to reflect authoritative state
+    location.reload();
+  };
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) {
+      closeModal();
+    }
+  });
+})();
+
+// Save on Enter key
+document.getElementById('callsignModalInput')
+  .addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document
+        .querySelector('#callsignModal .modal-btn-submit')
+        .click();
+    }
+  });
+
 </script>
 
 <script>

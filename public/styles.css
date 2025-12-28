@@ -3483,3 +3483,24 @@ tr:hover .row-actions {
 .tobt-trash:hover {
   color: #e00;
 }
+
+.callsign-edit-btn {
+  all: unset;                 /* 🔑 removes browser button junk */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  width: 18px;
+  height: 18px;
+
+  color: rgba(255,255,255,0.45);
+  cursor: pointer;
+
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+/* Hover state */
+.callsign-edit-btn:hover {
+  color: var(--accent);       /* your cyan */
+  transform: translateY(-0.5px);
+}
