@@ -240,21 +240,26 @@ function extractAtisLetter(lines = []) {
   for (const line of lines) {
     const upper = line.toUpperCase();
 
+    // 0. ATIS EDDC Q  / ATIS EGLL A
+    let m = upper.match(/\bATIS\s+[A-Z]{4}\s+([A-Z])\b/);
+    if (m) return m[1];
+
     // 1. INFORMATION ROMEO / INFORMATION R
-    let m = upper.match(/\bINFORMATION\s+([A-Z]+)\b/);
+    m = upper.match(/\bINFORMATION\s+([A-Z]+)\b/);
     if (m) return phoneticOrLetter(m[1]);
 
-    // 2. ATIS F / DEP ATIS F / ARR ATIS J
+    // 2. ATIS Q
     m = upper.match(/\bATIS\s+([A-Z])\b/);
     if (m) return m[1];
 
-    // 3. RECEIVING INFO GOLF / INFO CHARLIE (OMAA, OMDB, etc.)
+    // 3. RECEIVING INFO GOLF / INFO CHARLIE
     m = upper.match(/\bINFO\s+([A-Z]+)\b/);
     if (m) return phoneticOrLetter(m[1]);
   }
 
   return '';
 }
+
 
 function phoneticOrLetter(token) {
   if (token.length === 1) return token;
