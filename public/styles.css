@@ -3472,3 +3472,14 @@ tr:hover .row-actions {
 #airportAtisCard > .card:not(:last-child) {
   margin-bottom: 12px;
 }
+.tobt-trash {
+  background: none;
+  border: none;
+  color: #b33;
+  cursor: pointer;
+  margin-left: 6px;
+}
+
+.tobt-trash:hover {
+  color: #e00;
+}

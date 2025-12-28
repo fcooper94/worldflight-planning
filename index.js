@@ -1462,8 +1462,10 @@ const myBookings = cid ? tobtBookingsByCid[cid] : null;
       const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
 
       const mySlotKey = [...myBookings].find(k =>
-        k.startsWith(sectorKey + '|')
-      );
+  k.startsWith(sectorKey + '|') &&
+  tobtBookingsBySlot[k]
+);
+
 
       if (!mySlotKey) {
         return `
@@ -1504,8 +1506,20 @@ const myBookings = cid ? tobtBookingsByCid[cid] : null;
         );
 
         if (mySlotKey) {
-          const booking = tobtBookingsBySlot[mySlotKey];
-          const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+  const booking = tobtBookingsBySlot[mySlotKey];
+
+  // 🔑 FIX: booking may no longer exist
+  if (!booking || !booking.tobtTimeUtc) {
+    return `
+      <a class="tobt-btn book"
+         href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
+        Book Slot
+      </a>
+    `;
+  }
+
+  const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+
 
 const hh = String(h).padStart(2, '0');
 const mm = String(m).padStart(2, '0');
@@ -2683,159 +2697,127 @@ emitToIcao(
   res.json({ success: true });
 });
 
-
 app.post('/api/tobt/book', requireLogin, async (req, res) => {
-
- 
-
-
-  const cid = Number(req.session.user?.data?.cid);
-
-  const controllerCallsign =
-    req.session.user?.data?.controller?.callsign || '';
-
-  const isAtcAssignment =
-    ADMIN_CIDS.includes(cid) ||
-    /_(DEL|RMP|GND|TWR|APP|CTR)$/.test(controllerCallsign);
-
-  // Pilots MUST have a CID
-  if (!isAtcAssignment && !cid) {
-    return res.status(401).json({ error: 'Not logged in' });
-  }
-
-  const { slotKey, callsign } = req.body;
-
-  if (!slotKey || !callsign) {
-    return res.status(400).json({ error: 'Missing parameters' });
-  }
-
-  // Prevent double booking (in-memory)
-  if (tobtBookingsBySlot[slotKey]) {
-    return res.status(409).json({ error: 'Slot already booked' });
-  }
-
-  // sector = FROM-TO|date|depTime
-  const sectorKey = slotKey.split('|').slice(0, 3).join('|');
-  const normalizedCallsign = callsign.trim().toUpperCase();
-
-  // 🔒 Reserved Official Team callsign enforcement
-  const teamCheck = await isReservedTeamCallsign(normalizedCallsign, cid);
-
-  if (teamCheck.reserved && !teamCheck.allowed) {
-    return res.status(403).json({
-      error: `Callsign ${normalizedCallsign} is reserved for an official team.`
-    });
-  }
-
-  for (const existingSlotKey in tobtBookingsBySlot) {
-    const existingSectorKey = existingSlotKey
-      .split('|')
-      .slice(0, 3)
-      .join('|');
-
-    const existing = tobtBookingsBySlot[existingSlotKey];
-
-    if (
-      existingSectorKey === sectorKey &&
-      existing.callsign === normalizedCallsign
-    ) {
-      return res.status(409).json({
-        error:
-          'A booking has already been made with this callsign on ' +
-          sectorKey.split('|')[0]
-      });
-  }
-}
-
-
-
-
-
-  // 🔒 Enforce 1 booking per sector per user
-// sector = FROM-TO|date|depTime
-const slotParts = slotKey.split('|');
-if (slotParts.length === 4) {
-  const sectorKey = slotParts.slice(0, 3).join('|');
-
-  // 🔒 Enforce 1 booking per sector per user (PILOTS ONLY)
-// 🔑 Maintain CID index for ALL pilot-owned bookings (including admins)
-if (cid !== null) {
-  if (!tobtBookingsByCid[cid]) {
-    tobtBookingsByCid[cid] = new Set();
-  }
-  tobtBookingsByCid[cid].add(slotKey);
-}
-
-
-}
-
-
-  // slotKey format: FROM-TO|Date|DepTime|TOBT
-  const parts = slotKey.split('|');
-  if (parts.length !== 4) {
-    return res.status(400).json({ error: 'Invalid slot key format' });
-  }
-
-  const [sectorPart, dateUtc, depTimeUtc, tobtTimeUtc] = parts;
-  const [from, to] = sectorPart.split('-');
-
-  if (!from || !to) {
-    return res.status(400).json({ error: 'Invalid sector format' });
-  }
-
   try {
+    // 1️⃣ Validate input
+    const { slotKey, callsign, manual } = req.body;
+    if (!slotKey || !callsign) {
+      return res.status(400).json({ error: 'Missing parameters' });
+    }
+
+    // 2️⃣ Extract user basics
+    const userData = req.session.user.data;
+    const cid = Number(userData.cid);
+
+    // 3️⃣ Parse slotKey: FROM-TO|Date|DepTime|TOBT
+    const parts = slotKey.split('|');
+    if (parts.length !== 4) {
+      return res.status(400).json({ error: 'Invalid slot key format' });
+    }
+
+    const [sectorPart, dateUtc, depTimeUtc, tobtTimeUtc] = parts;
+    const [from, to] = sectorPart.split('-');
+
+    if (!from || !to) {
+      return res.status(400).json({ error: 'Invalid sector format' });
+    }
+
+    const fromIcao = from.toUpperCase();
+
+    // 4️⃣ Decide assignment mode
+    // manual=true means "ATC/admin assignment" (store cid NULL)
+    // Default is pilot booking (store user's CID)
+    const wantsManual = manual === true;
+
+    // Permission to do a manual assignment
+    const canManualAssign = wantsManual && canEditIcao(userData, fromIcao);
+
+    // Pilot booking must have a CID
+    if (!canManualAssign && !cid) {
+      return res.status(400).json({ error: 'Invalid pilot booking' });
+    }
+
+    // 5️⃣ Prevent double booking
+    if (tobtBookingsBySlot[slotKey]) {
+      return res.status(409).json({ error: 'Slot already booked' });
+    }
+
+    // 6️⃣ Normalize callsign
+    const normalizedCallsign = callsign.trim().toUpperCase();
+
+    // 7️⃣ Reserved team callsign enforcement (applies to both modes)
+    const teamCheck = await isReservedTeamCallsign(normalizedCallsign, cid);
+    if (teamCheck.reserved && !teamCheck.allowed) {
+      return res.status(403).json({
+        error: `Callsign ${normalizedCallsign} is reserved for an official team.`
+      });
+    }
+
+    // 8️⃣ Prevent duplicate sector + callsign
+    const sectorKey = parts.slice(0, 3).join('|');
+
+    for (const existingSlotKey in tobtBookingsBySlot) {
+      const existingSectorKey = existingSlotKey.split('|').slice(0, 3).join('|');
+      const existing = tobtBookingsBySlot[existingSlotKey];
+
+      if (existingSectorKey === sectorKey && existing.callsign === normalizedCallsign) {
+        return res.status(409).json({
+          error:
+            'A booking has already been made with this callsign on ' +
+            sectorKey.split('|')[0]
+        });
+      }
+    }
+
+    // 9️⃣ Persist to DB
+    // Manual assignment => cid NULL
+    // Pilot booking     => cid user's CID
+    const storedCid = canManualAssign ? null : cid;
+
     await prisma.tobtBooking.create({
       data: {
         slotKey,
-        cid,
+        cid: storedCid,
         callsign: normalizedCallsign,
-        from,
-        to,
+        from: fromIcao,
+        to: to.toUpperCase(),
         dateUtc,
         depTimeUtc,
-        tobtTimeUtc,
+        tobtTimeUtc
       }
     });
 
-   } catch (err) {
-    console.error('[TOBT] DB insert failed:', err);
+    // 🔟 Update in-memory cache
+    tobtBookingsBySlot[slotKey] = {
+      slotKey,
+      cid: storedCid,
+      callsign: normalizedCallsign,
+      from: fromIcao,
+      to: to.toUpperCase(),
+      dateUtc,
+      depTimeUtc,
+      tobtTimeUtc
+    };
+
+    // 1️⃣1️⃣ Index My Slots (PILOT ONLY)
+    if (storedCid !== null) {
+      if (!tobtBookingsByCid[storedCid]) {
+        tobtBookingsByCid[storedCid] = new Set();
+      }
+      tobtBookingsByCid[storedCid].add(slotKey);
+    }
+
+    // 1️⃣2️⃣ Notify clients
+    emitToIcao(fromIcao, 'departures:update');
+    emitToIcao(fromIcao, 'unassignedTobtUpdate', buildUnassignedTobtsForICAO(fromIcao));
+
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error('[TOBT] Booking failed:', err);
     return res.status(500).json({ error: 'Failed to book TOBT slot' });
   }
-
-  // ✅ Update in-memory slot index
-tobtBookingsBySlot[slotKey] = {
-  slotKey,
-  cid,
-  callsign: normalizedCallsign,
-  from,
-  to,
-  dateUtc,
-  depTimeUtc,
-  tobtTimeUtc
-};
-
-// 🔑 Maintain CID index (PILOTS ONLY)
-if (!isAtcAssignment && cid !== null) {
-  if (!tobtBookingsByCid[cid]) {
-    tobtBookingsByCid[cid] = new Set();
-  }
-  tobtBookingsByCid[cid].add(slotKey);
-}
-
-
-// 🔄 NOW notify clients to refresh
-emitToIcao(from, 'departures:update');
-
-emitToIcao(
-  from,
-  'unassignedTobtUpdate',
-  buildUnassignedTobtsForICAO(from)
-);
-
-res.json({ success: true });
 });
-
-
 
 
 
@@ -3844,11 +3826,12 @@ if (isEventFlight) {
           <strong>${tobtBooking.tobtTimeUtc}</strong>
           <button
   class="tobt-remove-btn"
-  data-slotkey="${tobtBooking.slotKey}"
   data-callsign="${p.callsign}"
-  title="Remove TOBT"
-  aria-label="Remove TOBT"
+  data-icao="${pageIcao}"
+  title="Remove manual TOBT"
+  aria-label="Remove manual TOBT"
 >
+
   <svg
     viewBox="0 0 24 24"
     width="18"
@@ -4391,25 +4374,29 @@ document.addEventListener('keydown', async e => {
   }
 });
 
+
+
 document.addEventListener('click', async e => {
   const btn = e.target.closest('.tobt-remove-btn');
   if (!btn) return;
   if (!CAN_EDIT) return;
 
-  const slotKey = btn.dataset.slotkey;
   const callsign = btn.dataset.callsign;
+const icao = btn.dataset.icao;
 
-  const ok = confirm(
-    'Remove TOBT for ' + callsign + ' and release slot back to pool?'
-  );
+const ok = confirm(
+  'Remove manual TOBT for ' + callsign + '?'
+);
+
   if (!ok) return;
 
-  const res = await fetch('/api/tobt/remove', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    body: JSON.stringify({ slotKey })
-  });
+  const res = await fetch('/api/tobt/clear-manual', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  credentials: 'same-origin',
+  body: JSON.stringify({ callsign, icao })
+});
+
 
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -4432,7 +4419,8 @@ document.addEventListener('click', async e => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'same-origin',
-    body: JSON.stringify({ slotKey, callsign })
+    body: JSON.stringify({ slotKey, callsign, manual: true })
+
   });
 
   if (!res.ok) {
@@ -4723,6 +4711,59 @@ res.send(
 
 
 });
+
+app.post('/api/tobt/clear-manual', requireLogin, async (req, res) => {
+  const { callsign, icao } = req.body;
+  if (!callsign || !icao) {
+    return res.status(400).json({ error: 'Missing data' });
+  }
+
+  const cs = callsign.trim().toUpperCase();
+  const from = icao.trim().toUpperCase();
+
+  if (!canEditIcao(req.session.user.data, from)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  // 1) Identify matching manual bookings from in-memory cache (source of UI truth)
+  const matchingSlotKeys = Object.keys(tobtBookingsBySlot).filter(k => {
+    const b = tobtBookingsBySlot[k];
+    return b && b.from === from && b.callsign === cs && b.cid === null;
+  });
+
+  if (matchingSlotKeys.length === 0) {
+    // Still attempt DB cleanup in case cache is stale, but tell client nothing was found in memory
+    await prisma.tobtBooking.deleteMany({
+      where: { from, callsign: cs, cid: null }
+    });
+    return res.json({ success: true, removed: 0 });
+  }
+
+  // 2) Delete from DB (authoritative persistence)
+  await prisma.tobtBooking.deleteMany({
+    where: { from, callsign: cs, cid: null }
+  });
+
+  // 3) Remove from in-memory cache so the UI updates
+  for (const slotKey of matchingSlotKeys) {
+    delete tobtBookingsBySlot[slotKey];
+  }
+
+  // 4) Clear TSAT using normalized callsign
+  delete sharedTSAT[cs];
+
+  // 5) Notify clients
+  emitToIcao(
+    from,
+    'unassignedTobtUpdate',
+    buildUnassignedTobtsForICAO(from)
+  );
+  emitToIcao(from, 'departures:update');
+
+  return res.json({ success: true, removed: matchingSlotKeys.length });
+});
+
+
 
 app.post('/api/tobt/remove', async (req, res) => {
   const user = req.session?.user?.data;
