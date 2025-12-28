@@ -2033,14 +2033,36 @@ app.get('/icao/:icao', async (req, res) => {
 
     <!-- RIGHT: Map -->
     <div class="icao-map">
-      <div id="icaoMap" data-icao="${icao}"></div>
+  <div id="icaoMap" data-icao="${icao}"></div>
 
-      <div class="icao-map-footer">
-        <button id="expandMapBtn" class="map-expand-btn">
-          Expand map
-        </button>
-      </div>
-    </div>
+  <div class="map-overlay-controls">
+    <button
+      id="expandMapBtn"
+      class="map-overlay-btn"
+      title="Expand map"
+      aria-label="Expand map"
+    >
+      ⤢
+    </button>
+
+    <button
+      id="toggleMapThemeBtn"
+      class="map-overlay-btn"
+      title="Toggle map theme"
+      aria-label="Toggle map theme"
+    >
+      <svg viewBox="0 0 24 24" width="14" height="14">
+        <circle cx="12" cy="12" r="5" class="sun" />
+        <path
+          d="M21 12.79A9 9 0 1111.21 3
+             7 7 0 0021 12.79z"
+          class="moon"
+        />
+      </svg>
+    </button>
+  </div>
+</div>
+
 
   </div>
 

@@ -3,6 +3,30 @@
    ========================================================= */
 
 /* =========================
+   Map tile layers & theme
+========================= */
+
+const TILE_LAYERS = {
+  dark: {
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    options: { maxZoom: 19 }
+  },
+  light: {
+    url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+    options: { maxZoom: 19 }
+  }
+};
+
+function getMapTheme() {
+  return localStorage.getItem('icaoMapTheme') || 'dark';
+}
+
+function setMapTheme(theme) {
+  localStorage.setItem('icaoMapTheme', theme);
+}
+
+   
+/* =========================
    Geometry helpers
 ========================= */
 
@@ -142,10 +166,17 @@ document.addEventListener('DOMContentLoaded', () => {
         attributionControl: false
       });
 
-      L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        { maxZoom: 19 }
-      ).addTo(map);
+      const theme = getMapTheme();
+
+const baseLayer = L.tileLayer(
+  TILE_LAYERS[theme].url,
+  TILE_LAYERS[theme].options
+).addTo(map);
+
+map._baseTileLayer = baseLayer;
+window._icaoMapInstance = map;
+
+
 
       const bounds = L.latLngBounds();
       bounds.extend([airport.lat, airport.lon]);
@@ -191,6 +222,9 @@ document.addEventListener('DOMContentLoaded', () => {
    Modal map (unchanged)
 ========================= */
 
+document.documentElement.dataset.mapTheme = getMapTheme();
+
+
 let modalMap = null;
 
 document.getElementById('expandMapBtn')?.addEventListener('click', () => {
@@ -204,10 +238,16 @@ document.getElementById('expandMapBtn')?.addEventListener('click', () => {
         attributionControl: false
       });
 
-      L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        { maxZoom: 19 }
-      ).addTo(modalMap);
+      const theme = getMapTheme();
+
+const baseLayer = L.tileLayer(
+  TILE_LAYERS[theme].url,
+  TILE_LAYERS[theme].options
+).addTo(modalMap);
+
+modalMap._baseTileLayer = baseLayer;
+window._modalMapInstance = modalMap;
+
     } else {
       modalMap.eachLayer(layer => {
         if (layer instanceof L.Marker || layer instanceof L.CircleMarker) {
@@ -278,4 +318,30 @@ document.addEventListener('click', e => {
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeMapModal();
+});
+document.getElementById('toggleMapThemeBtn')?.addEventListener('click', () => {
+  const newTheme = getMapTheme() === 'dark' ? 'light' : 'dark';
+  setMapTheme(newTheme);
+
+  document.documentElement.dataset.mapTheme = newTheme;
+
+  if (window._icaoMapInstance?._baseTileLayer) {
+    const map = window._icaoMapInstance;
+    map.removeLayer(map._baseTileLayer);
+
+    map._baseTileLayer = L.tileLayer(
+      TILE_LAYERS[newTheme].url,
+      TILE_LAYERS[newTheme].options
+    ).addTo(map);
+  }
+
+  if (window._modalMapInstance?._baseTileLayer) {
+    const map = window._modalMapInstance;
+    map.removeLayer(map._baseTileLayer);
+
+    map._baseTileLayer = L.tileLayer(
+      TILE_LAYERS[newTheme].url,
+      TILE_LAYERS[newTheme].options
+    ).addTo(map);
+  }
 });

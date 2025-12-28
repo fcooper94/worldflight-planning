@@ -3504,3 +3504,56 @@ tr:hover .row-actions {
   color: var(--accent);       /* your cyan */
   transform: translateY(-0.5px);
 }
+.icao-map {
+  position: relative;
+}
+
+.map-overlay-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  z-index: 600;
+}
+
+.map-overlay-btn {
+  width: 32px;
+  height: 32px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(0,0,0,0.6);
+
+  color: rgba(255,255,255,0.85);
+  cursor: pointer;
+}
+
+.map-overlay-btn:hover {
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+}
+
+.map-overlay-btn svg {
+  pointer-events: none;
+}
+
+/* Sun / moon visibility */
+.map-overlay-btn .moon {
+  display: none;
+}
+
+html[data-map-theme="light"] .map-overlay-btn .sun {
+  display: none;
+}
+
+html[data-map-theme="light"] .map-overlay-btn .moon {
+  display: block;
+}
