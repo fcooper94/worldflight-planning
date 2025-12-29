@@ -1109,6 +1109,13 @@ function normalizeRoute(route, adminRoute = null) {
 }
 
 
+function normalizeRoute(route) {
+  if (!route) return '';
+  return route
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 
 /* ===== WF STATUS ===== */
@@ -1133,6 +1140,66 @@ function getWorldFlightStatus(pilot) {
       adminTokens.join(' ') === liveTokens.join(' ')
   };
 }
+
+function resolveWfStatusForPilot(pilot) {
+  if (!pilot?.flight_plan) {
+    return 'NON-EVENT';
+  }
+
+  const wf = getWorldFlightStatus(pilot);
+
+  if (!wf.isWF) {
+    return 'NON-EVENT';
+  }
+
+  const booking = getTobtBookingForCallsign(
+    pilot.callsign,
+    pilot.flight_plan.departure
+  );
+
+  return booking ? 'WF – BOOKED' : 'WF – NOT BOOKED';
+}
+
+app.get('/api/atc/flight/:callsign', (req, res) => {
+  const callsign = req.params.callsign.toUpperCase();
+
+  const pilot = cachedPilots.find(p => p.callsign === callsign);
+
+  if (!pilot || !pilot.flight_plan) {
+    return res.status(404).json({ error: 'Flight not found' });
+  }
+
+  const dep = pilot.flight_plan.departure || '—';
+  const dest = pilot.flight_plan.arrival || '—';
+
+  // Admin ATC route (authoritative)
+  const adminLeg = adminSheetCache.find(
+    r => r.from === dep && r.to === dest
+  );
+
+  const route =
+    adminLeg?.atc_route ||
+    pilot.flight_plan.route ||
+    '—';
+
+  const booking = getTobtBookingForCallsign(callsign, dep);
+
+  res.json({
+    callsign,
+    wfStatus: resolveWfStatusForPilot(pilot),
+    dep,
+    dest,
+    aircraft:
+      pilot.flight_plan.aircraft_short ||
+      pilot.flight_plan.aircraft ||
+      '—',
+    equipment: pilot.flight_plan.equipment || '—',
+    tobt: booking?.tobtTimeUtc || '—',
+    tsat: sharedTSAT[callsign]?.tsat || '—',
+    route
+  });
+});
+
 
 app.get('/api/icao/:icao/scenery-links', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
@@ -3989,7 +4056,13 @@ let primaryStatusHtml = '';
 }
   </td>
 
-  <td>${p.callsign}</td>
+  <td class="callsign">
+  <span class="callsign-link" data-callsign="${p.callsign}">
+    ${p.callsign}
+  </span>
+</td>
+
+
   <td>${p.flight_plan.aircraft_faa || 'N/A'}</td>
   <td>${p.flight_plan.arrival || 'N/A'}</td>
 
@@ -4405,6 +4478,28 @@ document.addEventListener('change', function (e) {
   }
 });
 
+document.addEventListener('click', e => {
+
+  // 1️⃣ Ignore all interactive controls
+  if (
+    e.target.closest('button') ||
+    e.target.closest('select') ||
+    e.target.closest('option') ||
+    e.target.closest('input') ||
+    e.target.closest('textarea') ||
+    e.target.closest('.action-btn') ||
+    e.target.closest('.tobt-select') ||   // if you have a class
+    e.target.closest('.toggle')
+  ) {
+    return;
+  }
+
+  // 2️⃣ Only react to explicit callsign click
+  const el = e.target.closest('[data-callsign]');
+  if (!el) return;
+
+  openFlightPlanModal(el.dataset.callsign);
+});
 
 
 document.addEventListener('keydown', async e => {
@@ -4427,11 +4522,13 @@ document.addEventListener('click', async e => {
   const callsign = btn.dataset.callsign;
 const icao = btn.dataset.icao;
 
-const ok = confirm(
-  'Remove manual TOBT for ' + callsign + '?'
-);
+const ok = await openConfirmModal({
+  title: 'Remove Manual TOBT',
+  message: 'Remove manual TOBT for ' + callsign + '?'
+});
 
-  if (!ok) return;
+if (!ok) return;
+
 
   const res = await fetch('/api/tobt/clear-manual', {
   method: 'POST',
