@@ -2911,15 +2911,12 @@ tr:hover .row-actions {
   color: #2aff9e;
 }
 .icao-top-row.three-cols {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 32px;
-  align-items: start;
+ display: grid;
+  grid-template-columns: 1fr 1fr 1fr; /* 33% each */
+  gap: 24px;
+  align-items: stretch;
 }
 
-.icao-top-row.three-cols > .icao-deps {
-  grid-column: span 2;
-}
 
 /* Critical: allow grid children to shrink */
 .icao-top-row.three-cols > div {
@@ -3556,4 +3553,23 @@ html[data-map-theme="light"] .map-overlay-btn .sun {
 
 html[data-map-theme="light"] .map-overlay-btn .moon {
   display: block;
+}
+.departures-table--compact th:nth-child(2),
+.departures-table--compact td:nth-child(2) {
+  width: 90px;
+  font-size: 13px;
+}
+
+.departures-table--compact th:nth-child(3),
+.departures-table--compact td:nth-child(3) {
+  width: 60px;
+  font-size: 12px;
+  text-align: center;
+}
+
+.departures-table--compact th:nth-child(4),
+.departures-table--compact td:nth-child(4) {
+  width: 70px;
+  font-size: 12px;
+  text-align: center;
 }

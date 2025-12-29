@@ -2007,7 +2007,7 @@ app.get('/icao/:icao', async (req, res) => {
     <!-- LEFT: Upcoming Departures -->
     <div class="icao-deps">
   <div class="deps-scroll">
-    <table class="departures-table">
+    <table class="departures-table departures-table--compact">
       <thead>
         <tr>
           <th class="col-sts">STS</th>
