@@ -5,6 +5,7 @@
 /* =========================
    Map tile layers & theme
 ========================= */
+let modalThemeBound = false;
 
 const TILE_LAYERS = {
   dark: {
@@ -240,6 +241,14 @@ document.getElementById('expandMapBtn')?.addEventListener('click', () => {
 
       const theme = getMapTheme();
 
+     const modalToggle = document.getElementById('toggleMapThemeBtnModal');
+if (modalToggle && !modalThemeBound) {
+  modalToggle.addEventListener('click', toggleMapTheme);
+  modalThemeBound = true;
+}
+
+
+
 const baseLayer = L.tileLayer(
   TILE_LAYERS[theme].url,
   TILE_LAYERS[theme].options
@@ -319,7 +328,9 @@ document.addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeMapModal();
 });
-document.getElementById('toggleMapThemeBtn')?.addEventListener('click', () => {
+
+
+function toggleMapTheme() {
   const newTheme = getMapTheme() === 'dark' ? 'light' : 'dark';
   setMapTheme(newTheme);
 
@@ -328,7 +339,6 @@ document.getElementById('toggleMapThemeBtn')?.addEventListener('click', () => {
   if (window._icaoMapInstance?._baseTileLayer) {
     const map = window._icaoMapInstance;
     map.removeLayer(map._baseTileLayer);
-
     map._baseTileLayer = L.tileLayer(
       TILE_LAYERS[newTheme].url,
       TILE_LAYERS[newTheme].options
@@ -338,10 +348,13 @@ document.getElementById('toggleMapThemeBtn')?.addEventListener('click', () => {
   if (window._modalMapInstance?._baseTileLayer) {
     const map = window._modalMapInstance;
     map.removeLayer(map._baseTileLayer);
-
     map._baseTileLayer = L.tileLayer(
       TILE_LAYERS[newTheme].url,
       TILE_LAYERS[newTheme].options
     ).addTo(map);
   }
-});
+}
+
+document
+  .getElementById('toggleMapThemeBtn')
+  ?.addEventListener('click', toggleMapTheme);

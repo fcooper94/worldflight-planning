@@ -2910,6 +2910,11 @@ tr:hover .row-actions {
   font-size: 12px;
   color: #2aff9e;
 }
+/* Runway labels – light map */
+html[data-map-theme="light"] .runway-label > div {
+  color: #14532d; /* dark aviation green */
+}
+
 .icao-top-row.three-cols {
  display: grid;
   grid-template-columns: 1fr 1fr 1fr; /* 33% each */
@@ -3542,6 +3547,13 @@ tr:hover .row-actions {
   pointer-events: none;
 }
 
+.map-overlay-btn .sun,
+.map-overlay-btn .moon {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
 /* Sun / moon visibility */
 .map-overlay-btn .moon {
   display: none;
@@ -3554,6 +3566,7 @@ html[data-map-theme="light"] .map-overlay-btn .sun {
 html[data-map-theme="light"] .map-overlay-btn .moon {
   display: block;
 }
+
 .departures-table--compact th:nth-child(2),
 .departures-table--compact td:nth-child(2) {
   width: 90px;
@@ -3572,4 +3585,30 @@ html[data-map-theme="light"] .map-overlay-btn .moon {
   width: 70px;
   font-size: 12px;
   text-align: center;
+}
+.map-modal-panel {
+  display: flex;
+  flex-direction: column;
+  height: 90vh;
+}
+
+.map-modal-panel .icao-map {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+#mapModalMap {
+  width: 100%;
+  height: 100%;
+}
+/* Aircraft markers – dark map default */
+.ac-icon,
+.ac-label {
+  color: rgba(255, 255, 255, 0.9);
+}
+/* Aircraft markers – light map */
+html[data-map-theme="light"] .ac-icon,
+html[data-map-theme="light"] .ac-label {
+  color: rgba(0, 0, 0, 0.85);
 }
