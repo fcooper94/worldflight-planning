@@ -1931,7 +1931,7 @@ app.post('/admin/api/scenery/:id/reject', requireAdmin, async (req, res) => {
 app.get('/admin/documentation-access', requireAdmin, (req, res) => {
   const content = `
 <section class="card card-narrow">
-  <h2>Documentation Access</h2>
+  <h2>Manage User Access</h2>
 
   <form id="docAccessSearch">
     <label>
@@ -2263,8 +2263,11 @@ app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
 app.get('/icao/:icao', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
+const isLoggedIn = Boolean(req.session?.user?.data);
+
 
   const content = `
+ 
   <section class="card">
 
   <div class="icao-top-row three-cols">
@@ -2379,14 +2382,19 @@ app.get('/icao/:icao', async (req, res) => {
   </table>
 </section>
 
+<script>
+  window.IS_LOGGED_IN = ${req.session?.user?.data ? 'true' : 'false'};
+</script>
 
 <section class="card">
   <h2>Available Scenery</h2>
-  <div id="airportScenery"></div>
+  <div id="availableScenery"></div>
   <button id="openSceneryModal" class="action-btn">
   ➕ Submit scenery for this airport
 </button>
-
+<div id="sceneryLoginHint" class="login-hint hidden">
+  Log in to submit scenery for this airport
+</div>
 </section>
 
 <div id="sceneryModal" class="modal hidden">
@@ -2452,6 +2460,8 @@ app.get('/icao/:icao', async (req, res) => {
           id="submitSceneryBtn">
           Submit scenery
         </button>
+        
+
       </div>
     </form>
   </div>
@@ -2501,55 +2511,73 @@ document.addEventListener('DOMContentLoaded', function () {
   var submitBtn = document.getElementById('submitSceneryBtn');
   var msg       = document.getElementById('sceneryFormMessage');
 
-  if (openBtn && modal && form) {
-    openBtn.addEventListener('click', function () {
-      document.getElementById('sceneryIcao').textContent = icao;
-      document.getElementById('sceneryIcaoInput').value = icao;
-      modal.classList.remove('hidden');
-    });
+ if (openBtn && modal && form) {
+  openBtn.addEventListener('click', function () {
+    if (!window.IS_LOGGED_IN) {
+      window.location.href =
+  '/auth/login?redirect=' + encodeURIComponent(window.location.pathname);
 
-    function closeModal() {
-      modal.classList.add('hidden');
-      form.reset();
-      msg.classList.add('hidden');
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Submit scenery';
+      return;
     }
 
-    if (closeBtn) closeBtn.addEventListener('click', closeModal);
+    document.getElementById('sceneryIcao').textContent = icao;
+    document.getElementById('sceneryIcaoInput').value = icao;
+    modal.classList.remove('hidden');
+  });
 
-    var backdrop = modal.querySelector('.modal-backdrop');
-    if (backdrop) backdrop.addEventListener('click', closeModal);
-
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-
-      submitBtn.disabled = true;
-      submitBtn.textContent = 'Submitting';
-      msg.classList.add('hidden');
-      msg.textContent = '';
-
-      fetch('/api/scenery/submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          Object.fromEntries(new FormData(form).entries())
-        )
-      })
-      .then(function (res) {
-        if (!res.ok) throw new Error();
-        msg.textContent = 'Scenery submitted for approval';
-        msg.className = 'modal-message success';
-        setTimeout(closeModal, 1500);
-      })
-      .catch(function () {
-        msg.textContent = 'Failed to submit scenery. Please try again.';
-        msg.className = 'modal-message error';
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Submit scenery';
-      });
-    });
+  function closeModal() {
+    modal.classList.add('hidden');
+    form.reset();
+    msg.classList.add('hidden');
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Submit scenery';
   }
+
+  if (openBtn && !window.IS_LOGGED_IN) {
+  openBtn.disabled = true;
+  openBtn.classList.add('btn-disabled-login');
+  openBtn.setAttribute(
+    'title',
+    'You must be logged in to submit scenery'
+  );
+}
+
+
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+
+  var backdrop = modal.querySelector('.modal-backdrop');
+  if (backdrop) backdrop.addEventListener('click', closeModal);
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting';
+    msg.classList.add('hidden');
+    msg.textContent = '';
+
+    fetch('/api/scenery/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        Object.fromEntries(new FormData(form).entries())
+      )
+    })
+    .then(function (res) {
+      if (!res.ok) throw new Error();
+      msg.textContent = 'Scenery submitted for approval';
+      msg.className = 'modal-message success';
+      setTimeout(closeModal, 1500);
+    })
+    .catch(function () {
+      msg.textContent = 'Failed to submit scenery. Please try again.';
+      msg.className = 'modal-message error';
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit scenery';
+    });
+  });
+}
+
 });
 
 /* ================= FUNCTIONS ================= */
@@ -2693,6 +2721,71 @@ function loadAirportDocs(icao) {
 }
 
 </script>
+<script>
+const hint = document.getElementById('sceneryLoginHint');
+if (!window.IS_LOGGED_IN && hint) {
+  hint.classList.remove('hidden');
+}
+</script>
+<script>
+(function () {
+  const icao = "${icao}";
+  const container = document.getElementById('availableScenery');
+
+  if (!container) return;
+
+  fetch('/api/icao/' + icao + '/scenery-links')
+    .then(res => res.json())
+    .then(data => {
+      const rows = []
+        .concat((data.msfs || []).map(r => Object.assign({}, r, { sim: 'MSFS' })))
+        .concat((data.xplane || []).map(r => Object.assign({}, r, { sim: 'X-Plane' })))
+        .concat((data.p3d || []).map(r => Object.assign({}, r, { sim: 'P3D' })));
+
+      if (!rows.length) {
+        container.innerHTML =
+          '<div class="empty">No scenery available</div>';
+        return;
+      }
+
+      container.innerHTML =
+        '<table class="admin-table scenery-table">' +
+          '<thead>' +
+            '<tr>' +
+              '<th>Sim</th>' +
+              '<th>Name</th>' +
+              '<th>Developer</th>' +
+              '<th>Store</th>' +
+              '<th>Type</th>' +
+            '</tr>' +
+          '</thead>' +
+          '<tbody>' +
+            rows.map(r =>
+  '<tr>' +
+    '<td><span class="sim-pill">' + r.sim + '</span></td>' +
+    '<td><a href="' + r.url + '" target="_blank" rel="noopener">' +
+      r.name +
+    '</a></td>' +
+    '<td>' + (r.developer || '-') + '</td>' +
+    '<td>' + (r.store || '-') + '</td>' +
+    '<td>' +
+      '<span class="type-pill ' + r.type.toLowerCase() + '">' +
+        r.type +
+      '</span>' +
+    '</td>' +
+  '</tr>'
+).join('')
+ +
+          '</tbody>' +
+        '</table>';
+    })
+    .catch(() => {
+      container.innerHTML =
+        '<div class="empty">Failed to load scenery</div>';
+    });
+})();
+</script>
+
 
 
 
@@ -3662,6 +3755,13 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
   }));
 });
 
+app.get('/api/admin/scenery/pending-count', requireAdmin, async (req, res) => {
+  const count = await prisma.airportScenery.count({
+    where: { approved: false }
+  });
+
+  res.json({ count });
+});
 
 
 // Create Official Team

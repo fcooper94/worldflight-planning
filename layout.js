@@ -78,13 +78,17 @@ export default function renderLayout({
         <span class="icon">👥</span>
         <span class="label">Official Teams / Affiliates</span>
       </a>
-      <a href="/admin/scenery" class="nav-item">
+      <a href="/admin/scenery" class="nav-item" id="sceneryNavItem">
   <span class="icon">🗺️</span>
-  <span class="label">Scenery Submissions</span>
+  <span class="label">
+    Scenery Submissions
+    <span id="sceneryBadge" class="nav-badge hidden"></span>
+  </span>
 </a>
+
 <a href="/admin/documentation-access" class="nav-item">
   <span class="icon">📄</span>
-  <span class="label">Documentation Access</span>
+  <span class="label">Manage User Access</span>
 </a>
 
 
@@ -756,6 +760,28 @@ document.addEventListener('click', (e) => {
     modal.classList.add('hidden');
   }
 });
+</script>
+<script>
+(async function updateSceneryBadge() {
+  try {
+    const res = await fetch('/api/admin/scenery/pending-count');
+    if (!res.ok) return;
+
+    const { count } = await res.json();
+    const badge = document.getElementById('sceneryBadge');
+
+    if (!badge) return;
+
+    if (count > 0) {
+      badge.textContent = count;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  } catch (err) {
+    console.error('Failed to load scenery badge', err);
+  }
+})();
 </script>
 
 

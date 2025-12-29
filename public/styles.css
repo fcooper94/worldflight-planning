@@ -3814,3 +3814,114 @@ html[data-map-theme="light"] .ac-label {
 .hidden {
   display: none;
 }
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #e53935;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.nav-badge.hidden {
+  display: none;
+}
+/* ===== AVAILABLE SCENERY ===== */
+
+.scenery-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+}
+
+.scenery-table thead th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: #9fb3c8;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.scenery-table tbody td {
+  padding: 12px;
+  font-size: 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  color: #e6edf3;
+  vertical-align: middle;
+}
+
+.scenery-table tbody tr:hover {
+  background: rgba(255,255,255,0.03);
+}
+
+.scenery-table a {
+  color: #6cb6ff;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.scenery-table a:hover {
+  text-decoration: underline;
+}
+
+/* Simulator badge */
+.scenery-table td:first-child {
+  font-weight: 600;
+  color: #7ee787;
+}
+
+/* Type badge (Freeware / Payware) */
+.scenery-table td:last-child {
+  font-weight: 600;
+}
+
+.scenery-table td:last-child:contains("Freeware") {
+  color: #3fb950;
+}
+
+.scenery-table td:last-child:contains("Payware") {
+  color: #d29922;
+}
+.sim-pill {
+  background: rgba(126,231,135,0.15);
+  color: #7ee787;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.type-pill.freeware {
+  background: rgba(63,185,80,0.15);
+  color: #3fb950;
+}
+
+.type-pill.payware {
+  background: rgba(210,153,34,0.15);
+  color: #d29922;
+}
+/* Disabled submit scenery button (login required) */
+.btn-disabled-login {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: auto; /* allows tooltip */
+}
+
+.btn-disabled-login:hover {
+  opacity: 0.65;
+}
+.login-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #9fb3c8;
+}
