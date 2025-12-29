@@ -551,10 +551,38 @@ window.location.href = '/icao/' + icao;
 
   <!-- HEADER -->
   <div class="fp-strip-header">
+  <div class="fp-callsign-group">
     <span class="fp-callsign" id="fpCallsign"></span>
-    <span class="fp-aircraft" id="fpAircraft"></span>
-    <span class="fp-status" id="fpStatus"></span>
+    <span
+  id="fpRouteWarning"
+  class="fp-route-warning hidden"
+  title="Filed route does not match WorldFlight ATC route"
+  aria-label="Route mismatch warning"
+>
+  <svg
+    class="fp-warning-icon"
+    viewBox="0 0 24 24"
+    width="16"
+    height="16"
+    role="img"
+    aria-hidden="true"
+  >
+    <path
+      d="M12 2L1 22h22L12 2z"
+      fill="currentColor"
+    />
+    <rect x="11" y="8" width="2" height="7" fill="#0b1220" />
+    <rect x="11" y="17" width="2" height="2" fill="#0b1220" />
+  </svg>
+</span>
+
   </div>
+
+  <span class="fp-aircraft" id="fpAircraft"></span>
+  <span class="fp-status" id="fpStatus"></span>
+</div>
+
+
 
   <!-- NAVIGATION / FILING -->
   <div class="fp-strip-row">
@@ -628,7 +656,7 @@ window.location.href = '/icao/' + icao;
     <pre class="fp-route" id="fpRouteWf"></pre>
 
     <div class="fp-route-warning">
-      ROUTE CHECK — FILED ≠ WF
+      WF ROUTE VALIDATION FAILED
     </div>
   </div>
 
@@ -642,7 +670,7 @@ window.location.href = '/icao/' + icao;
   </div>
 </div>
 <script>
-  async function openFlightPlanModal(callsign) {
+async function openFlightPlanModal(callsign) {
   const res = await fetch('/api/atc/flight/' + callsign);
   if (!res.ok) return;
 
@@ -650,59 +678,53 @@ window.location.href = '/icao/' + icao;
 
   document.getElementById('fpCallsign').textContent = d.callsign;
   document.getElementById('fpStatus').textContent = d.wfStatus;
-  document.getElementById('fpAircraft').textContent = d.aircraft;
+  document.getElementById('fpAircraft').textContent = d.aircraft || '—';
 
-var tas = Number(d.filedTas);
-
-document.getElementById('fpTasGs').textContent =
-  Number.isFinite(tas) && tas > 0
-    ? tas + ' / —'
-    : '—';
-
+  const tas = Number(d.filedTas);
+  document.getElementById('fpTasGs').textContent =
+    Number.isFinite(tas) && tas > 0 ? tas + ' / —' : '—';
 
   document.getElementById('fpDep').textContent = d.dep;
   document.getElementById('fpDest').textContent = d.dest;
-
   document.getElementById('fpCruise').textContent = d.cruiseLevel;
-  
 
   document.getElementById('fpPilot').textContent = d.pilotName;
   document.getElementById('fpCid').textContent = d.pilotCid;
 
-
   document.getElementById('fpTobt').textContent = d.tobt;
   document.getElementById('fpTsat').textContent = d.tsat;
 
-  document.getElementById('fpRules').textContent =
-  d.flightRules || '—';
-
-document.getElementById('fpReg').textContent = d.registration || '—';
-document.getElementById('fpType').textContent = d.aircraftType || '—';
-document.getElementById('fpWake').textContent = d.wake || '—';
-
+  document.getElementById('fpRules').textContent = d.flightRules || '—';
+  document.getElementById('fpReg').textContent = d.registration || '—';
+  document.getElementById('fpType').textContent = d.aircraftType || '—';
+  document.getElementById('fpWake').textContent = d.wake || '—';
 
   const normalBlock = document.getElementById('fpRouteNormalBlock');
   const filedBlock = document.getElementById('fpRouteFiledBlock');
+  const warningIcon = document.getElementById('fpRouteWarning');
 
   if (d.wfStatus === 'WF – ROUTE') {
     normalBlock.classList.add('hidden');
     filedBlock.classList.remove('hidden');
+    warningIcon.classList.remove('hidden');
 
     document.getElementById('fpRouteFiled').textContent = d.filedRoute;
     document.getElementById('fpRouteWf').textContent = d.wfRoute;
   } else {
     filedBlock.classList.add('hidden');
     normalBlock.classList.remove('hidden');
+    warningIcon.classList.add('hidden');
 
     document.getElementById('fpRoute').textContent = d.route;
   }
 
+  // ✅ THIS MUST BE INSIDE THE FUNCTION
   document
     .getElementById('flightPlanModal')
     .classList.remove('hidden');
 }
-
 </script>
+
 <script>
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('#closeFpModal');

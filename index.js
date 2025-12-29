@@ -1130,7 +1130,9 @@ function getWorldFlightStatus(pilot) {
   return {
     isWF: true,
     routeMatch:
-      adminTokens.join(' ') === liveTokens.join(' ')
+      adminTokens.join(' ') === liveTokens.join(' '),
+    routeMismatch:
+      adminTokens.join(' ') !== liveTokens.join(' ')
   };
 }
 
@@ -1244,6 +1246,10 @@ app.get('/api/atc/flight/:callsign', (req, res) => {
 res.json({
   callsign,
   wfStatus: wfResult.status,
+  routeMismatch: wfResult.status === 'WF – ROUTE',
+filedRoute: wfResult.filedRoute || '',
+wfRoute: wfResult.wfRoute || '',
+
 
   dep,
   dest,
