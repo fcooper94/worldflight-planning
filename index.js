@@ -442,7 +442,7 @@ function buildRecentlyStartedForICAO(icao) {
       callsign,
       startedAt: entry.startedAt
     }))
-    .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
 /* ===== UPCOMING TSAT HELPER ===== */
