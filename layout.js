@@ -655,9 +655,13 @@ window.location.href = '/icao/' + icao;
     <div class="fp-route-label">WF EVENT ROUTE (EXPECTED)</div>
     <pre class="fp-route" id="fpRouteWf"></pre>
 
-    <div class="fp-route-warning">
-      WF ROUTE VALIDATION FAILED
-    </div>
+    <div class="fp-route-alert">
+  <span class="fp-route-alert-icon">⚠</span>
+  <span class="fp-route-alert-text">
+    WF ROUTE VALIDATION FAILED
+  </span>
+</div>
+
   </div>
 
   <!-- ACTIONS -->
@@ -694,7 +698,17 @@ async function openFlightPlanModal(callsign) {
   document.getElementById('fpTobt').textContent = d.tobt;
   document.getElementById('fpTsat').textContent = d.tsat;
 
-  document.getElementById('fpRules').textContent = d.flightRules || '—';
+  const rulesMap = {
+  I: 'IFR',
+  V: 'VFR',
+  S: 'SVFR'
+};
+
+const ruleCode = (d.flightRules || '').toUpperCase();
+
+document.getElementById('fpRules').textContent =
+  rulesMap[ruleCode] || ruleCode || '—';
+
   document.getElementById('fpReg').textContent = d.registration || '—';
   document.getElementById('fpType').textContent = d.aircraftType || '—';
   document.getElementById('fpWake').textContent = d.wake || '—';

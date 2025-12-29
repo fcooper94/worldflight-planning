@@ -1131,7 +1131,12 @@ function normalizeRoute(route, adminRoute = null) {
   return tokens;
 }
 
-function decorateRouteForDisplay(route, mismatchToken = null) {
+function decorateRouteForDisplay(route, mismatchToken = null, options = {}) {
+  const { muteProcedural = true } = options;
+
+  const LATLON_REGEX = /^\d{2,4}[NS]\d{3,5}[EW]$/;
+
+
   if (!route) return '';
 
   const tokens = route
@@ -1141,25 +1146,26 @@ function decorateRouteForDisplay(route, mismatchToken = null) {
 
   return tokens
     .map(t => {
-      // 🔴 ABSOLUTE PRIORITY: mismatch token
+      // 🔴 mismatch always wins
       if (mismatchToken && t === mismatchToken) {
         return `<span class="route-error">${t}</span>`;
       }
 
-      // Greyed procedural elements ONLY if not mismatching
-      if (/\/\d+[A-Z]?$/.test(t)) {
+      if (muteProcedural && /\/\d+[A-Z]?$/.test(t)) {
         return `<span class="route-muted">${t}</span>`;
       }
 
-      if (/\d[A-Z]$/.test(t)) {
-        return `<span class="route-muted">${t}</span>`;
-      }
+      if (muteProcedural && /\d[A-Z]$/.test(t) && !LATLON_REGEX.test(t)) {
+  return `<span class="route-muted">${t}</span>`;
+}
 
-      if (/^[A-Z]{4}$/.test(t)) {
-        return `<span class="route-muted">${t}</span>`;
-      }
 
-      if (t === 'DCT') {
+      if (muteProcedural && /^[A-Z]{4}$/.test(t) && !LATLON_REGEX.test(t)) {
+  return `<span class="route-muted">${t}</span>`;
+}
+
+
+      if (muteProcedural && t === 'DCT') {
         return `<span class="route-muted">DCT</span>`;
       }
 
@@ -1167,6 +1173,7 @@ function decorateRouteForDisplay(route, mismatchToken = null) {
     })
     .join(' ');
 }
+
 
 
 
@@ -1347,11 +1354,19 @@ filedTas: pilot.flight_plan.true_airspeed || null,
   route: pilot.flight_plan.route || '—',
 
   filedRoute: wfResult?.filedRoute
-  ? decorateRouteForDisplay(wfResult.filedRoute, mismatchToken)
+  ? decorateRouteForDisplay(
+      wfResult.filedRoute,
+      mismatchToken,
+      { muteProcedural: true }   // FILED: context muted
+    )
   : '',
 
 wfRoute: wfResult?.wfRoute
-  ? decorateRouteForDisplay(wfResult.wfRoute)
+  ? decorateRouteForDisplay(
+      wfResult.wfRoute,
+      null,
+      { muteProcedural: false }  // WF: everything is relevant
+    )
   : '',
 
 
