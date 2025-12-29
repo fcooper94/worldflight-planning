@@ -5,6 +5,7 @@
   "scripts": {
     "postinstall": "npx prisma generate",
     "start": "npx prisma migrate deploy && node index.js"
+
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
