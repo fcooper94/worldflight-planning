@@ -325,48 +325,38 @@ function requireLogin(req, res, next) {
 function isAirportController(cs, icao) {
   if (!cs || !icao) return false;
 
-  const callsign = cs.toUpperCase().trim();
-  const airport = icao.toUpperCase();
+  // 1️⃣ Preserve the original callsign if you need it later
+  const rawCallsign = cs.toUpperCase().trim();
 
+  // 2️⃣ Normalise relief markers: EGCC_N__TWR → EGCC_N_TWR
+  const callsign = rawCallsign.replace(/__+/g, '_');
+
+  const airport = icao.toUpperCase();
   const prefixes = [];
 
-  // 🇦🇺 Australia: Yxxx → last 2 letters
+  // 🇦🇺 Australia: YSSY → SY
   if (airport.startsWith('Y') && airport.length === 4) {
-    prefixes.push(airport.slice(2)); // YSSY → SY
+    prefixes.push(airport.slice(2));
   }
 
-  // 🇺🇸 USA: Kxxx → xxx
+  // 🇺🇸 USA: KJFK → JFK
   if (airport.startsWith('K') && airport.length === 4) {
-    prefixes.push(airport.slice(1)); // KJFK → JFK
+    prefixes.push(airport.slice(1));
   }
 
-  // ICAO-standard fallback
+  // ICAO fallback
   prefixes.push(airport);
 
-  const roles = [
-    'ATIS',
-    'DEL',
-    'GND',
-    'TWR',
-    'APP',
-    'DEP'
-  ];
+  const roles = ['ATIS', 'DEL', 'GND', 'TWR', 'APP', 'DEP'];
 
   return prefixes.some(prefix =>
-    roles.some(role => {
-      // Accept:
-      // SY_GND
-      // SY-W_GND
-      // SY-XXX_GND
-      // EGLL_TWR
-      const regex = new RegExp(
-        `^${prefix}(?:-[A-Z0-9]+)?_${role}$`
-      );
-      return regex.test(callsign);
-    })
+    roles.some(role =>
+      new RegExp(
+        `^${prefix}(?:_[A-Z0-9]+)?_${role}$`
+      ).test(callsign)
+    )
   );
 }
-
 
 
 
@@ -1011,8 +1001,6 @@ if (icaoFromQuery) {
 
   io.emit('depFlowUpdated', { sector: key, value: rate });
 });
-
-
 
   /* =========================================================
      CONNECTED USERS
