@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "postinstall": "npx prisma generate",
-    "start": "npx prisma migrate deploy && node index.js"
+    "postinstall": "node ./node_modules/prisma/build/index.js generate",
+    "start": "node ./node_modules/prisma/build/index.js migrate deploy && node index.js"
   },
+
   "dependencies": {
     "@libsql/client": "^0.15.15",
     "@prisma/adapter-libsql": "^7.1.0",
