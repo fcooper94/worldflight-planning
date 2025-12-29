@@ -1109,13 +1109,6 @@ function normalizeRoute(route, adminRoute = null) {
 }
 
 
-function normalizeRoute(route) {
-  if (!route) return '';
-  return route
-    .toUpperCase()
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 
 /* ===== WF STATUS ===== */
@@ -1143,22 +1136,83 @@ function getWorldFlightStatus(pilot) {
 
 function resolveWfStatusForPilot(pilot) {
   if (!pilot?.flight_plan) {
-    return 'NON-EVENT';
+    return { status: 'NON-EVENT' };
   }
 
   const wf = getWorldFlightStatus(pilot);
 
   if (!wf.isWF) {
-    return 'NON-EVENT';
+    return { status: 'NON-EVENT' };
+  }
+
+  const dep = pilot.flight_plan.departure;
+  const dest = pilot.flight_plan.arrival;
+
+  const adminLeg = adminSheetCache.find(
+    r => r.from === dep && r.to === dest
+  );
+
+  // No WF leg = WF but not booked
+  if (!adminLeg?.atc_route) {
+    return { status: 'WF – NOT BOOKED' };
+  }
+
+  // ✅ USE EXISTING ROUTE MISMATCH FLAG
+  if (wf.routeMismatch === true) {
+    return {
+      status: 'WF – ROUTE',
+      filedRoute: pilot.flight_plan.route || '',
+      wfRoute: adminLeg.atc_route || ''
+    };
   }
 
   const booking = getTobtBookingForCallsign(
     pilot.callsign,
-    pilot.flight_plan.departure
+    dep
   );
 
-  return booking ? 'WF – BOOKED' : 'WF – NOT BOOKED';
+  return {
+    status: booking ? 'WF – BOOKED' : 'WF – NOT BOOKED'
+  };
 }
+
+function formatCruiseLevel(alt) {
+  if (!alt) return '—';
+
+  const n = Number(alt);
+  if (!Number.isFinite(n)) return '—';
+
+  // Convert feet to flight level
+  return 'FL' + Math.round(n / 100);
+}
+
+function extractRegistration(pilot) {
+  const fp = pilot?.flight_plan;
+  if (!fp) return '—';
+
+  const remarks = (fp.remarks || '').toUpperCase();
+
+  // Match: REG/G-BNLL  REG G-BNLL  REG:G-BNLL  REG=G-BNLL
+  // Allow hyphenated registrations and digits.
+  const m = remarks.match(/\bREG\s*[\/:= ]\s*([A-Z0-9]+(?:-[A-Z0-9]+)?)\b/);
+
+  return m ? m[1] : '—';
+}
+
+function parseAircraftTypeAndWake(acft) {
+  if (!acft || typeof acft !== 'string') return { type: '—', wake: '—' };
+
+  // Take left side before dash: "A20N/M"
+  const left = acft.split('-')[0] || '';
+  const parts = left.split('/');
+
+  const type = (parts[0] || '—').toUpperCase();
+  const wake = (parts[1] || '—').toUpperCase();
+
+  return { type, wake };
+}
+
+
 
 app.get('/api/atc/flight/:callsign', (req, res) => {
   const callsign = req.params.callsign.toUpperCase();
@@ -1184,20 +1238,44 @@ app.get('/api/atc/flight/:callsign', (req, res) => {
 
   const booking = getTobtBookingForCallsign(callsign, dep);
 
-  res.json({
-    callsign,
-    wfStatus: resolveWfStatusForPilot(pilot),
-    dep,
-    dest,
-    aircraft:
-      pilot.flight_plan.aircraft_short ||
-      pilot.flight_plan.aircraft ||
-      '—',
-    equipment: pilot.flight_plan.equipment || '—',
-    tobt: booking?.tobtTimeUtc || '—',
-    tsat: sharedTSAT[callsign]?.tsat || '—',
-    route
-  });
+  const wfResult = resolveWfStatusForPilot(pilot);
+  const acft = parseAircraftTypeAndWake(pilot.flight_plan.aircraft);
+
+res.json({
+  callsign,
+  wfStatus: wfResult.status,
+
+  dep,
+  dest,
+
+  flightRules: pilot.flight_plan.flight_rules || '—',
+  registration: extractRegistration(pilot),
+
+  aircraftType: acft.type,
+  wake: acft.wake,
+
+  cruiseLevel: formatCruiseLevel(pilot.flight_plan.altitude),
+
+ filedTas: pilot.flight_plan.true_airspeed || null,
+
+
+  pilotName: pilot.name
+  ? pilot.name.toUpperCase()
+  : '—',
+
+  pilotCid: pilot.cid || '—',
+
+  tobt: booking?.tobtTimeUtc || '—',
+  tsat: sharedTSAT[callsign]?.tsat || '—',
+filedTas: pilot.flight_plan.true_airspeed || null,
+  route: pilot.flight_plan.route || '—',
+
+  filedRoute: wfResult?.filedRoute,
+  wfRoute: wfResult?.wfRoute
+});
+
+
+
 });
 
 
@@ -4753,7 +4831,7 @@ document.addEventListener('click', e => {
   socket.emit('sendBackToUpcoming', { callsign, icao });
 });
 
-document.addEventListener('click', e => {
+document.addEventListener('click', async e => {
   const btn = e.target.closest('.delete-started-btn');
   if (!btn) return;
   if (btn.disabled || !CAN_EDIT) return;
@@ -4761,7 +4839,13 @@ document.addEventListener('click', e => {
   const callsign = btn.dataset.callsign;
   if (!callsign) return;
 
-  const ok = confirm("Are you sure you want to permanently delete " + callsign + " from Recently Started?");
+  const ok = await openConfirmModal({
+    title: 'Confirm Removal',
+    message: 'Are you sure you want to permanently remove ' +
+             callsign +
+             ' from Recently Started?'
+  });
+
   if (!ok) return;
 
   socket.emit('deleteStartedEntry', { callsign });

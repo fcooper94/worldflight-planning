@@ -549,75 +549,170 @@ window.location.href = '/icao/' + icao;
   <div class="modal-card">
 <div class="fp-strip">
 
+  <!-- HEADER -->
   <div class="fp-strip-header">
-    <span class="fp-callsign" id="fpCallsign">DAL8918</span>
-    <span class="fp-status" id="fpStatus">NON-EVENT</span>
-    <span class="fp-aircraft" id="fpAircraft">A321</span>
+    <span class="fp-callsign" id="fpCallsign"></span>
+    <span class="fp-aircraft" id="fpAircraft"></span>
+    <span class="fp-status" id="fpStatus"></span>
   </div>
 
+  <!-- NAVIGATION / FILING -->
   <div class="fp-strip-row">
     <span class="fp-label">DEP</span>
-    <span class="fp-value" id="fpDep">KATL</span>
+    <span class="fp-value" id="fpDep"></span>
 
-    <span class="fp-label">TOBT</span>
-    <span class="fp-value" id="fpTobt">--</span>
-
-    <span class="fp-label">EQUIP</span>
-    <span class="fp-value" id="fpEquip">--</span>
+    <span class="fp-label">DEST</span>
+    <span class="fp-value" id="fpDest"></span>
   </div>
 
   <div class="fp-strip-row">
-    <span class="fp-label">DEST</span>
-    <span class="fp-value" id="fpDest">KOKC</span>
+  <span class="fp-label">RULES</span>
+  <span class="fp-value" id="fpRules"></span>
 
-    <span class="fp-label">TSAT</span>
-    <span class="fp-value" id="fpTsat">--</span>
+  <span class="fp-label">REG</span>
+  <span class="fp-value" id="fpReg"></span>
+</div>
 
-    <span class="fp-label">FLTYP</span>
-    <span class="fp-value">IFR</span>
+<div class="fp-strip-row">
+  <span class="fp-label">A/C TYPE</span>
+  <span class="fp-value" id="fpType"></span>
+</div>
+
+
+  <!-- PERFORMANCE -->
+  <div class="fp-strip-row">
+    <span class="fp-label">WAKE</span>
+    <span class="fp-value" id="fpWake"></span>
+
+    <span class="fp-label">CRZ LVL</span>
+    <span class="fp-value" id="fpCruise"></span>
   </div>
 
-  <div class="fp-route-block">
-    <div class="fp-route-label">ROUTE</div>
+  <div class="fp-strip-row">
+    <span class="fp-label">TAS</span>
+    <span class="fp-value" id="fpTasGs"></span>
+  </div>
+
+  <!-- PILOT -->
+  <div class="fp-strip-row">
+    <span class="fp-label">PILOT</span>
+    <span class="fp-value" id="fpPilot"></span>
+  </div>
+
+  <div class="fp-strip-row">
+    <span class="fp-label">CID</span>
+    <span class="fp-value" id="fpCid"></span>
+  </div>
+
+  <!-- TIME -->
+  <div class="fp-strip-row">
+    <span class="fp-label">TOBT</span>
+    <span class="fp-value" id="fpTobt"></span>
+
+    <span class="fp-label">TSAT</span>
+    <span class="fp-value" id="fpTsat"></span>
+  </div>
+
+  <!-- ROUTE (NORMAL) -->
+  <div id="fpRouteNormalBlock" class="fp-route-block">
+    <div class="fp-route-label">ATC ROUTE</div>
     <pre class="fp-route" id="fpRoute"></pre>
   </div>
 
+  <!-- ROUTE (WF MISMATCH ONLY) -->
+  <div id="fpRouteFiledBlock" class="fp-route-block hidden">
+    <div class="fp-route-label">ATC ROUTE (FILED)</div>
+    <pre class="fp-route" id="fpRouteFiled"></pre>
+
+    <div class="fp-route-label">WF EVENT ROUTE (EXPECTED)</div>
+    <pre class="fp-route" id="fpRouteWf"></pre>
+
+    <div class="fp-route-warning">
+      ROUTE CHECK — FILED ≠ WF
+    </div>
+  </div>
+
+  <!-- ACTIONS -->
   <div class="fp-actions">
     <button id="closeFpModal" class="fp-close">CLOSE</button>
   </div>
 
-    </div>
+</div>
+
   </div>
 </div>
 <script>
   async function openFlightPlanModal(callsign) {
-    const res = await fetch('/api/atc/flight/' + callsign);
-    if (!res.ok) return;
+  const res = await fetch('/api/atc/flight/' + callsign);
+  if (!res.ok) return;
 
-    const d = await res.json();
+  const d = await res.json();
 
-    document.getElementById('fpDep').textContent = d.dep;
-    document.getElementById('fpDest').textContent = d.dest;
-    document.getElementById('fpCallsign').textContent = d.callsign;
-document.getElementById('fpStatus').textContent = d.wfStatus;
-document.getElementById('fpAircraft').textContent = d.aircraft;
-    document.getElementById('fpEquip').textContent = d.equipment;
-    document.getElementById('fpTobt').textContent = d.tobt;
-    document.getElementById('fpTsat').textContent = d.tsat;
+  document.getElementById('fpCallsign').textContent = d.callsign;
+  document.getElementById('fpStatus').textContent = d.wfStatus;
+  document.getElementById('fpAircraft').textContent = d.aircraft;
+
+var tas = Number(d.filedTas);
+
+document.getElementById('fpTasGs').textContent =
+  Number.isFinite(tas) && tas > 0
+    ? tas + ' / —'
+    : '—';
+
+
+  document.getElementById('fpDep').textContent = d.dep;
+  document.getElementById('fpDest').textContent = d.dest;
+
+  document.getElementById('fpCruise').textContent = d.cruiseLevel;
+  
+
+  document.getElementById('fpPilot').textContent = d.pilotName;
+  document.getElementById('fpCid').textContent = d.pilotCid;
+
+
+  document.getElementById('fpTobt').textContent = d.tobt;
+  document.getElementById('fpTsat').textContent = d.tsat;
+
+  document.getElementById('fpRules').textContent =
+  d.flightRules || '—';
+
+document.getElementById('fpReg').textContent = d.registration || '—';
+document.getElementById('fpType').textContent = d.aircraftType || '—';
+document.getElementById('fpWake').textContent = d.wake || '—';
+
+
+  const normalBlock = document.getElementById('fpRouteNormalBlock');
+  const filedBlock = document.getElementById('fpRouteFiledBlock');
+
+  if (d.wfStatus === 'WF – ROUTE') {
+    normalBlock.classList.add('hidden');
+    filedBlock.classList.remove('hidden');
+
+    document.getElementById('fpRouteFiled').textContent = d.filedRoute;
+    document.getElementById('fpRouteWf').textContent = d.wfRoute;
+  } else {
+    filedBlock.classList.add('hidden');
+    normalBlock.classList.remove('hidden');
+
     document.getElementById('fpRoute').textContent = d.route;
-
-    document
-      .getElementById('flightPlanModal')
-      .classList.remove('hidden');
   }
 
   document
-    .getElementById('closeFpModal')
-    ?.addEventListener('click', () => {
-      document
-        .getElementById('flightPlanModal')
-        .classList.add('hidden');
-    });
+    .getElementById('flightPlanModal')
+    .classList.remove('hidden');
+}
+
+</script>
+<script>
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('#closeFpModal');
+  if (!btn) return;
+
+  const modal = document.getElementById('flightPlanModal');
+  if (modal) {
+    modal.classList.add('hidden');
+  }
+});
 </script>
 
 
