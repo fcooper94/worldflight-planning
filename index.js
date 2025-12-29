@@ -327,29 +327,46 @@ function isAirportController(cs, icao) {
 
   const callsign = cs.toUpperCase().trim();
   const airport = icao.toUpperCase();
-  const short = airport.startsWith('K') ? airport.slice(1) : null;
 
-  const prefixes = [
-    airport + '_',
-    short ? short + '_' : null
-  ].filter(Boolean);
+  const prefixes = [];
+
+  // 🇦🇺 Australia: Yxxx → last 2 letters
+  if (airport.startsWith('Y') && airport.length === 4) {
+    prefixes.push(airport.slice(2)); // YSSY → SY
+  }
+
+  // 🇺🇸 USA: Kxxx → xxx
+  if (airport.startsWith('K') && airport.length === 4) {
+    prefixes.push(airport.slice(1)); // KJFK → JFK
+  }
+
+  // ICAO-standard fallback
+  prefixes.push(airport);
 
   const roles = [
-    '_ATIS',
-    '_DEL',
-    '_GND',
-    '_TWR',
-    '_APP',
-    '_DEP'
+    'ATIS',
+    'DEL',
+    'GND',
+    'TWR',
+    'APP',
+    'DEP'
   ];
 
   return prefixes.some(prefix =>
-    roles.some(role =>
-      callsign.startsWith(prefix) &&
-      callsign.includes(role)   // 🔑 THIS IS THE FIX
-    )
+    roles.some(role => {
+      // Accept:
+      // SY_GND
+      // SY-W_GND
+      // SY-XXX_GND
+      // EGLL_TWR
+      const regex = new RegExp(
+        `^${prefix}(?:-[A-Z0-9]+)?_${role}$`
+      );
+      return regex.test(callsign);
+    })
   );
 }
+
 
 
 

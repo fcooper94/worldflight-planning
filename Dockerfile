@@ -2,8 +2,6 @@ FROM node:20-bullseye
 
 WORKDIR /app
 
-EXPOSE 8080
-
 RUN chown -R node:node /app
 USER node
 
