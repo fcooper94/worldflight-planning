@@ -3753,6 +3753,16 @@ html[data-map-theme="light"] .ac-label {
 .fp-callsign-group:has(.fp-route-warning:not(.hidden)) .fp-callsign {
   letter-spacing: 0.5px;
 }
+.route-muted {
+  color: #6b7280;        /* neutral grey */
+  opacity: 0.7;
+  font-weight: 400;
+}
+.route-error {
+  color: #ef4444;           /* clear red */
+  font-weight: 700;
+  text-decoration: underline;
+}
 
 .hidden {
   display: none;

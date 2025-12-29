@@ -708,8 +708,9 @@ async function openFlightPlanModal(callsign) {
     filedBlock.classList.remove('hidden');
     warningIcon.classList.remove('hidden');
 
-    document.getElementById('fpRouteFiled').textContent = d.filedRoute;
-    document.getElementById('fpRouteWf').textContent = d.wfRoute;
+   document.getElementById('fpRouteFiled').innerHTML = d.filedRoute;
+document.getElementById('fpRouteWf').innerHTML = d.wfRoute;
+
   } else {
     filedBlock.classList.add('hidden');
     normalBlock.classList.remove('hidden');

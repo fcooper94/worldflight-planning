@@ -1069,15 +1069,38 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function findFirstRouteMismatch(filedRoute, wfRoute) {
+  const filed = normalizeRoute(filedRoute, wfRoute);
+  const wf = normalizeRoute(wfRoute);
+
+  const len = Math.min(filed.length, wf.length);
+
+  for (let i = 0; i < len; i++) {
+    if (filed[i] !== wf[i]) {
+      return filed[i]; // first mismatching token
+    }
+  }
+
+  // If all common tokens match but length differs
+  if (filed.length !== wf.length) {
+    return filed[len];
+  }
+
+  return null;
+}
+
+
 function normalizeRoute(route, adminRoute = null) {
   if (!route) return [];
 
   let tokens = route
-    .toUpperCase()
-    .replace(/\/\d+[A-Z]?/g, '')      // remove runway suffixes (/27R)
-    .replace(/\bN\d+F\d+\b/g, '')     // remove speed/level (N0456F350)
-    .split(/\s+/)
-    .filter(Boolean);
+  .toUpperCase()
+  .replace(/\/\d+[A-Z]?/g, '')      // remove runway suffixes (/27R)
+  .replace(/\bN\d+F\d+\b/g, '')     // remove speed/level (N0456F350)
+  .replace(/\bDCT\b/g, '')          // 🔑 REMOVE rogue DCTs
+  .split(/\s+/)
+  .filter(Boolean);
+
 
   // Remove trailing STAR(s) and destination ICAO
   while (
@@ -1107,6 +1130,44 @@ function normalizeRoute(route, adminRoute = null) {
 
   return tokens;
 }
+
+function decorateRouteForDisplay(route, mismatchToken = null) {
+  if (!route) return '';
+
+  const tokens = route
+    .toUpperCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return tokens
+    .map(t => {
+      // 🔴 ABSOLUTE PRIORITY: mismatch token
+      if (mismatchToken && t === mismatchToken) {
+        return `<span class="route-error">${t}</span>`;
+      }
+
+      // Greyed procedural elements ONLY if not mismatching
+      if (/\/\d+[A-Z]?$/.test(t)) {
+        return `<span class="route-muted">${t}</span>`;
+      }
+
+      if (/\d[A-Z]$/.test(t)) {
+        return `<span class="route-muted">${t}</span>`;
+      }
+
+      if (/^[A-Z]{4}$/.test(t)) {
+        return `<span class="route-muted">${t}</span>`;
+      }
+
+      if (t === 'DCT') {
+        return `<span class="route-muted">DCT</span>`;
+      }
+
+      return t;
+    })
+    .join(' ');
+}
+
 
 
 
@@ -1241,6 +1302,15 @@ app.get('/api/atc/flight/:callsign', (req, res) => {
   const booking = getTobtBookingForCallsign(callsign, dep);
 
   const wfResult = resolveWfStatusForPilot(pilot);
+  let mismatchToken = null;
+
+if (wfResult.status === 'WF – ROUTE') {
+  mismatchToken = findFirstRouteMismatch(
+    wfResult.filedRoute,
+    wfResult.wfRoute
+  );
+}
+
   const acft = parseAircraftTypeAndWake(pilot.flight_plan.aircraft);
 
 res.json({
@@ -1276,8 +1346,16 @@ wfRoute: wfResult.wfRoute || '',
 filedTas: pilot.flight_plan.true_airspeed || null,
   route: pilot.flight_plan.route || '—',
 
-  filedRoute: wfResult?.filedRoute,
-  wfRoute: wfResult?.wfRoute
+  filedRoute: wfResult?.filedRoute
+  ? decorateRouteForDisplay(wfResult.filedRoute, mismatchToken)
+  : '',
+
+wfRoute: wfResult?.wfRoute
+  ? decorateRouteForDisplay(wfResult.wfRoute)
+  : '',
+
+
+
 });
 
 
