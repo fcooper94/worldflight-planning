@@ -3,11 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "prisma:generate": "npx prisma generate --schema=prisma/schema.$DB_ENGINE.prisma",
-    "prisma:migrate": "npx prisma migrate deploy --schema=prisma/schema.$DB_ENGINE.prisma",
-
-    "postinstall": "npm run prisma:generate",
-    "start": "npm run prisma:migrate && node index.js"
+    "postinstall": "npx prisma generate",
+    "start": "npx prisma migrate deploy && node index.js"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
