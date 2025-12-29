@@ -3732,6 +3732,26 @@ html[data-map-theme="light"] .ac-label {
   align-items: center;
   gap: 4px; /* tight spacing */
 }
+.fp-callsign {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #e5edff; /* slightly brighter than body text */
+   position: relative;
+}
+.fp-callsign::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -4px;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0.45),
+    rgba(255, 255, 255, 0)
+  );
+}
 
 .fp-route-warning {
   font-size: 13px;
@@ -3780,6 +3800,15 @@ html[data-map-theme="light"] .ac-label {
 .fp-route-alert-icon {
   font-size: 16px;
   line-height: 1;
+}
+
+
+.fp-status-booked {
+  color: #22c55e; /* clean green */
+  border: 1px solid rgba(34, 197, 94, 0.6);
+  background: rgba(34, 197, 94, 0.12);
+  padding: 4px 8px;
+  border-radius: 6px;
 }
 
 .hidden {

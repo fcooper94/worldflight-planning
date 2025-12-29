@@ -260,6 +260,21 @@ function extractAtisLetter(lines = []) {
   return '';
 }
 
+function getUtcMinutesNow() {
+  const now = new Date();
+  return now.getUTCHours() * 60 + now.getUTCMinutes();
+}
+
+function parseTsatToMinutes(tsat) {
+  if (!tsat || tsat === '—') return null;
+
+  const clean = tsat.replace(':', '');
+  const hh = Number(clean.slice(0, 2));
+  const mm = Number(clean.slice(2, 4));
+
+  return hh * 60 + mm;
+}
+
 
 function phoneticOrLetter(token) {
   if (token.length === 1) return token;
@@ -452,21 +467,22 @@ function buildUpcomingTSATsForICAO(icao, vatsimPilots = []) {
     });
   }
 
-  const now = new Date();
+ const nowUtcMinutes = getUtcMinutesNow();
+
 
   return list
-    .sort((a, b) => {
-      const da = hhmmToOperationalUtcDate(a.tsat, now);
-      const db = hhmmToOperationalUtcDate(b.tsat, now);
+  .sort((a, b) => {
+    const ta = parseTsatToMinutes(a.tsat);
+    const tb = parseTsatToMinutes(b.tsat);
 
-      // Push invalid TSATs to bottom
-      if (!da && !db) return 0;
-      if (!da) return 1;
-      if (!db) return -1;
+    if (ta === null && tb === null) return 0;
+    if (ta === null) return 1;
+    if (tb === null) return -1;
 
-      return da - db;
-    })
-    .slice(0, 5);
+    return ta - tb;
+  })
+  .slice(0, 5);
+
 }
 
 
@@ -4288,7 +4304,7 @@ ${!isAerodromeController ? `
 
   <!-- UPCOMING TSATs -->
   <div class="tsat-col">
-    <h3 class="tsat-header">Upcoming TSATs</h3>
+    <h3 class="tsat-header">Upcoming Start</h3>
     <div class="table-scroll">
       <table class="departures-table" id="tsatQueueTable">
         <thead>
@@ -4363,7 +4379,7 @@ ${!isAerodromeController ? `
             <th>Aircraft</th>
             <th>Dest</th>
             <th>TOBT</th>
-            <th class="col-toggle">START</th>
+            <th class="col-toggle">READY?</th>
             <th>TSAT</th>
             <th class="col-route">ATC Route</th>
           </tr>

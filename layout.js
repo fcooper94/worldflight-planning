@@ -681,7 +681,13 @@ async function openFlightPlanModal(callsign) {
   const d = await res.json();
 
   document.getElementById('fpCallsign').textContent = d.callsign;
-  document.getElementById('fpStatus').textContent = d.wfStatus;
+  const statusEl = document.getElementById('fpStatus');
+statusEl.textContent = d.wfStatus;
+statusEl.className = 'fp-status'; // reset
+if (d.wfStatus === 'WF – BOOKED') {
+  statusEl.classList.add('fp-status-booked');
+}
+
   document.getElementById('fpAircraft').textContent = d.aircraft || '—';
 
   const tas = Number(d.filedTas);
