@@ -414,6 +414,192 @@ function isUsIcao(icao) {
     && icao.startsWith('K');
 }
 
+const US_ENROUTE_PREFIX_BY_ICAO = {
+  KJFK: ['NY', 'ZNY'],
+  KLGA: ['NY', 'ZNY'],
+  KEWR: ['NY', 'ZNY'],
+
+  KLAX: ['LA', 'ZLA'],
+  KSFO: ['SF', 'ZOA'],
+
+  KPIT: ['ZOB', 'CLE'],
+  KDTW: ['ZOB', 'CLE'],
+
+  KORD: ['CHI', 'ZAU'],
+  KATL: ['ATL', 'ZTL'],
+  KDFW: ['DFW', 'ZFW'],
+  KDEN: ['DEN', 'ZDV'],
+  KMIA: ['MIA', 'ZMA'],
+  KSEA: ['SEA', 'ZSE'],
+  KPDX: ['SEA', 'ZSE'],
+  KMFR: ['SEA', 'ZSE'],
+  KBFI: ['SEA', 'ZSE'],
+  KBOS: ['BOS', 'ZBW'],
+  KIAD: ['DC', 'ZDC'],
+  KDCA: ['DC', 'ZDC'],
+  KBWI: ['DC', 'ZDC'],
+  KPHX: ['PHX', 'ZAB'],
+  KLAS: ['LAS', 'ZLA'],
+  KMSP: ['MSP', 'ZMP'],
+  KPHL: ['PHL', 'ZNY'],
+  KSAN: ['SAN', 'ZLA'],
+};
+
+
+function isUkCtr(callsign) {
+  return /^(LON|EGTT|EGVV|SCO|LTC)(?:_[A-Z0-9]+)?_CTR$/.test(
+    callsign.toUpperCase()
+  );
+}
+
+
+function isCoveringSouthAmericaCtr(callsign, icao) {
+  const cs = callsign.toUpperCase();
+  const icaoUpper = icao.toUpperCase();
+
+  // Only FIR-style CTRs like SCEZ_CTR / SCEZ_N_CTR
+  if (!/^[A-Z]{4}(?:_[A-Z0-9]+)?_CTR$/.test(cs)) return false;
+
+  const prefix = cs.split('_')[0];
+
+  /* =========================
+     CHILE – SANTIAGO FIR
+     ========================= */
+  if (icaoUpper === 'SCEL') {
+    return prefix === 'SCEZ';
+  }
+
+  return false;
+}
+
+
+function isCoveringUkCtr(callsign, icao) {
+  const cs = callsign.toUpperCase();
+  const icaoUpper = icao.toUpperCase();
+
+  if (!isUkCtr(cs)) return false;
+
+  const prefix = cs.split('_')[0];
+
+  /* =========================
+     SCOTLAND & N. IRELAND
+     ========================= */
+  if (
+    icaoUpper.startsWith('EGP') || // Scotland
+    icaoUpper === 'EGAA' ||
+    icaoUpper === 'EGAC' ||
+    icaoUpper === 'EGNS'
+
+  ) {
+    return prefix === 'SCO';
+  }
+
+  /* =========================
+     ENGLAND & WALES
+     ========================= */
+  if (icaoUpper.startsWith('EG')) {
+  return ['LON', 'EGTT', 'EGVV', 'LTC'].includes(prefix);
+}
+
+  return false;
+}
+
+
+
+function isUsCtr(callsign) {
+  return /^[A-Z]{2,3}(?:_\d{1,2})?_CTR$/.test(
+    callsign.toUpperCase()
+  );
+}
+
+function isCoveringUsCtr(callsign, icao) {
+  if (!icao?.startsWith('K')) return false;
+
+  const cs = callsign.toUpperCase();
+  if (!isUsCtr(cs)) return false;
+
+  const prefix = cs.split('_')[0]; // NY, DC, ZNY
+  const allowed = US_ENROUTE_PREFIX_BY_ICAO[icao];
+
+
+  return Array.isArray(allowed) && allowed.includes(prefix);
+
+  
+}
+
+function isCoveringIndiaCtr(callsign, icao) {
+  const cs = callsign.toUpperCase();
+  const icaoUpper = icao.toUpperCase();
+
+  // Only Indian airports
+  if (!icaoUpper.startsWith('VA') && !icaoUpper.startsWith('VO') && !icaoUpper.startsWith('VI')) {
+    return false;
+  }
+
+  // Must be CTR
+  if (!/^[A-Z]{4}(?:_[A-Z0-9]+)?_CTR$/.test(cs)) return false;
+
+  const parts = cs.split('_');
+  const prefix = parts[0];      // VABB, VOMF, VIDF
+  const level  = parts[1];      // LC, UC, UAC (or undefined)
+
+  // 1️⃣ FIR / ACC CTR: airport must match FIR
+  if (!level || level === 'LC' || level === 'UC') {
+    return prefix === icaoUpper;
+  }
+
+  // 2️⃣ UAC CTR: covers ALL India
+  if (level === 'UAC') {
+    return prefix.startsWith('VO') || prefix.startsWith('VI');
+  }
+
+  return false;
+}
+
+function isCoveringGenericIcaoCtr(callsign, icao) {
+  if (!callsign || !icao) return false;
+
+  const cs = callsign.toUpperCase();
+  const ap = icao.toUpperCase();
+
+  // Must be CTR
+  if (!/^[A-Z]{2,4}(?:_[A-Z0-9]+)*_CTR$/.test(cs)) return false;
+
+  const prefix = cs.split('_')[0];
+
+  // 1️⃣ Exact ICAO match (VABB_CTR, WSSS_CTR)
+  if (prefix === ap) return true;
+
+  // 2️⃣ Regional ICAO match (VO*, WS*, SC*)
+  if (prefix.startsWith(ap.slice(0, 2))) return true;
+
+  // 3️⃣ FIR / city aliases (Asia-Pacific reality)
+  const FIR_ALIAS_BY_ICAO = {
+    VHHH: ['HKG'],
+    RCTP: ['TPE'],
+    WSSS: ['SIN'],
+    VTBS: ['BKK'],
+    RJTT: ['TYO'],
+    RKSI: ['SEL'],
+    ZBAA: ['PEK'],
+  };
+
+  return FIR_ALIAS_BY_ICAO[ap]?.includes(prefix) ?? false;
+}
+
+
+
+function isCoveringCtr(callsign, icao) {
+  return (
+    isCoveringUsCtr(callsign, icao) ||
+    isCoveringUkCtr(callsign, icao) ||
+    isCoveringIndiaCtr(callsign, icao) ||
+    isCoveringSouthAmericaCtr(callsign, icao) ||
+    isCoveringGenericIcaoCtr(callsign, icao) // ← fallback
+  );
+}
+
+
 
 
 function canEditIcao(user, pageIcao) {
@@ -3554,6 +3740,31 @@ app.get('/api/icao/:icao/controllers', async (req, res) => {
     const controllers = r.data.controllers || [];
     const atis = r.data.atis || [];
 
+    /* =====================
+       CTR (TOP LEVEL)
+       ===================== */
+    const ctrControllers = controllers
+      .filter(c => isCoveringCtr(c.callsign, icao))
+      .map(c => ({
+        callsign: c.callsign,
+        frequency: c.frequency || '—',
+        isCtr: true
+      }));
+
+    /* =====================
+       AIRPORT CONTROLLERS
+       ===================== */
+    const airportControllers = controllers
+      .filter(c => isAirportController(c.callsign, icao))
+      .map(c => ({
+        callsign: c.callsign,
+        frequency: c.frequency || '—',
+        isAtis: false
+      }));
+
+    /* =====================
+       ATIS (BOTTOM)
+       ===================== */
     const airportAtis = atis
       .filter(a => {
         const cs = a.callsign?.toUpperCase();
@@ -3565,45 +3776,35 @@ app.get('/api/icao/:icao/controllers', async (req, res) => {
           );
       })
       .map(a => {
-  const cs = a.callsign.toUpperCase();
+        const cs = a.callsign.toUpperCase();
 
-  let atisType = 'general';
-  if (cs.includes('_D_ATIS')) atisType = 'departure';
-  else if (cs.includes('_A_ATIS')) atisType = 'arrival';
+        let atisType = 'general';
+        if (cs.includes('_D_ATIS')) atisType = 'departure';
+        else if (cs.includes('_A_ATIS')) atisType = 'arrival';
 
-  return {
-    callsign: a.callsign,
-    frequency: a.frequency || '—',
-    isAtis: true,
-    atisType   // departure | arrival | general
-  };
-});
-
-
-
-
-    const airportControllers = controllers
-      .filter(c => isAirportController(c.callsign, icao))
-      .map(c => ({
-        callsign: c.callsign,
-        frequency: c.frequency || '—',
-        isAtis: false
-      }));
-
-    const merged = [...airportAtis, ...airportControllers]
-      .sort((a, b) => {
-        if (a.isAtis && !b.isAtis) return -1;
-        if (!a.isAtis && b.isAtis) return 1;
-        return a.callsign.localeCompare(b.callsign);
+        return {
+          callsign: a.callsign,
+          frequency: a.frequency || '—',
+          isAtis: true,
+          atisType
+        };
       });
 
-    res.json(merged);
+    /* =====================
+       FINAL ORDERED OUTPUT
+       ===================== */
+    res.json([
+      ...ctrControllers,
+      ...airportControllers,
+      ...airportAtis
+    ]);
 
   } catch (err) {
     console.error('[CONTROLLERS]', err.message);
     res.json([]);
   }
 });
+
 
 app.get('/api/icao/:icao/docs', async (req, res) => {
   try {
