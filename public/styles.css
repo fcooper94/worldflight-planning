@@ -4026,3 +4026,16 @@ html[data-map-theme="light"] .ac-label {
 .doc-access-requests .btn-delete:hover {
   background: rgba(220, 53, 69, 0.15);
 }
+.atis-letter.vatsim {
+  font-weight: 600;
+}
+
+.atis-letter.faa {
+  opacity: 0.85;
+}
+
+.atis-disclaimer {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-bottom: 6px;
+}

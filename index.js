@@ -408,6 +408,11 @@ function isAirportController(cs, icao) {
   );
 }
 
+function isUsIcao(icao) {
+  return typeof icao === 'string'
+    && icao.length === 4
+    && icao.startsWith('K');
+}
 
 
 
@@ -2542,7 +2547,104 @@ function normalizeAtisText(lines) {
     .replace(/\s{2,}/g, ' ')    // collapse extra spaces
     .trim();
 }
+async function fetchFaaAtis(icao) {
+  if (!isUsIcao(icao)) {
+    return { available: false };
+  }
 
+  try {
+    const r = await axios.get(
+      'https://atis.info/api/' + icao,
+      { timeout: 8000 }
+    );
+
+    const data = r.data;
+
+    // 🔑 atis.info returns an ARRAY
+    if (!Array.isArray(data) || !data.length) {
+      return { available: false };
+    }
+
+    const atis = data[0];
+
+    if (!atis.datis) {
+      return { available: false };
+    }
+
+    return {
+      available: true,
+      source: 'faa',
+      letter: atis.code || '',
+      text: atis.datis,
+      time: atis.time,
+      updatedAt: atis.updatedAt
+    };
+  } catch (err) {
+    console.warn('[FAA ATIS]', icao, err.message);
+    return { available: false };
+  }
+}
+
+
+
+
+app.get('/api/icao/:icao/atis-all', async (req, res) => {
+  const icao = req.params.icao.toUpperCase();
+
+  const vatsim = await fetchVatsimAtisForIcao(icao);
+  const faa = await fetchFaaAtis(icao);
+
+  res.json({
+    vatsim,
+    faa
+  });
+});
+
+async function fetchVatsimAtisForIcao(icao) {
+  try {
+    const short = icao.startsWith('K') ? icao.slice(1) : null;
+
+    const r = await axios.get(
+      'https://data.vatsim.net/v3/vatsim-data.json'
+    );
+
+    const atisList = r.data.atis || [];
+
+    return atisList
+      .filter(a => {
+        const cs = a.callsign?.toUpperCase();
+        if (!cs || !cs.endsWith('_ATIS')) return false;
+
+        return (
+          cs.startsWith(icao + '_') ||
+          (short && cs.startsWith(short + '_'))
+        );
+      })
+      .map(a => {
+        const cs = a.callsign.toUpperCase();
+
+        let atisType = 'General';
+        if (cs.includes('_D_ATIS')) atisType = 'Departure';
+        else if (cs.includes('_A_ATIS')) atisType = 'Arrival';
+
+        const lines = Array.isArray(a.text_atis)
+          ? a.text_atis
+          : String(a.text_atis || '').split('\n');
+
+        return {
+          source: 'vatsim',
+          callsign: a.callsign,
+          frequency: a.frequency,
+          atisType,
+          letter: extractAtisLetter(lines),
+          text: normalizeAtisText(lines)
+        };
+      });
+  } catch (err) {
+    console.error('[VATSIM ATIS]', err.message);
+    return [];
+  }
+}
 
 app.get('/api/icao/:icao/atis', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
@@ -2961,9 +3063,19 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 /* ================= FUNCTIONS ================= */
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+
 
 function loadAtis(icao) {
-  fetch('/api/icao/' + icao + '/atis')
+  fetch('/api/icao/' + icao + '/atis-all')
     .then(res => res.json())
     .then(data => {
       const container = document.getElementById('airportAtisCard');
@@ -2971,50 +3083,74 @@ function loadAtis(icao) {
 
       container.innerHTML = '';
 
-      if (!Array.isArray(data) || !data.length) {
-        container.classList.add('hidden');
-        return;
-      }
+      const vatsimList = Array.isArray(data.vatsim) ? data.vatsim : [];
+const faa = data.faa;
 
-      data.forEach(atis => {
-        const card = document.createElement('section');
-        card.className = 'card';
+// Hide section only if neither exists
+container.innerHTML = '';
 
-        const wrap = document.createElement('div');
-        wrap.className = 'atis-container';
+if (!vatsimList.length && (!faa || !faa.available)) {
+  container.classList.add('hidden');
+  return;
+}
 
-        const letter = document.createElement('div');
-        letter.className = 'atis-letter ' + (atis.atisType || '');
-        letter.textContent = atis.letter || '?';
+container.classList.remove('hidden');
 
-        const body = document.createElement('div');
-        body.className = 'atis-body';
+// VATSIM ATIS (PRIMARY)
+vatsimList.forEach(function (atis) {
+  const card = document.createElement('section');
+  card.className = 'card';
 
-        const header = document.createElement('div');
-        header.className = 'atis-header';
-
-        const source = document.createElement('span');
-        source.className = 'atis-source';
-        source.textContent =
-          atis.callsign +
-          (atis.atisType ? ' – ' + atis.atisType.toUpperCase() + ' ATIS' : '');
-
-        const text = document.createElement('pre');
-        text.className = 'atis-text';
-        text.textContent = atis.text || '';
-
-        header.appendChild(source);
-        body.appendChild(header);
-        body.appendChild(text);
-
-        wrap.appendChild(letter);
-        wrap.appendChild(body);
-        card.appendChild(wrap);
+        card.innerHTML =
+          '<div class="atis-container">' +
+            '<div class="atis-letter vatsim">' +
+              (atis.letter || '—') +
+            '</div>' +
+            '<div class="atis-body">' +
+              '<div class="atis-title">' +
+                'VATSIM ATIS (' + atis.atisType + ')' +
+              '</div>' +
+              '<div class="atis-meta">' +
+                atis.callsign +
+                (atis.frequency ? ' • ' + atis.frequency : '') +
+              '</div>' +
+              '<div class="atis-text">' +
+                escapeHtml(atis.text) +
+              '</div>' +
+            '</div>' +
+          '</div>';
 
         container.appendChild(card);
       });
 
-      container.classList.remove('hidden');
+      /* =========================
+         2) FAA ATIS
+         ========================= */
+
+      if (faa && faa.available) {
+  const card = document.createElement('section');
+  card.className = 'card';
+
+        card.innerHTML =
+          '<div class="atis-container">' +
+            '<div class="atis-letter faa">' +
+              (faa.letter || '—') +
+            '</div>' +
+            '<div class="atis-body">' +
+              '<div class="atis-title">' +
+                'FAA ATIS (Real-World – Reference Only)' +
+              '</div>' +
+              '<div class="atis-disclaimer">' +
+                'Not valid for VATSIM operations. Always follow VATSIM ATC.' +
+              '</div>' +
+              '<div class="atis-text">' +
+                escapeHtml(faa.text) +
+              '</div>' +
+            '</div>' +
+          '</div>';
+
+        container.appendChild(card);
+      }
     })
     .catch(err => {
       console.error('[ATIS]', err);
