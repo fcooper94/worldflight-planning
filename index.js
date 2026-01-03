@@ -3099,7 +3099,7 @@ container.classList.remove('hidden');
 // VATSIM ATIS (PRIMARY)
 vatsimList.forEach(function (atis) {
   const card = document.createElement('section');
-  card.className = 'card';
+  card.className = 'card vatsim-atis';
 
         card.innerHTML =
           '<div class="atis-container">' +
@@ -3129,7 +3129,7 @@ vatsimList.forEach(function (atis) {
 
       if (faa && faa.available) {
   const card = document.createElement('section');
-  card.className = 'card';
+  card.className = 'card faa-atis';
 
         card.innerHTML =
           '<div class="atis-container">' +
@@ -3137,9 +3137,11 @@ vatsimList.forEach(function (atis) {
               (faa.letter || '—') +
             '</div>' +
             '<div class="atis-body">' +
-              '<div class="atis-title">' +
-                'FAA ATIS (Real-World – Reference Only)' +
-              '</div>' +
+             '<div class="atis-title faa">' +
+  'FAA ATIS' +
+  '<span class="atis-badge">REFERENCE</span>' +
+'</div>' +
+
               '<div class="atis-disclaimer">' +
                 'Not valid for VATSIM operations. Always follow VATSIM ATC.' +
               '</div>' +
