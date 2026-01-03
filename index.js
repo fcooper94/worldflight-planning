@@ -5817,34 +5817,7 @@ const simbriefUrl =
           </table>
         </div>
       `}
-      <div id="callsignModal" class="modal hidden">
-  <div class="modal-backdrop"></div>
-
-  <div class="modal-dialog">
-    <h3>Edit Callsign</h3>
-
-    <label>
-      Callsign
-      <input
-        id="callsignModalInput"
-        type="text"
-        maxlength="10"
-        autocomplete="off"
-      />
-    </label>
-
-    <div id="callsignModalError" class="modal-message error hidden"></div>
-
-    <div class="modal-actions">
-      <button type="button" class="modal-btn modal-btn-cancel">
-        Cancel
-      </button>
-      <button type="button" class="modal-btn modal-btn-submit">
-        Save
-      </button>
-    </div>
-  </div>
-</div>
+      
     </section>
     
     <script>
@@ -6021,10 +5994,12 @@ document.getElementById('callsignModalInput')
     if (!confirmed) return;
 
     const res = await fetch('/api/tobt/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slotKey })
-    });
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  credentials: 'same-origin',
+  body: JSON.stringify({ slotKey })
+});
+
 
     if (!res.ok) {
       let errText = 'Failed to cancel slot';

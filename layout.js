@@ -150,32 +150,7 @@ export default function renderLayout({
     ${content}
   </main>
 
-  <!-- ===== CALLSIGN MODAL ===== -->
-  <div id="callsignModal" class="modal hidden">
-    <div class="modal-backdrop"></div>
-
-    <div class="modal-card card">
-      <h3>Enter Callsign</h3>
-      <p class="modal-help">
-        This callsign will be used for your TOBT and SimBrief planning.
-      </p>
-
-      <input
-        id="callsignModalInput"
-        type="text"
-        placeholder="e.g. BAW47C"
-        maxlength="10"
-        autocomplete="off"
-      />
-
-      <div class="modal-actions">
-        <button id="callsignCancel" class="action-btn">Cancel</button>
-        <button id="callsignConfirm" class="action-btn primary">Confirm</button>
-      </div>
-    </div>
-  </div>
-
-    <!-- ===== CALLSIGN MODAL ===== -->
+     <!-- ===== CALLSIGN MODAL ===== -->
   <div id="callsignModal" class="modal hidden">
     <div class="modal-backdrop"></div>
     <div class="modal-card card">
@@ -268,40 +243,6 @@ export default function renderLayout({
       });
     }
   </script>
-
-  <script>
-function openConfirmModal({ title, message }) {
-  return new Promise(resolve => {
-    const modal = document.getElementById('callsignModal');
-    const titleEl = document.getElementById('modalTitle');
-    const helpEl = document.getElementById('modalHelp');
-    const input = document.getElementById('callsignModalInput');
-    const confirm = document.getElementById('callsignConfirm');
-    const cancel = document.getElementById('callsignCancel');
-
-    titleEl.textContent = title;
-    helpEl.textContent = message;
-
-    input.style.display = 'none'; // no input for confirm
-    modal.classList.remove('hidden');
-
-    function close(result) {
-      modal.classList.add('hidden');
-      input.style.display = '';
-      confirm.removeEventListener('click', onConfirm);
-      cancel.removeEventListener('click', onCancel);
-      resolve(result);
-    }
-
-    function onConfirm() { close(true); }
-    function onCancel() { close(false); }
-
-    confirm.addEventListener('click', onConfirm);
-    cancel.addEventListener('click', onCancel);
-  });
-}
-</script>
-
 
 <script>
   function openConfirmModal({ title, message }) {
