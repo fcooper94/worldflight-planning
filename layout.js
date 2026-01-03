@@ -200,6 +200,47 @@ export default function renderLayout({
     </form>
   </div>
 </div>
+<!-- ===== UPLOAD DOCUMENTATION MODAL ===== -->
+<div id="uploadDocModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+
+  <div class="modal-card card">
+    <h3>Upload Airport Document</h3>
+
+    <form id="uploadDocForm">
+      <input type="hidden" id="uploadDocIcao" name="icao">
+
+      <label>
+    File name
+    <input type="text" placeholder="Pilot Brief 2026" name="filename" required>
+  </label>
+
+  <label>
+    File
+    <input type="file" name="file" required>
+  </label>
+
+      <div class="modal-actions">
+        <button
+          type="button"
+          id="uploadDocCancel"
+          class="action-btn"
+        >
+          Cancel
+        </button>
+
+        <button
+          type="submit"
+          class="action-btn primary"
+        >
+          Upload
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+
 
   <!-- ===== CALLSIGN MODAL LOGIC ===== -->
   <script>

@@ -3,8 +3,45 @@ dotenv.config();
 import fs from 'fs';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
+import multer from 'multer';
+import path from 'path';
 
 const prisma = new PrismaClient();
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const icao = req.params.icao.toUpperCase();
+    const dir = path.join(__dirname, 'Uploads', icao);
+
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+
+  filename: (req, file, cb) => {
+  if (!file || !file.originalname) {
+    return cb(new Error('No file received'));
+  }
+
+  const base =
+    typeof req.body.filename === 'string' && req.body.filename.trim()
+      ? req.body.filename
+      : path.parse(file.originalname).name;
+
+  const safeBase = base
+     .toUpperCase()
+  .replace(/[_\-]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+  const ext = path.extname(file.originalname).toUpperCase();
+
+  cb(null, safeBase + ext);
+}
+
+});
+
+const upload = multer({ storage });
+
 
 /* ===========================
    OFFICIAL TEAM CALLSIGN RULES
@@ -39,7 +76,7 @@ async function isReservedTeamCallsign(callsign, cid) {
 }
 
 
-import path from 'path';
+
 import { fileURLToPath } from 'url';
 
 import 'dotenv/config';
@@ -118,8 +155,7 @@ const app = express();
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+
 
 const httpServer = createServer(app);
 const io = new Server(httpServer);
@@ -293,7 +329,16 @@ function phoneticOrLetter(token) {
 }
 
 
+/* ===== SESSION ===== */
+const sessionMiddleware = session({
+  name: 'worldflight.sid',
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, sameSite: 'lax' }
+});
 
+app.use(sessionMiddleware);
 
 
 function getNextAvailableTobts(from, to, limit = 5) {
@@ -312,15 +357,17 @@ function getNextAvailableTobts(from, to, limit = 5) {
 }
 
 function requireLogin(req, res, next) {
-  if (req.session?.user?.data) {
+  if (req.session && req.session.user && req.session.user.data) {
     return next();
   }
 
-  // Save where the user wanted to go
-  req.session.returnTo = req.originalUrl;
+  if (req.session) {
+    req.session.returnTo = req.originalUrl;
+  }
 
   return res.redirect('/');
 }
+
 
 function isAirportController(cs, icao) {
   if (!cs || !icao) return false;
@@ -387,8 +434,11 @@ function matchesIcaoPattern(pattern, icao) {
 }
 
 async function canEditDocumentation(cid, icao) {
+  const cidInt = Number(cid);
+  if (!Number.isFinite(cidInt)) return false;
+
   const rules = await prisma.documentationPermission.findMany({
-    where: { cid }
+    where: { cid: cidInt }
   });
 
   return rules.some(r =>
@@ -396,6 +446,50 @@ async function canEditDocumentation(cid, icao) {
   );
 }
 
+
+app.post(
+  '/icao/:icao/upload',
+  requireLogin,
+  async (req, res, next) => {
+    try {
+      const { icao } = req.params;
+      const user = req.session.user?.data;
+
+      const allowed = await canEditDocumentation(user.cid, icao);
+      if (!allowed) return res.status(403).send('Not allowed');
+
+      next();
+    } catch (err) {
+      console.error('[UPLOAD PERM]', err);
+      return res.status(500).send('Server error');
+    }
+  },
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      await prisma.airportDocument.create({
+        data: {
+          icao: req.params.icao.toUpperCase(),
+          filename: req.file.filename,
+          uploadedBy: Number(req.session.user.data.cid)
+        }
+      });
+
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('[UPLOAD SAVE]', err);
+      return res.status(500).json({ error: 'Failed to save document' });
+    }
+  }
+);
+
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 function rebuildAllTobtSlots() {
   // Clear existing slots
@@ -1061,16 +1155,9 @@ async function refreshAdminSheet() {
 refreshAdminSheet();
 cron.schedule('0 0 * * *', refreshAdminSheet);
 
-/* ===== SESSION ===== */
-const sessionMiddleware = session({
-  name: 'worldflight.sid',
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'lax' }
-});
 
-app.use(sessionMiddleware);
+
+
 
 // HOME: logged in → dashboard, logged out → login page
 
@@ -2263,9 +2350,12 @@ app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
 app.get('/icao/:icao', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
-const isLoggedIn = Boolean(req.session?.user?.data);
+  const isLoggedIn = Boolean(req.session?.user?.data);
 
-
+  const documents = await prisma.airportDocument.findMany({
+    where: { icao },
+    orderBy: { uploadedAt: 'desc' }
+  });
   const content = `
  
   <section class="card">
@@ -2380,6 +2470,16 @@ const isLoggedIn = Boolean(req.session?.user?.data);
     </thead>
     <tbody id="airportDocs"></tbody>
   </table>
+ <button
+  class="action-btn"
+  id="openUploadDoc"
+  data-icao="${icao}"
+>
+  Upload Document
+</button>
+
+
+
 </section>
 
 <script>
@@ -2722,6 +2822,52 @@ function loadAirportDocs(icao) {
 
 </script>
 <script>
+document.addEventListener('DOMContentLoaded', function () {
+  const uploadModal = document.getElementById('uploadDocModal');
+  const openUploadBtn = document.getElementById('openUploadDoc');
+  const cancelUploadBtn = document.getElementById('uploadDocCancel');
+  const uploadForm = document.getElementById('uploadDocForm');
+  const uploadIcaoInput = document.getElementById('uploadDocIcao');
+
+  if (!uploadModal || !uploadForm) return;
+
+  if (openUploadBtn) {
+    openUploadBtn.addEventListener('click', function () {
+      uploadIcaoInput.value = openUploadBtn.dataset.icao;
+      uploadModal.classList.remove('hidden');
+    });
+  }
+
+  if (cancelUploadBtn) {
+    cancelUploadBtn.addEventListener('click', function () {
+      uploadModal.classList.add('hidden');
+    });
+  }
+
+  uploadForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+
+    const icao = uploadIcaoInput.value;
+    const formData = new FormData(uploadForm);
+
+    const res = await fetch('/icao/' + icao + '/upload', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!res.ok) {
+      alert('Upload failed');
+      return;
+    }
+
+    uploadModal.classList.add('hidden');
+    location.reload();
+  });
+});
+</script>
+
+
+<script>
 const hint = document.getElementById('sceneryLoginHint');
 if (!window.IS_LOGGED_IN && hint) {
   hint.classList.remove('hidden');
@@ -2946,37 +3092,43 @@ app.get('/api/icao/:icao/controllers', async (req, res) => {
 });
 
 
+app.get('/api/icao/:icao/docs', async (req, res) => {
+  try {
+    const icao = req.params.icao.toUpperCase();
 
+    const docs = await prisma.airportDocument.findMany({
+      where: { icao },
+      orderBy: { uploadedAt: 'desc' }
+    });
 
-app.get('/api/icao/:icao/docs', (req, res) => {
-  const icao = req.params.icao.toUpperCase();
-  const dir = path.join(__dirname, 'uploads', icao);
+    // Fetch all users in one query
+    const users = await prisma.user.findMany({
+      where: {
+        cid: { in: docs.map(d => d.uploadedBy) }
+      }
+    });
 
-  if (!fs.existsSync(dir)) {
-    return res.json([]);
+    const userMap = Object.fromEntries(
+      users.map(u => [u.cid, u.name])
+    );
+
+    res.json(
+      docs.map(d => ({
+        filename: d.filename,
+        url: `/uploads/${icao}/${encodeURIComponent(d.filename)}`,
+        type: 'PDF',
+        updated: d.uploadedAt,
+        submittedBy: userMap[d.uploadedBy]
+          ? `${userMap[d.uploadedBy]} (${d.uploadedBy})`
+          : d.uploadedBy
+      }))
+    );
+  } catch (err) {
+    console.error('[DOCS API]', err);
+    res.status(500).json([]);
   }
-
-  const files = fs.readdirSync(dir)
-    .filter(f => !f.startsWith('.'))
-    .map(file => {
-      const fullPath = path.join(dir, file);
-      const stat = fs.statSync(fullPath);
-
-      const ext = path.extname(file).replace('.', '').toUpperCase();
-      const name = path.basename(file, path.extname(file));
-
-      return {
-        filename: name,
-        type: ext || 'FILE',
-        updated: stat.mtime,
-        submittedBy: 'System', // ← future override
-        url: `/uploads/${icao}/${file}`
-      };
-    })
-    .sort((a, b) => b.updated - a.updated);
-
-  res.json(files);
 });
+
 
 
 app.get('/api/tobt/slots', (req, res) => {
