@@ -242,6 +242,7 @@ export default function renderLayout({
 
 
 
+
   <!-- ===== CALLSIGN MODAL LOGIC ===== -->
   <script>
     function openCallsignModal() {
@@ -330,7 +331,107 @@ export default function renderLayout({
       document.addEventListener('keydown', onKey);
     });
   }
+   </script>
+<script>
+function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancelText = 'Cancel', onConfirm }) {
+  const modal = document.getElementById('callsignModal');
+  const card = modal.querySelector('.modal-card');
+
+  const h3 = card.querySelector('h3');
+  const help = card.querySelector('.modal-help');
+  const input = document.getElementById('callsignModalInput');
+  const confirm = document.getElementById('callsignConfirm');
+  const cancel = document.getElementById('callsignCancel');
+
+  if (h3) h3.textContent = title || 'Confirm';
+  if (help) help.textContent = message || '';
+
+  // hide input for confirmations
+  if (input) input.style.display = 'none';
+
+  // reset buttons
+  confirm.textContent = confirmText;
+  cancel.textContent = cancelText;
+  cancel.style.display = '';
+
+  modal.classList.remove('hidden');
+
+  function cleanup() {
+    confirm.removeEventListener('click', onConfirmClick);
+    cancel.removeEventListener('click', onCancelClick);
+    document.removeEventListener('keydown', onKey);
+    if (input) input.style.display = ''; // restore for callsign usage
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+    cleanup();
+  }
+
+  function showState(newTitle, newMessage, okText) {
+    if (h3) h3.textContent = newTitle;
+    if (help) help.textContent = newMessage;
+    confirm.textContent = okText || 'OK';
+    cancel.style.display = 'none';
+  }
+
+  async function onConfirmClick() {
+    // prevent double-submit
+    confirm.disabled = true;
+    cancel.disabled = true;
+
+    // optional: show sending state
+    showState(title || 'Confirm', 'Submitting request...', 'Submitting...');
+
+    try {
+      const result = await onConfirm({
+        set: (t, m) => showState(t, m, 'OK'),
+        close: closeModal,
+        showOk: (t, m) => {
+          showState(t, m, 'OK');
+          confirm.disabled = false;
+          confirm.onclick = closeModal; // OK closes modal
+        }
+      });
+
+      // If handler returns true/false and didn't explicitly showOk/close, default to OK-close
+      if (result === true) {
+        confirm.disabled = false;
+        confirm.onclick = closeModal;
+      } else if (result === false) {
+        // allow retry
+        confirm.disabled = false;
+        cancel.disabled = false;
+        confirm.textContent = confirmText;
+        cancel.style.display = '';
+      }
+    } catch (err) {
+      // show error and allow retry
+      if (h3) h3.textContent = 'Request failed';
+      if (help) help.textContent = 'Unable to submit access request. Please try again.';
+      confirm.disabled = false;
+      cancel.disabled = false;
+      confirm.textContent = 'Retry';
+      cancel.style.display = '';
+    }
+  }
+
+  function onCancelClick() {
+    closeModal();
+  }
+
+  function onKey(e) {
+    if (e.key === 'Escape') onCancelClick();
+  }
+
+  confirm.onclick = null; // remove any prior inline onclick
+  confirm.addEventListener('click', onConfirmClick);
+  cancel.addEventListener('click', onCancelClick);
+  document.addEventListener('keydown', onKey);
+}
 </script>
+
+
 
 
 

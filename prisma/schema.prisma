@@ -63,14 +63,15 @@ model Airport {
 model Runway {
   id          Int     @id @default(autoincrement())
   airportIcao String
-  ident1      String?
-  ident2      String?
+  ident1      String?   // MUST be nullable
+  ident2      String?   // MUST be nullable
   lat1        Float
   lon1        Float
   lat2        Float
   lon2        Float
-  airport     Airport @relation(fields: [airportIcao], references: [icao], onDelete: Cascade, onUpdate: NoAction, map: "runway_airport_fk")
+  airport     Airport @relation(fields: [airportIcao], references: [icao], onDelete: Cascade)
 }
+
 
 model AirportScenery {
   id          Int         @id @default(autoincrement())
@@ -120,4 +121,12 @@ enum Simulator {
 enum SceneryType {
   Freeware
   Payware
+}
+
+model DocumentationAccessRequest {
+  id        Int      @id @default(autoincrement())
+  cid       Int
+  pattern   String
+  status    String   @default("PENDING")
+  createdAt DateTime @default(now())
 }

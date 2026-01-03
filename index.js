@@ -153,6 +153,9 @@ async function loadTobtBookingsFromDb() {
 /* ===== EXPRESS + HTTP SERVER ===== */
 const app = express();
 
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 
@@ -494,8 +497,7 @@ app.post(
 );
 
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+
 
 function rebuildAllTobtSlots() {
   // Clear existing slots
@@ -2352,7 +2354,8 @@ app.get('/api/icao/:icao/atis', async (req, res) => {
 
 
 
-
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 
 app.get('/admin/api/scenery/pending', requireAdmin, async (req, res) => {
@@ -2497,6 +2500,17 @@ app.get('/icao/:icao', async (req, res) => {
 >
   ➕ Upload Document
 </button>
+<script>
+  window.IS_LOGGED_IN = ${req.session?.user?.data ? 'true' : 'false'};
+</script>
+<button
+  class="action-btn hidden"
+  id="requestDocAccess"
+  data-icao="${icao}"
+>
+  🔐 Request access to upload documents
+</button>
+
 
 
 
@@ -2852,6 +2866,56 @@ function loadAirportDocs(icao) {
 
 </script>
 <script>
+document.addEventListener('DOMContentLoaded', () => {
+  if (!window.IS_LOGGED_IN) return;
+
+  const btn = document.getElementById('requestDocAccess');
+  if (btn) {
+    btn.classList.remove('hidden');
+  }
+});
+</script>
+
+<script>
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('#requestDocAccess');
+  if (!btn) return;
+
+  const icao = btn.dataset.icao;
+
+  openConfirmModalAsync({
+    title: 'Request documentation access',
+    message: 'Request permission to upload documents for ' + icao + '?',
+    confirmText: 'Confirm',
+    cancelText: 'Cancel',
+    onConfirm: async ({ showOk }) => {
+      const res = await fetch('/api/documentation-access/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ icao: icao })
+      });
+
+      if (!res.ok) {
+        showOk('Request failed', 'Unable to submit access request. Please try again.');
+        return true;
+      }
+
+      // Success: update SAME modal content
+      showOk('Request sent', 'Your request has been sent to an administrator for review.');
+
+      // Optional: hide/disable the request button after success
+      btn.classList.add('hidden');
+
+      return true;
+    }
+  });
+});
+</script>
+
+
+
+<script>
 document.addEventListener('DOMContentLoaded', function () {
   const uploadModal = document.getElementById('uploadDocModal');
   const openUploadBtn = document.getElementById('openUploadDoc');
@@ -3022,6 +3086,43 @@ app.get('/api/icao/:icao/departures/live', (req, res) => {
 
   res.json(departures);
 });
+
+app.post(
+  '/api/documentation-access/request',
+  requireLogin,
+  async (req, res) => {
+    const cid = Number(req.session.user.data.cid);
+    const { icao } = req.body;
+
+    if (!icao || !/^[A-Z]{4}$/.test(icao)) {
+      return res.status(400).json({ error: 'Invalid ICAO' });
+    }
+
+    // Prevent duplicate pending requests
+    const existing = await prisma.documentationAccessRequest.findFirst({
+      where: {
+        cid,
+        pattern: icao.toUpperCase(),
+        status: 'PENDING'
+      }
+    });
+
+    if (existing) {
+      return res.status(409).json({ error: 'Request already pending' });
+    }
+
+    await prisma.documentationAccessRequest.create({
+      data: {
+        cid,
+        pattern: icao.toUpperCase(),
+        status: 'PENDING'
+      }
+    });
+
+    res.json({ success: true });
+  }
+);
+
 
 app.post('/api/scenery/submit', requireLogin, async (req, res) => {
   try {
@@ -3284,6 +3385,105 @@ emitToIcao(
 
   res.json({ success: true });
 });
+
+
+app.get('/admin/api/documentation-requests', requireAdmin, async (req, res) => {
+  const requests = await prisma.documentationAccessRequest.findMany({
+    where: { status: 'PENDING' },
+    orderBy: { requestedAt: 'asc' }
+  });
+
+  res.json(requests);
+});
+
+app.post('/admin/api/documentation-requests/:id/deny', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const adminCid = Number(req.session.user.data.cid);
+
+  await prisma.documentationAccessRequest.update({
+    where: { id },
+    data: {
+      status: 'DENIED',
+      reviewedBy: adminCid,
+      reviewedAt: new Date()
+    }
+  });
+
+  res.json({ success: true });
+});
+
+
+app.post(
+  '/admin/api/documentation-requests/:id/approve',
+  requireAdmin,
+  async (req, res) => {
+    const id = Number(req.params.id);
+    const adminCid = Number(req.session.user.data.cid);
+
+    const request = await prisma.documentationAccessRequest.findUnique({
+      where: { id }
+    });
+
+    if (!request || request.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Invalid request' });
+    }
+
+    // 1️⃣ Grant permission
+    await prisma.documentationPermission.create({
+      data: {
+        cid: request.cid,
+        pattern: request.pattern
+      }
+    });
+
+    // 2️⃣ Mark request approved
+    await prisma.documentationAccessRequest.update({
+      where: { id },
+      data: {
+        status: 'APPROVED',
+        reviewedBy: adminCid,
+        reviewedAt: new Date()
+      }
+    });
+
+    res.json({ success: true });
+  }
+);
+
+
+app.post('/api/docs/request-access', requireLogin, async (req, res) => {
+  const cid = Number(req.session.user.data.cid);
+  const icao = req.body.icao?.toUpperCase();
+
+  if (!icao || icao.length !== 4) {
+    return res.status(400).json({ error: 'Invalid ICAO' });
+  }
+
+  // Prevent duplicates
+  const existing = await prisma.documentationAccessRequest.findFirst({
+    where: {
+  cid,
+  pattern: icao.toUpperCase(),
+  status: 'PENDING'
+}
+
+  });
+
+  if (existing) {
+    return res.status(409).json({ error: 'Request already pending' });
+  }
+
+  await prisma.documentationAccessRequest.create({
+  data: {
+    cid,
+    pattern: icao.toUpperCase()
+  }
+});
+
+
+  res.json({ success: true });
+});
+
 
 app.post('/api/tobt/book', requireLogin, async (req, res) => {
   try {
