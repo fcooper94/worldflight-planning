@@ -2470,13 +2470,14 @@ app.get('/icao/:icao', async (req, res) => {
     </thead>
     <tbody id="airportDocs"></tbody>
   </table>
- <button
-  class="action-btn"
+<button
+  class="action-btn hidden"
   id="openUploadDoc"
   data-icao="${icao}"
 >
-  Upload Document
+  ➕ Upload Document
 </button>
+
 
 
 
@@ -2799,13 +2800,21 @@ function loadDepartures(icao) {
 }
 
 
-
 function loadAirportDocs(icao) {
   fetch('/api/icao/' + icao + '/docs')
     .then(res => res.json())
-    .then(docs => {
+    .then(data => {
       const tbody = document.getElementById('airportDocs');
+      const uploadBtn = document.getElementById('openUploadDoc');
+
       if (!tbody) return;
+
+      // ✅ Toggle upload button
+      if (uploadBtn) {
+        uploadBtn.classList.toggle('hidden', !data.canUpload);
+      }
+
+      const docs = data.docs;
 
       tbody.innerHTML = docs.length
         ? docs.map(d =>
@@ -2819,6 +2828,7 @@ function loadAirportDocs(icao) {
         : '<tr><td colspan="4" class="empty">No documentation available</td></tr>';
     });
 }
+
 
 </script>
 <script>
@@ -3091,17 +3101,16 @@ app.get('/api/icao/:icao/controllers', async (req, res) => {
   }
 });
 
-
 app.get('/api/icao/:icao/docs', async (req, res) => {
   try {
     const icao = req.params.icao.toUpperCase();
+    const user = req.session?.user?.data || null;
 
     const docs = await prisma.airportDocument.findMany({
       where: { icao },
       orderBy: { uploadedAt: 'desc' }
     });
 
-    // Fetch all users in one query
     const users = await prisma.user.findMany({
       where: {
         cid: { in: docs.map(d => d.uploadedBy) }
@@ -3112,22 +3121,28 @@ app.get('/api/icao/:icao/docs', async (req, res) => {
       users.map(u => [u.cid, u.name])
     );
 
-    res.json(
-      docs.map(d => ({
+    const canUpload = user
+      ? await canEditDocumentation(user.cid, icao)
+      : false;
+
+    res.json({
+      canUpload,
+      docs: docs.map(d => ({
         filename: d.filename,
         url: `/uploads/${icao}/${encodeURIComponent(d.filename)}`,
         type: 'PDF',
         updated: d.uploadedAt,
         submittedBy: userMap[d.uploadedBy]
           ? `${userMap[d.uploadedBy]} (${d.uploadedBy})`
-          : d.uploadedBy
+          : String(d.uploadedBy)
       }))
-    );
+    });
   } catch (err) {
     console.error('[DOCS API]', err);
-    res.status(500).json([]);
+    res.status(500).json({ canUpload: false, docs: [] });
   }
 });
+
 
 
 
