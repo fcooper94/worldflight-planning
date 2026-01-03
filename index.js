@@ -3285,7 +3285,7 @@ container.classList.remove('hidden');
 // VATSIM ATIS (PRIMARY)
 vatsimList.forEach(function (atis) {
   const card = document.createElement('section');
-  card.className = 'card vatsim-atis';
+  card.className = 'atis-entry vatsim-atis';
 
         card.innerHTML =
           '<div class="atis-container">' +
@@ -3315,7 +3315,8 @@ vatsimList.forEach(function (atis) {
 
       if (faa && faa.available) {
   const card = document.createElement('section');
-  card.className = 'card faa-atis';
+  card.className = 'atis-entry faa-atis';
+
 
         card.innerHTML =
           '<div class="atis-container">' +
