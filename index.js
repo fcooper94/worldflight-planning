@@ -622,9 +622,6 @@ function isWorldFlightDestination(icao) {
   );
 }
 
-
-
-
 /* ===== ADMIN CID WHITELIST ===== */
 const ADMIN_CIDS = [10000010, 1303570, 10000005];
 
@@ -2052,17 +2049,34 @@ app.get('/admin/documentation-access', requireAdmin, (req, res) => {
   </table>
 
   <form id="addDocAccess">
-    <input
-      id="newPattern"
-      placeholder="EGLL or EG**"
-      required
-    >
+    <input id="newPattern" placeholder="EGLL or EG**" required>
     <button class="action-btn">Add Permission</button>
   </form>
 </section>
 
+<section class="card card-narrow doc-access-requests">
+  <h2>Documentation Upload Access Requests</h2>
+
+  <table class="admin-table">
+    <thead>
+      <tr>
+        <th>CID</th>
+        <th>Pattern</th>
+        <th>Requested</th>
+        <th>Status</th>
+<th>Actions</th>
+
+      </tr>
+    </thead>
+    <tbody id="docAccessRequestsTable">
+      <tr><td colspan="4" class="empty">Loading...</td></tr>
+    </tbody>
+  </table>
+</section>
+
 <script>
 document.addEventListener('DOMContentLoaded', function () {
+
   var searchForm = document.getElementById('docAccessSearch');
   var cidInput = document.getElementById('docAccessCid');
   var panel = document.getElementById('docAccessPanel');
@@ -2070,12 +2084,27 @@ document.addEventListener('DOMContentLoaded', function () {
   var currentCidSpan = document.getElementById('currentCid');
   var addForm = document.getElementById('addDocAccess');
   var patternInput = document.getElementById('newPattern');
+  var requestsTable = document.getElementById('docAccessRequestsTable');
 
   var currentCid = null;
+
+  function escapeHtml(s) {
+    return String(s || '')
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+  }
+
+  /* ===============================
+     EXISTING PERMISSION MANAGEMENT
+     =============================== */
 
   searchForm.addEventListener('submit', function (e) {
     e.preventDefault();
     currentCid = cidInput.value.trim();
+
     if (!/^[0-9]+$/.test(currentCid)) {
       alert('Invalid CID');
       return;
@@ -2088,14 +2117,14 @@ document.addEventListener('DOMContentLoaded', function () {
         currentCidSpan.textContent = currentCid;
 
         table.innerHTML = rows.length
-          ? rows.map(r =>
-              '<tr>' +
-                '<td>' + r.pattern + '</td>' +
-                '<td>' +
-                  '<button data-id="' + r.id + '" class="btn-reject">Remove</button>' +
-                '</td>' +
-              '</tr>'
-            ).join('')
+          ? rows.map(function (r) {
+              return (
+                '<tr>' +
+                  '<td>' + escapeHtml(r.pattern) + '</td>' +
+                  '<td><button data-id="' + r.id + '" class="btn-reject">Remove</button></td>' +
+                '</tr>'
+              );
+            }).join('')
           : '<tr><td colspan="2" class="empty">No permissions</td></tr>';
       });
   });
@@ -2110,8 +2139,9 @@ document.addEventListener('DOMContentLoaded', function () {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cid: currentCid, pattern })
-    })
-    .then(() => searchForm.dispatchEvent(new Event('submit')));
+    }).then(function () {
+      searchForm.dispatchEvent(new Event('submit'));
+    });
   });
 
   table.addEventListener('click', function (e) {
@@ -2120,12 +2150,130 @@ document.addEventListener('DOMContentLoaded', function () {
 
     fetch('/admin/api/documentation/' + btn.dataset.id, {
       method: 'DELETE'
-    })
-    .then(() => searchForm.dispatchEvent(new Event('submit')));
+    }).then(function () {
+      searchForm.dispatchEvent(new Event('submit'));
+    });
   });
+
+  /* ===============================
+     ACCESS REQUEST MANAGEMENT
+     =============================== */
+
+ function loadRequests() {
+  fetch('/admin/api/documentation-access-requests')
+    .then(r => r.json())
+    .then(rows => {
+      requestsTable.innerHTML = rows.length
+        ? rows.map(function (r) {
+            var requested = r.requestedAt
+              ? new Date(r.requestedAt).toISOString().replace('T',' ').slice(0,19)
+              : '';
+
+            var statusLabel =
+              r.status === 'DENIED'
+                ? '<span class="badge badge-denied">Denied</span>'
+                : '<span class="badge badge-pending">Pending</span>';
+
+            // ✅ Decide actions FIRST
+            var actionsHtml;
+            if (r.status === 'DENIED') {
+              actionsHtml =
+                '<button class="action-btn btn-delete" data-id="' + r.id + '">Delete</button>';
+            } else {
+              actionsHtml =
+                '<button class="action-btn btn-approve" data-id="' + r.id + '">Approve</button> ' +
+                '<button class="action-btn btn-deny" data-id="' + r.id + '">Deny</button>';
+            }
+
+            // ✅ Then render row
+            return (
+              '<tr data-status="' + r.status + '">' +
+                '<td>' + escapeHtml(r.cid) + '</td>' +
+                '<td><strong>' + escapeHtml(r.pattern) + '</strong></td>' +
+                '<td>' + requested + '</td>' +
+                '<td>' + statusLabel + '</td>' +
+                '<td>' + actionsHtml + '</td>' +
+              '</tr>'
+            );
+          }).join('')
+        : '<tr><td colspan="5" class="empty">No requests</td></tr>';
+    })
+    .catch(function () {
+      requestsTable.innerHTML =
+        '<tr><td colspan="5" class="empty">Failed to load requests</td></tr>';
+    });
+}
+
+
+
+  requestsTable.addEventListener('click', function (e) {
+    var approveBtn = e.target.closest('.btn-approve');
+var denyBtn = e.target.closest('.btn-deny');
+var deleteBtn = e.target.closest('.btn-delete');
+
+    if (!approveBtn && !denyBtn && !deleteBtn) return;
+
+var id = (approveBtn || denyBtn || deleteBtn).dataset.id;
+var action = approveBtn
+  ? 'approve'
+  : denyBtn
+    ? 'deny'
+    : 'delete';
+
+
+    openConfirmModal({
+  title:
+    action === 'delete'
+      ? 'Delete Request'
+      : action === 'approve'
+        ? 'Approve Access'
+        : 'Deny Access',
+  message:
+    action === 'delete'
+      ? 'This will permanently remove the request. This cannot be undone.'
+      : action === 'approve'
+        ? 'Grant documentation upload access?'
+        : 'Deny this access request?'
+}).then(function (ok) {
+  if (!ok) return;
+
+  var url;
+var method = 'POST';
+
+if (action === 'approve') {
+  url = '/admin/api/documentation-access-requests/' + id + '/approve';
+} else if (action === 'deny') {
+  url = '/admin/api/documentation-access-requests/' + id + '/deny';
+} else if (action === 'delete') {
+  url = '/admin/api/documentation-access-requests/' + id;
+  method = 'DELETE';
+}
+
+fetch(url, {
+  method,
+  headers: { 'Content-Type': 'application/json' }
+})
+.then(function (r) {
+  if (!r.ok) throw new Error('Request failed');
+  return r.json();
+})
+.then(function () {
+  loadRequests();
+})
+.catch(function (err) {
+  alert(err.message || 'Failed to process request');
+});
+
+});
+
+  });
+
+  // initial load
+  loadRequests();
+
 });
 </script>
-  `;
+`;
 
   res.send(renderLayout({
     title: 'Documentation Access',
@@ -2136,6 +2284,19 @@ document.addEventListener('DOMContentLoaded', function () {
   }));
 });
 
+app.get(
+  '/admin/api/documentation-access-requests/pending-count',
+  requireAdmin,
+  async (req, res) => {
+    const count = await prisma.documentationAccessRequest.count({
+      where: { status: 'PENDING' }
+    });
+
+    res.json({ count });
+  }
+);
+
+
 app.get('/admin/api/documentation/:cid', requireAdmin, async (req, res) => {
   const cid = Number(req.params.cid);
 
@@ -2145,6 +2306,22 @@ app.get('/admin/api/documentation/:cid', requireAdmin, async (req, res) => {
 
   res.json(rows);
 });
+
+app.delete(
+  '/admin/api/documentation-access-requests/:id',
+  requireAdmin,
+  async (req, res) => {
+    const id = Number(req.params.id);
+
+    await prisma.documentationAccessRequest.delete({
+      where: { id }
+    });
+
+    res.json({ ok: true });
+  }
+);
+
+
 
 app.post('/admin/api/documentation', requireAdmin, async (req, res) => {
   const { cid, pattern } = req.body;
@@ -2188,6 +2365,74 @@ app.delete('/admin/api/documentation/:id', requireAdmin, async (req, res) => {
   res.json({ success: true });
 });
 
+app.get('/admin/api/documentation-access-requests', requireAdmin, async (req, res) => {
+  const rows = await prisma.documentationAccessRequest.findMany({
+  where: {
+    status: { in: ['PENDING', 'DENIED'] }
+  },
+  orderBy: { createdAt: 'asc' }
+});
+
+  res.json(rows);
+});
+
+app.post('/admin/api/documentation-access-requests/:id/approve', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const adminCid = Number(req.session.user?.data?.cid);
+
+  const request = await prisma.documentationAccessRequest.findUnique({ where: { id } });
+  if (!request) return res.status(404).json({ error: 'Not found' });
+  if (request.status !== 'PENDING') return res.status(400).json({ error: 'Not pending' });
+
+  await prisma.$transaction(async (tx) => {
+    // recommended de-dupe
+    const exists = await tx.documentationPermission.findFirst({
+      where: { cid: request.cid, pattern: request.pattern }
+    });
+
+    if (!exists) {
+      await tx.documentationPermission.create({
+        data: { cid: request.cid, pattern: request.pattern }
+      });
+    }
+
+    await tx.documentationAccessRequest.update({
+      where: { id },
+      data: {
+        status: 'APPROVED',
+        reviewedBy: adminCid,
+        reviewedAt: new Date()
+      }
+    });
+  });
+
+  res.json({ success: true });
+});
+
+app.post('/admin/api/documentation-access-requests/:id/deny', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const adminCid = Number(req.session.user?.data?.cid);
+
+  const request = await prisma.documentationAccessRequest.findUnique({ where: { id } });
+  if (!request) return res.status(404).json({ error: 'Not found' });
+  if (request.status !== 'PENDING') return res.status(400).json({ error: 'Not pending' });
+
+  await prisma.documentationAccessRequest.update({
+  where: { id },
+  data: {
+    status: 'DENIED',
+    reviewedBy: adminCid,
+    reviewedAt: new Date()
+  }
+});
+
+
+  res.json({ success: true });
+});
 
 
 app.get('/admin/scenery', requireAdmin, (req, res) => {
@@ -3389,7 +3634,9 @@ emitToIcao(
 
 app.get('/admin/api/documentation-requests', requireAdmin, async (req, res) => {
   const requests = await prisma.documentationAccessRequest.findMany({
-    where: { status: 'PENDING' },
+    where: {
+    status: { in: ['PENDING', 'DENIED'] }
+  },
     orderBy: { requestedAt: 'asc' }
   });
 
@@ -3400,14 +3647,15 @@ app.post('/admin/api/documentation-requests/:id/deny', requireAdmin, async (req,
   const id = Number(req.params.id);
   const adminCid = Number(req.session.user.data.cid);
 
-  await prisma.documentationAccessRequest.update({
-    where: { id },
-    data: {
-      status: 'DENIED',
-      reviewedBy: adminCid,
-      reviewedAt: new Date()
-    }
-  });
+ await prisma.documentationAccessRequest.update({
+  where: { id },
+  data: {
+    status: 'DENIED',
+    reviewedBy: adminCid,
+    reviewedAt: new Date()
+  }
+});
+
 
   res.json({ success: true });
 });
@@ -3438,13 +3686,12 @@ app.post(
 
     // 2️⃣ Mark request approved
     await prisma.documentationAccessRequest.update({
-      where: { id },
-      data: {
-        status: 'APPROVED',
-        reviewedBy: adminCid,
-        reviewedAt: new Date()
-      }
-    });
+  where: { id },
+  data: {
+    status: 'APPROVED'
+  }
+});
+
 
     res.json({ success: true });
   }

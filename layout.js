@@ -86,10 +86,14 @@ export default function renderLayout({
   </span>
 </a>
 
-<a href="/admin/documentation-access" class="nav-item">
+<a href="/admin/documentation-access" class="nav-item" id="docAccessNavItem">
   <span class="icon">📄</span>
-  <span class="label">Manage User Access</span>
+  <span class="label">
+    Doc Upload Perms
+    <span id="docAccessBadge" class="nav-badge hidden"></span>
+  </span>
 </a>
+
 
 
     </div>
@@ -865,6 +869,29 @@ document.addEventListener('click', (e) => {
     console.error('Failed to load scenery badge', err);
   }
 })();
+</script>
+<script>
+(async function updateDocAccessBadge() {
+  try {
+    const res = await fetch('/admin/api/documentation-access-requests/pending-count');
+    if (!res.ok) return;
+
+    const { count } = await res.json();
+    const badge = document.getElementById('docAccessBadge');
+
+    if (!badge) return;
+
+    if (count > 0) {
+      badge.textContent = count;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  } catch (err) {
+    console.error('Failed to load documentation access badge', err);
+  }
+})();
+
 </script>
 
 

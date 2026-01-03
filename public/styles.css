@@ -3925,3 +3925,104 @@ html[data-map-theme="light"] .ac-label {
   font-size: 12px;
   color: #9fb3c8;
 }
+.doc-access-requests .admin-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0 6px;
+}
+
+.doc-access-requests .admin-table thead th {
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: #9aa4b2;
+  padding: 8px 12px;
+}
+
+.doc-access-requests .admin-table tbody tr {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 8px;
+}
+
+.doc-access-requests .admin-table tbody td {
+  padding: 10px 12px;
+  vertical-align: middle;
+}
+
+.doc-access-requests .admin-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Status badges */
+.doc-access-requests .badge {
+  display: inline-block;
+  min-width: 72px;
+  text-align: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.doc-access-requests .badge-pending {
+  background: rgba(255, 193, 7, 0.15);
+  color: #ffc107;
+}
+
+.doc-access-requests .badge-denied {
+  background: rgba(220, 53, 69, 0.15);
+  color: #dc3545;
+}
+
+/* Actions column */
+.doc-access-requests .admin-table td:last-child {
+  white-space: nowrap;
+}
+
+.doc-access-requests .admin-table td:last-child em {
+  color: #666;
+  font-style: normal;
+}
+
+/* Buttons */
+.doc-access-requests .action-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.doc-access-requests .btn-approve {
+  background: #1faa59;
+  color: #fff;
+}
+
+.doc-access-requests .btn-approve:hover {
+  background: #17914c;
+}
+
+.doc-access-requests .btn-deny {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.2);
+  color: #ccc;
+}
+
+.doc-access-requests .btn-deny:hover {
+  border-color: #dc3545;
+  color: #dc3545;
+}
+
+/* Dim denied rows */
+.doc-access-requests tr[data-status="DENIED"] {
+  opacity: 0.55;
+}
+.doc-access-requests .btn-delete {
+  background: transparent;
+  border: 1px solid rgba(220, 53, 69, 0.4);
+  color: #dc3545;
+}
+
+.doc-access-requests .btn-delete:hover {
+  background: rgba(220, 53, 69, 0.15);
+}

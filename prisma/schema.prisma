@@ -63,15 +63,14 @@ model Airport {
 model Runway {
   id          Int     @id @default(autoincrement())
   airportIcao String
-  ident1      String?   // MUST be nullable
-  ident2      String?   // MUST be nullable
+  ident1      String?
+  ident2      String?
   lat1        Float
   lon1        Float
   lat2        Float
   lon2        Float
-  airport     Airport @relation(fields: [airportIcao], references: [icao], onDelete: Cascade)
+  airport     Airport @relation(fields: [airportIcao], references: [icao], onDelete: Cascade, onUpdate: NoAction, map: "runway_airport_fk")
 }
-
 
 model AirportScenery {
   id          Int         @id @default(autoincrement())
@@ -112,6 +111,20 @@ model AirportDocument {
   @@index([icao])
 }
 
+model DocumentationAccessRequest {
+  id          Int       @id @default(autoincrement())
+  cid         Int
+  pattern     String    @db.VarChar(4)
+  requestedAt DateTime  @default(now()) @db.Timestamp(6)
+  status      String    @default("PENDING") @db.VarChar(20)
+  reviewedBy  Int?
+  reviewedAt  DateTime? @db.Timestamp(6)
+  createdAt   DateTime  @default(now()) @db.Timestamp(6)
+
+  @@index([cid])
+  @@index([status])
+}
+
 enum Simulator {
   MSFS
   XPLANE
@@ -121,12 +134,4 @@ enum Simulator {
 enum SceneryType {
   Freeware
   Payware
-}
-
-model DocumentationAccessRequest {
-  id        Int      @id @default(autoincrement())
-  cid       Int
-  pattern   String
-  status    String   @default("PENDING")
-  createdAt DateTime @default(now())
 }
