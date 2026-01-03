@@ -426,13 +426,6 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function matchesIcaoPattern(pattern, icao) {
-  if (pattern.endsWith('**')) {
-    return icao.startsWith(pattern.slice(0, -2));
-  }
-  return pattern === icao;
-}
-
 async function canEditDocumentation(cid, icao) {
   const cidInt = Number(cid);
   if (!Number.isFinite(cidInt)) return false;
@@ -445,6 +438,19 @@ async function canEditDocumentation(cid, icao) {
     matchesIcaoPattern(r.pattern.toUpperCase(), icao.toUpperCase())
   );
 }
+
+
+function matchesIcaoPattern(pattern, icao) {
+  if (pattern.length !== 4 || icao.length !== 4) return false;
+
+  for (let i = 0; i < 4; i++) {
+    if (pattern[i] === '*') continue;
+    if (pattern[i] !== icao[i]) return false;
+  }
+
+  return true;
+}
+
 
 
 app.post(
@@ -2145,18 +2151,32 @@ app.post('/admin/api/documentation', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Missing fields' });
   }
 
-  const normalized = pattern.toUpperCase();
+  const normalized = pattern.toUpperCase().trim();
 
-  if (!/^[A-Z]{2}(\*\*|[A-Z]{2})$/.test(normalized)) {
+  // 1️⃣ Validate pattern format
+  if (!/^[A-Z*]{4}$/.test(normalized)) {
     return res.status(400).json({ error: 'Invalid ICAO pattern' });
   }
 
+  // 2️⃣ Restrict global wildcard ****
+  if (
+    normalized === '****' &&
+    !ADMIN_CIDS.includes(Number(req.session.user.data.cid))
+  ) {
+    return res.status(403).json({ error: 'Not allowed' });
+  }
+
+  // 3️⃣ Create permission
   await prisma.documentationPermission.create({
-    data: { cid: Number(cid), pattern: normalized }
+    data: {
+      cid: Number(cid),
+      pattern: normalized
+    }
   });
 
   res.json({ success: true });
 });
+
 
 app.delete('/admin/api/documentation/:id', requireAdmin, async (req, res) => {
   await prisma.documentationPermission.delete({
