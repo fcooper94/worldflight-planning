@@ -42,6 +42,62 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
+// ---- ATC route geometry cache (in-memory) ----
+// Cache values can be: { value, ts } OR an in-flight Promise
+const ATC_CACHE = new Map();
+const ATC_CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours; adjust as needed
+
+function cacheGet(key) {
+  const entry = ATC_CACHE.get(key);
+  if (!entry) return null;
+
+  // In-flight promise
+  if (entry && typeof entry.then === 'function') return entry;
+
+  // Expired
+  if (Date.now() - entry.ts > ATC_CACHE_TTL_MS) {
+    ATC_CACHE.delete(key);
+    return null;
+  }
+
+  return entry.value;
+}
+
+function cacheSet(key, value) {
+  ATC_CACHE.set(key, { value, ts: Date.now() });
+}
+
+// Simple concurrency limiter (no dependencies)
+function createLimiter(maxConcurrent = 8) {
+  let active = 0;
+  const queue = [];
+
+  const runNext = () => {
+    if (active >= maxConcurrent) return;
+    const item = queue.shift();
+    if (!item) return;
+
+    active++;
+    const { fn, resolve, reject } = item;
+
+    Promise.resolve()
+      .then(fn)
+      .then(resolve, reject)
+      .finally(() => {
+        active--;
+        runNext();
+      });
+  };
+
+  return (fn) =>
+    new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      runNext();
+    });
+}
+
+const limitAtc = createLimiter(10); // tune: 6–12 depending on DB capacity
+
 
 /* ===========================
    OFFICIAL TEAM CALLSIGN RULES
@@ -818,7 +874,7 @@ const ADMIN_CIDS = [10000010, 1303570, 10000005];
 
 /* ===== GOOGLE SHEET ===== */
 const GOOGLE_SHEET_CSV_URL =
-  'https://docs.google.com/spreadsheets/d/e/2PACX-1vRG6DbmhAQpFmOophiGjjSh_UUGdTo-LA_sNNexrMpkkH2ECHl8eDsdxM24iY8Itw06pUZZXWtvmUNg/pub?output=csv';
+  'https://docs.google.com/spreadsheets/d/e/2PACX-1vQupCJv8FX-6OZ_wvbbtCgDXr8D5E8cOQJvotaQVUcDnbcnP6Og32_TEMI92-coC7MaOc2FqQs6LQ3c/pub?output=csv';
 
 let adminSheetCache = [];
 let lastDepartureSnapshot = new Set();
@@ -1935,8 +1991,313 @@ app.get('/', (req, res) => {
 });
 
 
+// ===============================
+// WF WORLD MAP ROUTE API
+// ===============================
+
+function parseLatLonFix(token) {
+  // Supports: 52N020W, 5230N02000W, 52N020E, 52S020W
+  // Returns { lat, lon } or null
+  const t = token.toUpperCase().trim();
+
+  // 52N020W
+  let m = t.match(/^(\d{2})(N|S)(\d{3})(E|W)$/);
+  if (m) {
+    const lat = Number(m[1]) * (m[2] === 'S' ? -1 : 1);
+    const lon = Number(m[3]) * (m[4] === 'W' ? -1 : 1);
+    return { lat, lon };
+  }
+
+  // 5230N02000W (ddmm + dddmm)
+  m = t.match(/^(\d{2})(\d{2})(N|S)(\d{3})(\d{2})(E|W)$/);
+  if (m) {
+    const latDeg = Number(m[1]);
+    const latMin = Number(m[2]);
+    const lonDeg = Number(m[4]);
+    const lonMin = Number(m[5]);
+
+    const lat = (latDeg + latMin / 60) * (m[3] === 'S' ? -1 : 1);
+    const lon = (lonDeg + lonMin / 60) * (m[6] === 'W' ? -1 : 1);
+    return { lat, lon };
+  }
+
+  return null;
+}
+
+function tokenizeRoute(atcRouteRaw) {
+  if (!atcRouteRaw) return [];
+  // Split on whitespace, remove common separators
+  return atcRouteRaw
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[.,;]+/g, ' ')
+    .split(/\s+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+async function resolveAtcRoutePoints({ fromIcao, toIcao, atcRoute }, prisma) {
+  const points = [];
+
+  // Always start with departure airport if present
+  const fromAp = await prisma.airport.findUnique({ where: { icao: fromIcao } });
+  if (fromAp?.lat && fromAp?.lon) points.push({ lat: fromAp.lat, lon: fromAp.lon, name: fromIcao });
+
+  const tokens = tokenizeRoute(atcRoute);
+
+  // Resolve intermediate points:
+  // - lat/lon fixes (52N020W etc)
+  // - any ICAO tokens that exist in prisma.airport (helps when route includes alternates or intermediate ICAOs)
+  for (const tok of tokens) {
+    const fix = parseLatLonFix(tok);
+    if (fix) {
+      points.push({ ...fix, name: tok });
+      continue;
+    }
+
+    if (/^[A-Z]{4}$/.test(tok)) {
+      const ap = await prisma.airport.findUnique({ where: { icao: tok } });
+      if (ap?.lat && ap?.lon) points.push({ lat: ap.lat, lon: ap.lon, name: tok });
+    }
+  }
+
+  // Always end with arrival airport if present
+  const toAp = await prisma.airport.findUnique({ where: { icao: toIcao } });
+  if (toAp?.lat && toAp?.lon) points.push({ lat: toAp.lat, lon: toAp.lon, name: toIcao });
+
+  // De-dupe consecutive identical points
+  const cleaned = [];
+  for (const p of points) {
+    const prev = cleaned[cleaned.length - 1];
+    if (!prev || prev.lat !== p.lat || prev.lon !== p.lon) cleaned.push(p);
+  }
+
+  return cleaned;
+}
+
+// ===============================
+// WF ROUTE HELPERS
+// ===============================
+
+function buildFullRouteChain(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+
+  // Index legs by FROM
+  const byFrom = new Map();
+  const byTo = new Map();
+
+  for (const r of rows) {
+    if (!r?.from || !r?.to) continue;
+    const from = String(r.from).toUpperCase();
+    const to = String(r.to).toUpperCase();
+
+    byFrom.set(from, r);
+    byTo.set(to, r);
+  }
+
+  // Find starting leg (FROM that is never a TO)
+  let start = null;
+  for (const r of rows) {
+    const from = String(r.from).toUpperCase();
+    if (!byTo.has(from)) {
+      start = r;
+      break;
+    }
+  }
+
+  // Fallback if perfectly circular
+  if (!start) start = rows[0];
+
+  // Walk the chain
+  const chain = [];
+  let current = start;
+
+  while (current) {
+    chain.push(current);
+    const nextFrom = String(current.to).toUpperCase();
+    current = byFrom.get(nextFrom) || null;
+  }
+
+  return chain;
+}
+
+const atcRouteCache = new Map();
+
+app.get('/api/wf/world-map', async (req, res) => {
+  const a = (req.query.a || '').toString().trim().toUpperCase();
+  const b = (req.query.b || '').toString().trim().toUpperCase();
+  const c = (req.query.c || '').toString().trim().toUpperCase();
+
+  let legs = [];
+
+  // --------------------------------------------------
+  // Explicit A -> B -> C override (URL-driven)
+  // --------------------------------------------------
+  if (a && b && c) {
+    const ab = adminSheetCache.find(r => r.from === a && r.to === b) || null;
+    const bc = adminSheetCache.find(r => r.from === b && r.to === c) || null;
+
+    if (ab) legs.push(ab);
+    if (bc) legs.push(bc);
+  }
+
+  // --------------------------------------------------
+  // Default: FULL WF SCHEDULE (ordered by r.number)
+  // --------------------------------------------------
+  else {
+    legs = adminSheetCache
+      .filter(r => r?.from && r?.to && r.number != null)
+      .slice()
+      .sort((a, b) => Number(a.number) - Number(b.number));
+  }
+
+  // --------------------------------------------------
+  // Build full WF path: [A, B, C, D, ...]
+  // --------------------------------------------------
+  const wfPath = [];
+  for (let i = 0; i < legs.length; i++) {
+    if (i === 0) wfPath.push(legs[i].from);
+    wfPath.push(legs[i].to);
+  }
+
+  // --------------------------------------------------
+  // Fetch airport coordinates
+  // --------------------------------------------------
+  const airports = {};
+  for (const icao of wfPath) {
+    const ap = await prisma.airport.findUnique({ where: { icao } });
+    if (ap) {
+      airports[icao] = {
+        icao,
+        name: ap.name || icao,
+        lat: ap.lat,
+        lon: ap.lon
+      };
+    }
+  }
+
+  // --------------------------------------------------
+  // ATC polylines (one per leg)
+  // --------------------------------------------------
+  const atcPolylines = await Promise.all(
+  legs.map((leg) =>
+    limitAtc(async () => {
+      const cacheKey = `${leg.from}-${leg.to}-${leg.atc_route || ''}`;
+
+      // 1) cache hit?
+      const cached = cacheGet(cacheKey);
+      if (cached) {
+        // cached may be a Promise (in-flight) or a final value
+        const points = await Promise.resolve(cached);
+        return {
+          from: leg.from,
+          to: leg.to,
+          atc_route: leg.atc_route || '',
+          dep_time_utc: leg.dep_time_utc || '',
+          points
+        };
+      }
+
+      // 2) cache miss -> store in-flight Promise to prevent stampede
+      const inflight = resolveAtcRoutePoints(
+        { fromIcao: leg.from, toIcao: leg.to, atcRoute: leg.atc_route },
+        prisma
+      );
+
+      ATC_CACHE.set(cacheKey, inflight);
+
+      try {
+        const points = await inflight;
+        cacheSet(cacheKey, points);
+
+        return {
+          from: leg.from,
+          to: leg.to,
+          atc_route: leg.atc_route || '',
+          dep_time_utc: leg.dep_time_utc || '',
+          points
+        };
+      } catch (err) {
+        ATC_CACHE.delete(cacheKey);
+        throw err;
+      }
+    })
+  )
+);
 
 
+
+  // --------------------------------------------------
+  // Booking links
+  // --------------------------------------------------
+  const bookingLinks = {};
+  for (const leg of legs) {
+    if (!leg?.from || !leg?.to || !leg?.dep_time_utc) continue;
+    bookingLinks[leg.from] =
+      `/book?from=${encodeURIComponent(leg.from)}&to=${encodeURIComponent(leg.to)}&depTimeUtc=${encodeURIComponent(leg.dep_time_utc)}`;
+  }
+
+  const last = wfPath[wfPath.length - 1];
+  if (last && !bookingLinks[last]) bookingLinks[last] = '/book';
+
+  // --------------------------------------------------
+  // Response
+  // --------------------------------------------------
+  res.json({
+    airports,
+    wfPath,        // FULL WORLD FLIGHT PATH
+    atcPolylines,  // ONE PER LEG
+    bookingLinks
+  });
+});
+
+
+
+
+app.get('/wf/world-map', requireLogin, (req, res) => {
+  const user = req.session.user?.data || null;
+  const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
+
+  const content = `
+    <section class="card card-full" style="height: calc(100vh - 160px);">
+  <h2>WorldFlight Route Map</h2>
+
+      <div class="icao-map" style="height: calc(100% - 46px);">
+        <div id="wfWorldMap" style="width:100%; height:100%;"></div>
+
+        <div class="map-overlay-controls">
+          <button
+  id="wfExpandMapBtn"
+  class="map-overlay-btn"
+  title="Expand map"
+  aria-label="Expand map"
+>
+  ⤢
+</button>
+
+        </div>
+      </div>
+    </section>
+
+    <script>
+      // Optional: allow querystring a/b/c override
+      window.WF_MAP_QUERY = {
+        a: new URLSearchParams(location.search).get('a') || '',
+        b: new URLSearchParams(location.search).get('b') || '',
+        c: new URLSearchParams(location.search).get('c') || ''
+      };
+    </script>
+
+    <script src="/wf-world-map.js"></script>
+  `;
+
+  res.send(renderLayout({
+    title: 'WF World Map',
+    user,
+    isAdmin,
+    content,
+    layoutClass: 'dashboard-full'
+  }));
+});
 
 
 app.get('/auth/login', vatsimLogin);

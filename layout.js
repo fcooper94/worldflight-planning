@@ -16,10 +16,18 @@ export default function renderLayout({
   <link rel="stylesheet" href="/styles.css" />
 
   <!-- Leaflet (global, safe) -->
-  <link
+  <!-- Leaflet (global, safe) -->
+<link
   rel="stylesheet"
   href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
 />
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  defer
+></script>
+<!-- Leaflet JS -->
+<script src="/icao-map.js"></script>
+<script src="/wf-world-map.js"></script>
 
 </head>
 
@@ -52,6 +60,10 @@ export default function renderLayout({
       <a href="/book" class="nav-item">
         <span class="icon">🗓️</span>
         <span class="label">Book a Slot</span>
+      </a>
+      <a href="/wf/world-map" class="nav-item">
+        <span class="icon">🗺️</span>
+        <span class="label">Route Map</span>
       </a>
       <a href="/my-slots" class="nav-item">
         <span class="icon">✈️</span>
@@ -585,11 +597,10 @@ window.location.href = '/icao/' + icao;
 </script>
 
 
-<!-- Leaflet JS -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="/icao-map.js"></script>
 
-<div id="mapModal" class="map-modal hidden">
+
+<div id="mapModal" class="modal map-modal hidden">
+
   <div class="map-modal-backdrop"></div>
 
   <div class="map-modal-panel">
