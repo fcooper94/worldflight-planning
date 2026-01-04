@@ -28,6 +28,7 @@ export default function renderLayout({
 <!-- Leaflet JS -->
 <script src="/icao-map.js"></script>
 <script src="/wf-world-map.js"></script>
+<script src="/socket.io/socket.io.js"></script>
 
 </head>
 

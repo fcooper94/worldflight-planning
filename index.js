@@ -3261,12 +3261,32 @@ app.get('/admin/api/scenery/pending', requireAdmin, async (req, res) => {
   res.json(rows);
 });
 
+function getWorldFlightLegForAirport(icao) {
+  const leg = adminSheetCache.find(r => r.from === icao);
+  if (!leg) return null;
+
+  return {
+    from: leg.from,
+    to: leg.to,
+    dateUtc: leg.date_utc,
+    depTimeUtc: leg.dep_time_utc,          // ✅ SOURCE OF TRUTH
+    depWindow: buildTimeWindow(leg.dep_time_utc),
+    blockTime: leg.block_time || '—'
+  };
+}
+
+
+
 
 
 app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
-app.get('/icao/:icao', async (req, res) => {
+app.get('/icao/:icao', requireLogin, async (req, res) => {
   const icao = req.params.icao.toUpperCase();
+  const isWorldFlight = isWorldFlightDestination(icao);
+  const wfLeg = getWorldFlightLegForAirport(icao); // whatever function you already use
+
+  
   const isLoggedIn = Boolean(req.session?.user?.data);
 
   const documents = await prisma.airportDocument.findMany({
@@ -3274,7 +3294,53 @@ app.get('/icao/:icao', async (req, res) => {
     orderBy: { uploadedAt: 'desc' }
   });
   const content = `
- 
+ <div id="wfSlotBanner" class="wf-slot-banner hidden">
+  <div class="wf-slot-left">
+    <div class="wf-slot-header">
+  <span class="wf-slot-badge">WorldFlight</span>
+  <span class="wf-slot-title">Slots Available</span>
+</div>
+
+
+    <div class="wf-slot-grid">
+      <div class="wf-slot-item">
+        <span class="label">Departure</span>
+        <span class="value" id="wfDep"></span>
+      </div>
+
+      <div class="wf-slot-item">
+        <span class="label">Destination</span>
+        <span class="value" id="wfDest"></span>
+      </div>
+
+      <div class="wf-slot-item">
+        <span class="label">Date</span>
+        <span class="value" id="wfDate"></span>
+      </div>
+
+      <div class="wf-slot-item">
+        <span class="label">Dep Window</span>
+        <span class="value" id="wfWindow"></span>
+      </div>
+
+      <div class="wf-slot-item">
+        <span class="label">Block Time</span>
+        <span class="value" id="wfBlock"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="wf-slot-right">
+    <a id="wfSlotLink" class="wf-slot-cta" href="#">
+      Book Slot
+    </a>
+  </div>
+</div>
+
+
+
+
+
   <section class="card">
 
   <div class="icao-top-row three-cols">
@@ -3396,7 +3462,24 @@ app.get('/icao/:icao', async (req, res) => {
 </button>
 <script>
   window.IS_LOGGED_IN = ${req.session?.user?.data ? 'true' : 'false'};
+  window.IS_WORLD_FLIGHT = ${isWorldFlight ? 'true' : 'false'};
+  window.ICAO = "${icao}";
+  window.WF_LEG = ${wfLeg ? JSON.stringify(wfLeg) : 'null'};
 </script>
+<script>
+(function waitForIo() {
+  if (typeof io === 'undefined') {
+    setTimeout(waitForIo, 50);
+    return;
+  }
+
+  // Create ICAO-scoped socket for this page
+  window.socket = io({
+    query: { icao: window.ICAO }
+  });
+})();
+</script>
+
 <button
   class="action-btn hidden"
   id="requestDocAccess"
@@ -3805,6 +3888,11 @@ function loadAirportDocs(icao) {
 
 </script>
 <script>
+  window.WF_LEG = ${wfLeg ? JSON.stringify(wfLeg) : 'null'};
+</script>
+
+
+<script>
 document.addEventListener('DOMContentLoaded', () => {
   if (!window.IS_LOGGED_IN) return;
 
@@ -3851,6 +3939,62 @@ document.addEventListener('click', (e) => {
   });
 });
 </script>
+<script>
+(function () {
+  var wfBanner = document.getElementById('wfSlotBanner');
+  var wfLink   = document.getElementById('wfSlotLink');
+
+  if (!wfBanner || !wfLink) return;
+
+  function attach() {
+    if (typeof socket === 'undefined') {
+      setTimeout(attach, 100);
+      return;
+    }
+
+    socket.on('unassignedTobtUpdate', function (slots) {
+  if (!Array.isArray(slots) || slots.length === 0) {
+    wfBanner.classList.add('hidden');
+    return;
+  }
+
+  const slot = slots[0];
+  const leg  = window.WF_LEG;
+
+  if (!leg) {
+    wfBanner.classList.add('hidden');
+    return;
+  }
+
+  // ---- Display ----
+  document.getElementById('wfDep').textContent    = leg.from;
+  document.getElementById('wfDest').textContent   = leg.to;
+  document.getElementById('wfDate').textContent   = leg.dateUtc;
+  document.getElementById('wfWindow').textContent = leg.depWindow;
+  document.getElementById('wfBlock').textContent  = leg.blockTime;
+
+  // ---- Booking URL (SCHEDULE TIME ONLY) ----
+  wfLink.href =
+    '/book?' +
+    'from=' + encodeURIComponent(leg.from) +
+    '&to=' + encodeURIComponent(leg.to) +
+    '&dateUtc=' + encodeURIComponent(leg.dateUtc) +
+    '&depTimeUtc=' + encodeURIComponent(leg.depTimeUtc); // ✅ FIX
+
+  wfBanner.classList.remove('hidden');
+});
+
+
+
+    // Request initial state so we don't miss first emit
+    socket.emit('requestSyncAllState', { icao: window.ICAO });
+  }
+
+  attach();
+})();
+</script>
+
+
 
 
 
@@ -5325,7 +5469,12 @@ document.getElementById('refreshScheduleBtn').onclick = async () => {
 <script src="/socket.io/socket.io.js"></script>
 
 <script>
-const socket = io();
+const socket = io({
+  query: {
+    icao: window.ICAO
+  }
+});
+
 
 /* ===== DEP FLOW COLOUR LOGIC ===== */
 function applyDepFlowStyle(input) {
