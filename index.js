@@ -3771,12 +3771,19 @@ function loadAirportDocs(icao) {
     .then(data => {
       const tbody = document.getElementById('airportDocs');
       const uploadBtn = document.getElementById('openUploadDoc');
+      const requestBtn = document.getElementById('requestDocAccess');
 
       if (!tbody) return;
 
-      // ✅ Toggle upload button
-      if (uploadBtn) {
-        uploadBtn.classList.toggle('hidden', !data.canUpload);
+      // 🔒 Always reset both buttons
+      uploadBtn?.classList.add('hidden');
+      requestBtn?.classList.add('hidden');
+
+      // ✅ Mutually exclusive logic
+      if (data.canUpload) {
+        uploadBtn?.classList.remove('hidden');
+      } else if (window.IS_LOGGED_IN) {
+        requestBtn?.classList.remove('hidden');
       }
 
       const docs = data.docs;
@@ -3793,6 +3800,7 @@ function loadAirportDocs(icao) {
         : '<tr><td colspan="4" class="empty">No documentation available</td></tr>';
     });
 }
+
 
 
 </script>
@@ -4167,6 +4175,17 @@ app.get('/api/icao/:icao/controllers', async (req, res) => {
   }
 });
 
+function getFileType(filename) {
+  const ext = filename.split('.').pop().toUpperCase();
+
+  if (['PDF'].includes(ext)) return 'PDF';
+  if (['JPG', 'JPEG', 'PNG', 'GIF', 'WEBP'].includes(ext)) return 'IMAGE';
+  if (['DOC', 'DOCX'].includes(ext)) return 'WORD';
+  if (['XLS', 'XLSX'].includes(ext)) return 'EXCEL';
+
+  return ext; // fallback
+}
+
 
 app.get('/api/icao/:icao/docs', async (req, res) => {
   try {
@@ -4193,17 +4212,18 @@ app.get('/api/icao/:icao/docs', async (req, res) => {
       : false;
 
     res.json({
-      canUpload,
-      docs: docs.map(d => ({
-        filename: d.filename,
-        url: `/uploads/${icao}/${encodeURIComponent(d.filename)}`,
-        type: 'PDF',
-        updated: d.uploadedAt,
-        submittedBy: userMap[d.uploadedBy]
-          ? `${userMap[d.uploadedBy]} (${d.uploadedBy})`
-          : String(d.uploadedBy)
-      }))
-    });
+  canUpload,
+  docs: docs.map(d => ({
+    filename: d.filename.replace(/\.[^/.]+$/, ''), // ❌ extension removed
+    url: `/uploads/${icao}/${encodeURIComponent(d.filename)}`,
+    type: getFileType(d.filename),                  // ✅ real type
+    updated: d.uploadedAt,
+    submittedBy: userMap[d.uploadedBy]
+      ? `${userMap[d.uploadedBy]} (${d.uploadedBy})`
+      : String(d.uploadedBy)
+  }))
+});
+
   } catch (err) {
     console.error('[DOCS API]', err);
     res.status(500).json({ canUpload: false, docs: [] });
