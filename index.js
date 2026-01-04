@@ -5457,7 +5457,7 @@ ${!isAerodromeController ? `
             <th>Callsign</th>
             <th>Aircraft</th>
             <th>Dest</th>
-            <th>TOBT</th>
+            <th>WF TOBT</th>
             <th class="col-toggle">READY?</th>
             <th>TSAT</th>
             <th class="col-route">ATC Route</th>
