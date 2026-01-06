@@ -308,17 +308,30 @@ targetMap.fitBounds(bounds, {
   });
 
   if (bounds.length) {
-  const sidebarOffset =
-    targetMap.getContainer().id === 'wfMapModalMap'
-      ? 0
-      : (document.body.classList.contains('sidebar-collapsed') ? 72 : 240);
 
-  targetMap.fitBounds(bounds, {
-    paddingTopLeft: [sidebarOffset + 12, 12],
-    paddingBottomRight: [12, 12],
-    maxZoom: 4,          // 👈 tighter framing
-    animate: false
-  });
+  const sidebarWidth = document.body.classList.contains('sidebar-collapsed')
+  ? 72
+  : 240;
+
+const topbarHeight = 64;
+
+map.fitBounds(bounds, {
+  paddingTopLeft: [
+    sidebarWidth + 24,  // LEFT padding accounts for sidebar
+    topbarHeight + 24   // TOP padding accounts for header
+  ],
+  paddingBottomRight: [24, 24],
+  maxZoom: 4,
+  animate: false
+});
+
+map.once('moveend', () => {
+  if (map.getZoom() < 2.5) {
+    map.setZoom(2.5, { animate: false });
+  }
+});
+
+
 
   requestAnimationFrame(() => {
     targetMap.invalidateSize(true);

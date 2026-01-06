@@ -4708,7 +4708,7 @@ body.sidebar-collapsed .schedule-page .card-full{
 
 /* ---- CSS variables (adjust if your sidebar sizes differ) */
 :root {
-  --wf-sidebar-expanded: 240px;
+  --wf-sidebar-expanded: 220px;
   --wf-sidebar-collapsed: 72px;
   --wf-topbar-height: 64px;
 }
@@ -4939,28 +4939,6 @@ main.dashboard.map-layout #wfWorldMap {
   height: 100%;
 }
 
-/* 5) Sidebar handling (horizontal only) */
-body {
-  padding-left: var(--sidebar-expanded);
-}
-
-body.sidebar-collapsed {
-  padding-left: var(--sidebar-collapsed);
-}
-
-/* 6) Topbar floats above map (does not consume height) */
-header.topbar {
-  position: fixed;
-  top: 0;
-  left: var(--sidebar-expanded);
-  right: 0;
-  height: var(--topbar-h);
-  z-index: 2000;
-}
-
-body.sidebar-collapsed header.topbar {
-  left: var(--sidebar-collapsed);
-}
 
 /* 7) Leaflet controls below topbar */
 .leaflet-top {
@@ -5121,50 +5099,10 @@ main.dashboard.map-layout {
 .wf-airport-meta .dot {
   opacity: 0.6;
 }
-
-/* Footer CTA */
-.wf-airport-popup-footer {
-  padding: 10px 14px;
+.wf-airport-cta {
+  margin-top: 8px;
   font-size: 12px;
-  color: #7fd0ff;
-  text-align: left;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  color: #2a7fff;
   cursor: pointer;
-}
-
-.wf-airport-popup-footer:hover {
-  color: #aee4ff;
-}
-
-/* ===== WF Map popup — remove Leaflet chrome ===== */
-.leaflet-popup-content-wrapper,
-.leaflet-popup-tip {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-}
-
-/* Remove default padding so card controls spacing */
-.leaflet-popup-content {
-  margin: 0 !important;
-  padding: 0 !important;
-}
-
-/* Optional: prevent popup clipping rounded corners */
-.leaflet-popup {
-  pointer-events: auto;
-}
-.wf-map-popup {
-  box-shadow:
-    0 0 0 1px rgba(255,255,255,0.08),
-    0 24px 60px rgba(0,0,0,0.7);
-}
-/* ===== Ensure WF map popups always stay on top ===== */
-.leaflet-pane.leaflet-popup-pane {
-  z-index: 10000 !important;
-}
-
-/* Also raise the popup wrapper itself */
-.leaflet-popup {
-  z-index: 10001 !important;
+  text-align: center;
 }
