@@ -2388,18 +2388,14 @@ app.get('/wf/world-map', requireLogin, (req, res) => {
   const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
 
   const content = `
-    <section class="card card-full" style="height: calc(100vh - 160px);">
-  <h2>WorldFlight Route Map</h2>
+    <div class="wf-map-page">
+      <div id="wfWorldMap"></div>
 
-      <div class="icao-map" style="height: calc(100% - 46px);">
-        <div id="wfWorldMap" style="width:100%; height:100%;"></div>
-
-        
-      </div>
-    </section>
+      <!-- Optional overlay title -->
+      
+    </div>
 
     <script>
-      // Optional: allow querystring a/b/c override
       window.WF_MAP_QUERY = {
         a: new URLSearchParams(location.search).get('a') || '',
         b: new URLSearchParams(location.search).get('b') || '',
@@ -2415,9 +2411,10 @@ app.get('/wf/world-map', requireLogin, (req, res) => {
     user,
     isAdmin,
     content,
-    layoutClass: 'dashboard-full'
+    layoutClass: 'dashboard-full map-layout' // important
   }));
 });
+
 
 
 app.get('/auth/login', vatsimLogin);
@@ -5726,6 +5723,18 @@ toggleBtn.onclick = () => {
     sidebar.classList.contains('collapsed')
   );
 };
+
+function onSidebarToggle() {
+  document.body.classList.toggle('sidebar-collapsed');
+
+  // Give CSS time to finish transition
+  setTimeout(() => {
+    if (window.wfWorldMap) {
+      window.wfWorldMap.invalidateSize({ animate: false });
+    }
+  }, 260); // match CSS transition duration
+}
+
 </script>
 <script>
 document.addEventListener('click', function (e) {

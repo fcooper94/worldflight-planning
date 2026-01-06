@@ -4141,17 +4141,6 @@ html[data-map-theme="light"] .ac-label {
   background: rgba(255,255,255,0.08);
   border-color: rgba(255,255,255,0.22);
 }
-#wfWorldMap {
-  width: 100%;
-  height: 100%;
-  min-height: 500px;
-}
-/* Ensure Leaflet map is actually visible */
-#wfWorldMap .leaflet-pane,
-#wfWorldMap .leaflet-tile-pane,
-#wfWorldMap .leaflet-map-pane {
-  z-index: 1;
-}
 .map-overlay-controls {
   pointer-events: auto;
   z-index: 100;
@@ -4166,8 +4155,9 @@ html[data-map-theme="light"] .ac-label {
    ========================= */
 
 .leaflet-container {
-  background: #020617; /* matches your dark theme */
+  background: #0b0f1a; /* match site background */
 }
+
 
 .leaflet-pane,
 .leaflet-map-pane,
@@ -4220,44 +4210,7 @@ html[data-map-theme="light"] .ac-label {
   opacity: 0.9;
   font-size: 13px;
 }
-#wfWorldMap,
-#wfWorldMap .leaflet-container {
-  width: 100%;
-  height: 100%;
-  background: #111; /* replaces white bars */
-}
-#wfWorldMap::before,
-#wfWorldMap::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 6%;
-  pointer-events: none;
-  z-index: 400;
-}
 
-#wfWorldMap::before {
-  left: 0;
-  background: linear-gradient(to right, #0b0f1a, transparent);
-}
-
-#wfWorldMap::after {
-  right: 0;
-  background: linear-gradient(to left, #0b0f1a, transparent);
-}
-#wfWorldMap::before,
-#wfWorldMap::after,
-.wf-map-overlay,
-.wf-map-overlay * {
-  pointer-events: none;
-}
-#wfWorldMap::before,
-#wfWorldMap::after,
-.wf-map-overlay,
-.wf-map-overlay * {
-  pointer-events: none;
-}
 .card,
 .card-full {
   overflow: visible;
@@ -4309,18 +4262,7 @@ html[data-map-theme="light"] .ac-label {
 }
 
 /* The map itself */
-#wfWorldMap {
-  width: 100%;
-  height: auto;
-  min-height: 280px;
-  transition: height 200ms ease;
-}
 
-/* The immediate parent MUST NOT have a fixed height */
-#wfWorldMap,
-#wfWorldMap * {
-  box-sizing: border-box;
-}
 
 /* If inside a card/body/container */
 .card-body,
@@ -4760,65 +4702,469 @@ body.sidebar-collapsed .schedule-page .card-full{
   max-width: none;       /* allow shrink */
 }
 
+/* ======================================================
+   WF WORLD MAP — FULL PAGE LAYOUT
+   ====================================================== */
+
+/* ---- CSS variables (adjust if your sidebar sizes differ) */
+:root {
+  --wf-sidebar-expanded: 240px;
+  --wf-sidebar-collapsed: 72px;
+  --wf-topbar-height: 64px;
+}
+
+/* ---- Main page wrapper */
+.wf-map-page {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - var(--wf-topbar-height));
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #0b0f1a;
+}
+
+/* ---- Body offset for sidebar */
+body {
+  padding-left: var(--wf-sidebar-expanded);
+  transition: padding-left 0.25s ease;
+}
+
+body.sidebar-collapsed {
+  padding-left: var(--wf-sidebar-collapsed);
+}
+
+/* ---- Leaflet map container */
+#wfWorldMap {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+}
+
+/* ======================================================
+   LEAFLET OVERRIDES
+   ====================================================== */
+
+.leaflet-container {
+  background: #1b1b1b;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
+}
+
+/* Zoom controls */
+.leaflet-control-zoom {
+  margin-top: 20px;
+  margin-left: 20px;
+}
+
+.leaflet-control-zoom a {
+  background: #ffffff;
+  color: #000;
+  border-radius: 6px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}
+
+/* Remove attribution clutter if desired */
+.leaflet-control-attribution {
+  background: rgba(0,0,0,0.6);
+  color: #aaa;
+  font-size: 11px;
+}
+
+/* ======================================================
+   MAP OVERLAYS
+   ====================================================== */
+
+.wf-map-overlay {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.wf-map-title {
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 20px;
+  font-weight: 600;
+  color: #6bd6ff;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.7);
+}
+
+/* ======================================================
+   AIRPORT LABELS
+   ====================================================== */
+
+.wf-airport-label {
+  pointer-events: none;
+}
+
+.wf-airport-pin {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #1aff9c;
+  border: 2px solid #0b0f1a;
+  box-shadow: 0 0 6px rgba(26,255,156,0.9);
+  margin: 0 auto;
+}
+
+.wf-airport-text {
+  margin-top: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(0,0,0,0.75);
+  border-radius: 6px;
+  white-space: nowrap;
+  text-align: center;
+}
+
+/* ======================================================
+   AIRPORT HOVER TOOLTIP
+   ====================================================== */
+
 .wf-airport-hover {
-  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-  font-size: 13px;
-  line-height: 1.4;
-  min-width: 220px;
+  min-width: 240px;
+  padding: 12px;
+  background: #ffffff;
+  color: #111;
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.35);
 }
 
 .wf-airport-hover-title {
-  font-weight: 600;
-  font-size: 14px;
-  margin-bottom: 6px;
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
 }
 
 .wf-airport-hover-section {
-  padding: 6px 8px;
-  border-radius: 6px;
-  margin-bottom: 6px;
-  background: rgba(0,0,0,0.04);
+  padding: 8px;
+  border-radius: 8px;
+  margin-bottom: 8px;
 }
 
 .wf-airport-hover-section.inbound {
-  border-left: 3px solid #4fd1c5; /* teal */
+  border-left: 4px solid #00c896;
+  background: #f4f6f7;
 }
 
 .wf-airport-hover-section.outbound {
-  border-left: 3px solid #63b3ed; /* blue */
+  border-left: 4px solid #4da3ff;
+  background: #f4f6f7;
 }
 
 .wf-airport-hover-subtitle {
-  font-weight: 600;
   font-size: 12px;
-  text-transform: uppercase;
-  opacity: 0.8;
-  margin-bottom: 2px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  letter-spacing: 0.04em;
 }
 
 .wf-airport-hover-leg {
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 2px;
 }
 
 .wf-airport-hover-date {
   font-size: 12px;
-  opacity: 0.8;
-  margin-bottom: 2px;
+  color: #555;
+  margin-bottom: 4px;
 }
 
 .wf-airport-hover-row {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-}
-
-.wf-airport-hover-row span {
-  opacity: 0.7;
+  font-size: 12px;
 }
 
 .wf-airport-hover-cta {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
-  color: #60a5fa;
+  color: #2a7fff;
   cursor: pointer;
+}
+
+/* ======================================================
+   RESPONSIVE SAFETY
+   ====================================================== */
+
+@media (max-width: 900px) {
+  :root {
+    --wf-sidebar-expanded: 0px;
+    --wf-sidebar-collapsed: 0px;
+  }
+
+  body {
+    padding-left: 0;
+  }
+}
+/* ======================================================
+   WF WORLD MAP — DEFINITIVE FULL-HEIGHT FIX
+   ====================================================== */
+
+/* 1) Ensure root layout fills viewport */
+html, body {
+  height: 100%;
+}
+
+/* 2) Main content must fill viewport minus topbar */
+main.dashboard.map-layout {
+  position: relative;
+  height: calc(100vh - var(--topbar-h));
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 3) Map page fills main entirely */
+main.dashboard.map-layout .wf-map-page {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 4) Leaflet map fills map page */
+main.dashboard.map-layout #wfWorldMap {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* 5) Sidebar handling (horizontal only) */
+body {
+  padding-left: var(--sidebar-expanded);
+}
+
+body.sidebar-collapsed {
+  padding-left: var(--sidebar-collapsed);
+}
+
+/* 6) Topbar floats above map (does not consume height) */
+header.topbar {
+  position: fixed;
+  top: 0;
+  left: var(--sidebar-expanded);
+  right: 0;
+  height: var(--topbar-h);
+  z-index: 2000;
+}
+
+body.sidebar-collapsed header.topbar {
+  left: var(--sidebar-collapsed);
+}
+
+/* 7) Leaflet controls below topbar */
+.leaflet-top {
+  top: var(--topbar-h);
+}
+.leaflet-container {
+  background: #0b0f1a; /* match site background */
+}
+.wf-map-page::before,
+.wf-map-page::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 100px;
+  pointer-events: none;
+  z-index: 4;
+  backdrop-filter: blur(6px);
+  background: rgba(11,15,26,0.25);
+}
+
+.wf-map-page::before { left: 0; }
+.wf-map-page::after  { right: 0; }
+header.topbar {
+  background: linear-gradient(
+    to bottom,
+    rgba(11,15,26,0.95),
+    rgba(11,15,26,0.6)
+  );
+}
+main.dashboard.map-layout {
+  position: absolute;
+  top: var(--topbar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
+
+  display: flex;
+  overflow: hidden;
+}
+.wf-map-page {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0f1a;
+}
+#wfWorldMap {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #0b0f1a;
+}
+
+.leaflet-container {
+  background: #0b0f1a;
+}
+.wf-map-page::before,
+.wf-map-page::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 120px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.wf-map-page::before {
+  left: 0;
+  background: linear-gradient(to right, #0b0f1a, transparent);
+}
+
+.wf-map-page::after {
+  right: 0;
+  background: linear-gradient(to left, #0b0f1a, transparent);
+}
+/* ===============================
+   WF Airport Hover Popup
+================================ */
+
+.wf-airport-popup {
+  min-width: 280px;
+  max-width: 320px;
+  background: linear-gradient(
+    180deg,
+    rgba(14, 22, 40, 0.92),
+    rgba(8, 14, 28, 0.92)
+  );
+  border-radius: 14px;
+
+  /* ✅ Clean glass shadow only */
+  box-shadow:
+    0 24px 50px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(0, 0, 0, 0.25);
+
+  border: none;
+}
+
+
+/* Header */
+.wf-airport-popup-header {
+  padding: 12px 14px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #7fd0ff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Sections */
+.wf-airport-section {
+  padding: 10px 14px;
+  margin: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  position: relative;
+}
+
+/* Accent bars */
+.wf-airport-section.inbound {
+  border-left: 3px solid #3cffc2;
+}
+
+.wf-airport-section.outbound {
+  border-left: 3px solid #4da6ff;
+}
+
+/* Section titles */
+.wf-airport-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #9bb6d9;
+  margin-bottom: 4px;
+}
+
+/* Flight line */
+.wf-airport-leg {
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 2px;
+}
+
+/* Meta row */
+.wf-airport-meta {
+  font-size: 12px;
+  color: #b9c9e6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-airport-meta .dot {
+  opacity: 0.6;
+}
+
+/* Footer CTA */
+.wf-airport-popup-footer {
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #7fd0ff;
+  text-align: left;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+
+.wf-airport-popup-footer:hover {
+  color: #aee4ff;
+}
+
+/* ===== WF Map popup — remove Leaflet chrome ===== */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* Remove default padding so card controls spacing */
+.leaflet-popup-content {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Optional: prevent popup clipping rounded corners */
+.leaflet-popup {
+  pointer-events: auto;
+}
+.wf-map-popup {
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.08),
+    0 24px 60px rgba(0,0,0,0.7);
+}
+/* ===== Ensure WF map popups always stay on top ===== */
+.leaflet-pane.leaflet-popup-pane {
+  z-index: 10000 !important;
+}
+
+/* Also raise the popup wrapper itself */
+.leaflet-popup {
+  z-index: 10001 !important;
 }

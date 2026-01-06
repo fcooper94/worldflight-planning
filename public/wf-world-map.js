@@ -4,6 +4,15 @@ function wfCacheKey(qs) {
   return `wfWorldMap:v3:${qs || 'default'}`;
 }
 
+function getSidebarOffset() {
+  const body = document.body;
+
+  // Match your actual sidebar widths
+  if (body.classList.contains('sidebar-collapsed')) {
+    return 72; // collapsed width (px)
+  }
+  return 260; // expanded width (px)
+}
 
 
 function getCachedMapData(key) {
@@ -130,53 +139,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function airportHoverHtml(icao, a) {
   return `
-    <div class="wf-airport-hover">
-      <div class="wf-airport-hover-title">${icao}</div>
+    <div class="wf-airport-popup">
+      <div class="wf-airport-popup-header">
+        ${icao}
+      </div>
 
       ${a.inbound ? `
-        <div class="wf-airport-hover-section inbound">
-          <div class="wf-airport-hover-subtitle">Inbound</div>
-
-          <div class="wf-airport-hover-leg">
+        <div class="wf-airport-section inbound">
+          <div class="wf-airport-section-title">Inbound</div>
+          <div class="wf-airport-leg">
             ${a.inbound.wf} ${a.inbound.from} → ${a.inbound.to}
           </div>
-
-          ${a.inbound.arrWindow ? `
-            <div class="wf-airport-hover-row">
-              <span>
-                ${formatUtcDatePretty(a.inbound.dateIso)} · Arr Window:
-              </span>
-              <strong>${a.inbound.arrWindow}</strong>
-            </div>
-          ` : ''}
+          <div class="wf-airport-meta">
+            <span>${formatUtcDatePretty(a.inbound.dateIso)}</span>
+            <span class="dot">•</span>
+            <span>Arr ${a.inbound.arrWindow}</span>
+          </div>
         </div>
       ` : ''}
 
       ${a.outbound ? `
-        <div class="wf-airport-hover-section outbound">
-          <div class="wf-airport-hover-subtitle">Outbound</div>
-
-          <div class="wf-airport-hover-leg">
+        <div class="wf-airport-section outbound">
+          <div class="wf-airport-section-title">Outbound</div>
+          <div class="wf-airport-leg">
             ${a.outbound.wf} ${a.outbound.from} → ${a.outbound.to}
           </div>
-
-          ${a.outbound.depWindow ? `
-            <div class="wf-airport-hover-row">
-              <span>
-                ${formatUtcDatePretty(a.outbound.dateIso)} · Dep Window:
-              </span>
-              <strong>${a.outbound.depWindow}</strong>
-            </div>
-          ` : ''}
+          <div class="wf-airport-meta">
+            <span>${formatUtcDatePretty(a.outbound.dateIso)}</span>
+            <span class="dot">•</span>
+            <span>Dep ${a.outbound.depWindow}</span>
+          </div>
         </div>
       ` : ''}
 
-      <div class="wf-airport-hover-cta">
+      <div class="wf-airport-popup-footer">
         Click for more details
       </div>
     </div>
   `;
 }
+
 
 
 
@@ -210,32 +212,7 @@ function airportHoverHtml(icao, a) {
     });
   }
 
-  function resizeMapToBoundsAspect(map, bounds, {
-    minHeight = 280,
-    maxHeight = 900,
-    padding = 24
-  } = {}) {
-    if (!bounds.length) return;
-
-    const latLngBounds = L.latLngBounds(bounds);
-    const zoom = map.getZoom();
-    const nw = latLngBounds.getNorthWest();
-    const se = latLngBounds.getSouthEast();
-    const pNW = map.project(nw, zoom);
-    const pSE = map.project(se, zoom);
-
-    const w = Math.abs(pSE.x - pNW.x);
-    const h = Math.abs(pSE.y - pNW.y);
-    if (!w || !h) return;
-
-    const container = map.getContainer();
-    let targetHeight = container.clientWidth * (h / w);
-    targetHeight += padding * 2;
-    targetHeight = Math.max(minHeight, Math.min(maxHeight, targetHeight));
-
-    container.style.height = `${Math.round(targetHeight)}px`;
-    map.invalidateSize(true);
-  }
+  
 
   /* --------------------------------------------------
      Render (shared for main + modal)
@@ -296,16 +273,60 @@ function airportHoverHtml(icao, a) {
     });
 
     if (bounds.length) {
-      targetMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 5, animate: false });
-      requestAnimationFrame(() => {
-        if (targetMap.getContainer().id !== 'wfMapModalMap') {
-          resizeMapToBoundsAspect(targetMap, bounds);
-        } else {
-          targetMap.invalidateSize(true);
-        }
-      });
-    }
+  const sidebarWidth = document.body.classList.contains('sidebar-collapsed')
+  ? 72
+  : 220;
+
+targetMap.fitBounds(bounds, {
+  paddingTopLeft: [sidebarWidth + 24, 24],
+  paddingBottomRight: [24, 24],
+  maxZoom: 5,
+  animate: false
+});
+
+
+  requestAnimationFrame(() => {
+    if (targetMap.getContainer().id === 'wfWorldMap') {
+  targetMap.invalidateSize(true);
+} else {
+  
+}
+
+  });
+}
+
   }
+
+  window.addEventListener('sidebar:toggle', () => {
+  if (!map || !lastData) return;
+
+  const bounds = [];
+  const airports = lastData.airports || {};
+
+  Object.values(airports).forEach(a => {
+    if (a.lat && a.lon) bounds.push([a.lat, a.lon]);
+  });
+
+  if (bounds.length) {
+  const sidebarOffset =
+    targetMap.getContainer().id === 'wfMapModalMap'
+      ? 0
+      : (document.body.classList.contains('sidebar-collapsed') ? 72 : 240);
+
+  targetMap.fitBounds(bounds, {
+    paddingTopLeft: [sidebarOffset + 12, 12],
+    paddingBottomRight: [12, 12],
+    maxZoom: 4,          // 👈 tighter framing
+    animate: false
+  });
+
+  requestAnimationFrame(() => {
+    targetMap.invalidateSize(true);
+  });
+}
+
+});
+
 
   /* --------------------------------------------------
      Load main map
