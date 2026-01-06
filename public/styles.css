@@ -29,7 +29,7 @@
 
   --radius:16px;
 
-  --sidebar-expanded:260px;
+  --sidebar-expanded:220px;
   --sidebar-collapsed:72px;
 
   --topbar-h:120px;
@@ -345,8 +345,9 @@ body.sidebar-collapsed .topbar{ padding-left: var(--sidebar-collapsed); }
 .dashboard-wide .card{ max-width:1200px; width:100%; }
 
 .dashboard-full{
-  max-width:none;
-  width:100%;
+  max-width: none;
+  width: 100%;
+  box-sizing: border-box;
   margin:0;
   grid-template-columns: 1fr;
 }
@@ -502,9 +503,8 @@ select{ cursor:pointer; }
 /* Main operations table */
 .departures-table{
   width:100%;
-  border-collapse:collapse;
+  min-width:0;          /* VERY important */
   table-layout:fixed;
-  min-width:1100px; /* forces scroll instead of squeeze */
 }
 
 .departures-table th,
@@ -2316,9 +2316,6 @@ tr:hover .row-actions {
    Schedule page overrides
    ========================= */
 
-.schedule-page .departures-table td.col-route {
-  padding-right: 20px;   /* extra breathing room */
-}
 /* =========================
    SimBrief button
    ========================= */
@@ -2387,164 +2384,6 @@ tr:hover .row-actions {
    Schedule page – tighter columns
    ========================= */
 
-/* =====================================================
-   Schedule page – departures table column layout
-   ===================================================== */
-
-.schedule-page .departures-table {
-  table-layout: fixed;
-  min-width: 980px; /* tighter than default dashboard */
-}
-
-/* WF sector number */
-.schedule-page .departures-table th.col-wf-sector,
-.schedule-page .departures-table td.col-wf-sector {
-  width: 100px;
-  min-width: 100px;
-  max-width: 100px;
-  padding: 4px 8px;
-  white-space: nowrap;
-}
-
-/* Departure / Arrival ICAO */
-.schedule-page .departures-table th.col-from,
-.schedule-page .departures-table td.col-from,
-.schedule-page .departures-table th.col-to,
-.schedule-page .departures-table td.col-to {
-  width: 100px;
-  min-width: 100px;
-  max-width: 100px;
-  padding: 4px 6px;
-  text-align: center;
-  white-space: nowrap;
-}
-
-/* Date */
-.schedule-page .departures-table th.col-date,
-.schedule-page .departures-table td.col-date {
-  width: 170px;
-  min-width: 170px;
-  max-width: 170px;
-  white-space: nowrap;
-}
-
-/* Departure / Arrival windows */
-.schedule-page .departures-table th.col-dep-window,
-.schedule-page .departures-table td.col-dep-window,
-.schedule-page .departures-table th.col-arr-window,
-.schedule-page .departures-table td.col-arr-window {
-  width: 250px;
-  padding-right: 20px;
-  min-width: 250px;
-  max-width: 250px;
-  white-space: nowrap;
-  font-family: "JetBrains Mono", monospace;
-  letter-spacing: 0.02em;
-}
-
-/* Block Time (HH:MM) */
-.schedule-page .departures-table th.col-time,
-.schedule-page .departures-table td.col-time {
-  width: 100px;
-  min-width: 100px;
-  max-width: 100px;
-  padding: 4px 6px;
-  text-align: center;
-  white-space: nowrap;
-}
-
-/* ATC Route – expandable column */
-.schedule-page .departures-table th.col-route,
-.schedule-page .departures-table td.col-route {
-  width: auto;
-  min-width: 260px;
-  padding-right: 24px;
-  white-space: nowrap;
-}
-
-/* Plan (SimBrief) */
-.schedule-page .departures-table th.col-plan,
-.schedule-page .departures-table td.col-plan {
-  width: 200px;
-  min-width: 200px;
-  max-width: 200px;
-  padding-right: 18px;
-  white-space: nowrap;
-}
-
-/* Plan with SimBrief column */
-/* Plan with SimBrief column */
-/* =========================
-   My Slots table (ISOLATED)
-   ========================= */
-
-
-
-
-
-/* Book Slot */
-.schedule-page .departures-table th.col-book,
-.schedule-page .departures-table td.col-book {
-  width: 130px;
-  min-width: 130px;
-  max-width: 130px;
-  white-space: nowrap;
-  text-align: center;
-  vertical-align: middle;   /* 🔑 THIS is the missing piece */
-  padding-left: 12px;
-  padding-right: 12px;
-}
-.schedule-page .departures-table td.col-route {
-  white-space: normal;
-  line-height: 1.4;
-}
-.schedule-page .departures-table td.col-plan {
-  padding-right: 16px;
-}
-
-.schedule-page .departures-table td.col-book {
-  padding-left: 16px;
-}
-/* =====================================================
-   Schedule page – horizontal scroll, no wrapping
-   ===================================================== */
-
-/* Scroll container */
-.schedule-page .table-scroll {
-  overflow-x: auto;
-  overflow-y: hidden;
-  width: 100%;
-  padding-bottom: 8px; /* space for scrollbar */
-}
-
-/* Table must not shrink */
-.schedule-page .departures-table {
-  min-width: 1300px;   /* adjust if you want even wider */
-  table-layout: fixed;
-}
-
-/* Prevent wrapping globally */
-.schedule-page .departures-table th,
-.schedule-page .departures-table td {
-  white-space: nowrap;
-}
-
-/* Allow ATC Route to wrap ONLY when expanded */
-.schedule-page .col-route .route-text.collapsed {
-  white-space: nowrap;
-}
-
-.schedule-page .col-route .route-text:not(.collapsed) {
-  white-space: normal;
-}
-.schedule-page .table-scroll::-webkit-scrollbar {
-  height: 8px;
-}
-
-.schedule-page .table-scroll::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.25);
-  border-radius: 4px;
-}
 /* =========================
    My Slots table (isolated)
    ========================= */
@@ -4630,4 +4469,293 @@ html[data-map-theme="light"] .ac-label {
   background: #e6f0fb;
   transform: translateY(-1px);
   box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
+}
+/* =========================================================
+   WorldFlight Schedule – Departures Table ONLY
+   Scoped safely to schedule page
+   ========================================================= */
+
+/* ----- Table scroll container ----- */
+.schedule-page .table-scroll{
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  position: relative;
+  scrollbar-gutter: stable both-edges;
+}
+
+/* ----- Table base ----- */
+.schedule-page .departures-table{
+  width: 100%;
+  min-width: 0;              /* critical for flex + scroll */
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+/* ----- Header + cells ----- */
+.schedule-page .departures-table th,
+.schedule-page .departures-table td{
+  padding: 4px 8px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-top: 1px solid var(--border);
+}
+
+.schedule-page .departures-table th{
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* =========================================================
+   Column sizing (efficient + readable)
+   ========================================================= */
+
+/* WF number */
+.schedule-page .col-wf-sector{
+  width: 72px;
+}
+
+/* Dep / Arr ICAO */
+.schedule-page .col-from,
+.schedule-page .col-to{
+  width: 64px;
+}
+
+/* Date */
+.schedule-page .col-date{
+  width: 110px;
+}
+
+/* Dep / Arr windows */
+.schedule-page .col-window{
+  width: 130px;
+}
+
+/* Block time */
+.schedule-page .col-time{
+  width: 72px;
+  text-align: center;
+}
+
+/* =========================================================
+   ATC Route – flexible + wide
+   ========================================================= */
+.schedule-page .col-route{
+  width: auto;               /* absorbs remaining space */
+  min-width: 420px;
+  max-width: 640px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  font-size: 12px;
+}
+
+/* =========================================================
+   Action columns
+   ========================================================= */
+
+/* Book Slot */
+.schedule-page .col-book{
+  width: 96px;
+  text-align: center;
+}
+
+/* Plan */
+.schedule-page .col-plan{
+  width: 140px;
+  text-align: center;
+}
+
+/* =========================================================
+   Card width correction (sidebar aware)
+   Prevents overflow when sidebar is expanded
+   ========================================================= */
+
+.schedule-page .card-full{
+  max-width: calc(100vw - var(--sidebar-expanded) - 64px);
+  box-sizing: border-box;
+}
+
+/* Sidebar collapsed */
+body.sidebar-collapsed .schedule-page .card-full{
+  max-width: calc(100vw - var(--sidebar-collapsed) - 64px);
+}
+
+/* =========================================================
+   Small screens: force horizontal scroll, not squeeze
+   ========================================================= */
+@media (max-width: 1200px){
+  .schedule-page .departures-table{
+    min-width: 980px;
+  }
+}
+/* =========================================================
+   FINAL WIDTH OPTIMIZATION — Schedule table only
+   ========================================================= */
+
+/* Reduce padding slightly to free horizontal space */
+.schedule-page .departures-table th,
+.schedule-page .departures-table td{
+  padding: 3px 6px;   /* was 4px 8px */
+}
+
+/* Date can be tighter */
+.schedule-page .col-date{
+  width: 96px;
+}
+
+/* Dep / Arr windows: reduce width */
+.schedule-page .col-window{
+  width: 118px;
+}
+
+/* Block time can be very small */
+.schedule-page .col-time{
+  width: 64px;
+}
+
+/* Book Slot button column */
+.schedule-page .col-book{
+  width: 88px;
+}
+
+/* Plan button column */
+.schedule-page .col-plan{
+  width: 124px;
+}
+
+/* =========================================================
+   ATC Route — give it the freed space
+   ========================================================= */
+
+.schedule-page .col-route{
+  min-width: 520px;   /* ↑ significantly wider */
+  max-width: 820px;   /* ↑ allow long routes */
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* =========================================================
+   Schedule table – header & button width fixes
+   ========================================================= */
+
+/* Block Time: ensure header fits comfortably */
+.schedule-page .col-time{
+  width: 88px;          /* was too tight */
+  min-width: 88px;
+  text-align: center;
+}
+
+/* Book Slot column: enforce minimum usable button width */
+.schedule-page .col-book{
+  width: 104px;
+  min-width: 104px;
+  text-align: center;
+}
+
+/* Plan column: wider due to icon + text */
+.schedule-page .col-plan{
+  width: 152px;
+  min-width: 152px;
+  text-align: center;
+}
+
+/* Ensure buttons themselves do not shrink */
+.schedule-page .col-book .book-slot-btn,
+.schedule-page .col-plan .plan-btn{
+  min-width: 88px;
+  white-space: nowrap;
+}
+
+/* =========================================================
+   FINAL column reservation – Schedule departures table
+   ========================================================= */
+
+/* --- Block Time: reserve header + data space --- */
+.schedule-page .col-time{
+  width: 96px;          /* guarantees "Block Time" fits */
+  min-width: 96px;
+  max-width: 96px;
+  text-align: center;
+}
+
+/* --- Book Slot column --- */
+.schedule-page .col-book{
+  width: 112px;
+  min-width: 112px;
+  max-width: 112px;
+  text-align: center;
+}
+
+/* --- Plan column (SB icon + text) --- */
+.schedule-page .col-plan{
+  width: 168px;
+  min-width: 168px;
+  max-width: 168px;
+  text-align: center;
+}
+
+/* --- Ensure buttons NEVER shrink --- */
+.schedule-page .col-book button,
+.schedule-page .col-plan button{
+  min-width: 96px;
+  white-space: nowrap;
+}
+
+/* --- Let ATC Route yield first when space is tight --- */
+.schedule-page .col-route{
+  min-width: 460px;   /* still wide */
+  max-width: none;    /* allow it to give up space */
+}
+/* =========================================================
+   Schedule page – final column rebalance
+   Fixes SimBrief overflow, trims Arr Window
+   ========================================================= */
+
+/* --- Arrival Window does NOT need this much space --- */
+.schedule-page .col-window.arr-window,
+.schedule-page th:nth-child(6),
+.schedule-page td:nth-child(6){
+  width: 104px;          /* was too wide */
+  min-width: 104px;
+  max-width: 104px;
+}
+
+/* --- Departure Window can stay slightly wider --- */
+.schedule-page th:nth-child(5),
+.schedule-page td:nth-child(5){
+  width: 120px;
+  min-width: 120px;
+}
+
+/* --- Plan column MUST be protected --- */
+.schedule-page .col-plan{
+  width: 190px;          /* enough for full label */
+  min-width: 190px;
+  max-width: 190px;
+  text-align: center;
+}
+
+/* --- SimBrief button must never clip --- */
+.schedule-page .col-plan .simbrief-btn,
+.schedule-page .col-plan button,
+.schedule-page .col-plan a{
+  white-space: nowrap;
+  min-width: 160px;
+  flex-shrink: 0;
+}
+
+/* --- Book Slot also protected --- */
+.schedule-page .col-book{
+  width: 112px;
+  min-width: 112px;
+  max-width: 112px;
+}
+
+/* --- ATC Route yields FIRST when space is tight --- */
+.schedule-page .col-route{
+  min-width: 420px;      /* still very readable */
+  max-width: none;       /* allow shrink */
 }

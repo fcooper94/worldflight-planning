@@ -76,7 +76,7 @@ export default function renderLayout({
       <div class="nav-title">Controllers</div>
       <a href="/atc" class="nav-item">
         <span class="icon">🎧</span>
-        <span class="label">ATC Slot Management</span>
+        <span class="label">WF Slot Management</span>
       </a>
     </div>
 
@@ -89,7 +89,7 @@ export default function renderLayout({
       </a>
       <a href="/official-teams" class="nav-item">
         <span class="icon">👥</span>
-        <span class="label">Official Teams / Affiliates</span>
+        <span class="label">Official Teams</span>
       </a>
       <a href="/admin/scenery" class="nav-item" id="sceneryNavItem">
   <span class="icon">🗺️</span>
