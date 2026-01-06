@@ -475,11 +475,14 @@ const US_ENROUTE_PREFIX_BY_ICAO = {
   KLGA: ['NY', 'ZNY'],
   KEWR: ['NY', 'ZNY'],
 
-  KLAX: ['LA', 'ZLA'],
+  KLAX: ['LA', 'ZLA', 'LAX'],
+  KLAS: ['LA', 'ZLA', 'LAX'],
   KSFO: ['SF', 'ZOA'],
 
   KPIT: ['ZOB', 'CLE'],
   KDTW: ['ZOB', 'CLE'],
+
+  
 
   KORD: ['CHI', 'ZAU'],
   KATL: ['ATL', 'ZTL'],
@@ -494,12 +497,47 @@ const US_ENROUTE_PREFIX_BY_ICAO = {
   KIAD: ['DC', 'ZDC'],
   KDCA: ['DC', 'ZDC'],
   KBWI: ['DC', 'ZDC'],
-  KPHX: ['PHX', 'ZAB'],
-  KLAS: ['LAS', 'ZLA'],
+  KPHX: ['PHX', 'ABQ'],
+  KABQ: ['ABQ'],
   KMSP: ['MSP', 'ZMP'],
+  KIAD: ['DC','ZDC'],
+  KDCA: ['DC','ZDC'],
   KPHL: ['PHL', 'ZNY'],
   KSAN: ['SAN', 'ZLA'],
 };
+
+const US_APP_COVERAGE_BY_ICAO = {
+  KIAD: ['PCT'],
+  KDCA: ['PCT'],
+  KBWI: ['PCT'],
+
+  KLAX: ['SCT'],
+  KSAN: ['SCT'],
+  KBUR: ['SCT'],
+  KLGB: ['SCT'],
+
+  KJFK: ['N90'],
+  KLGA: ['N90'],
+  KEWR: ['N90'],
+};
+
+function isUsApp(callsign) {
+  return /^[A-Z0-9]{2,4}(?:_[A-Z0-9]+)?_(APP|DEP)$/.test(
+    callsign.toUpperCase()
+  );
+}
+
+function isCoveringUsApp(callsign, icao) {
+  if (!icao?.startsWith('K')) return false;
+
+  const cs = callsign.toUpperCase();
+  if (!isUsApp(cs)) return false;
+
+  const prefix = cs.split('_')[0]; // PCT, SCT, N90
+  const allowed = US_APP_COVERAGE_BY_ICAO[icao];
+
+  return Array.isArray(allowed) && allowed.includes(prefix);
+}
 
 
 function isUkCtr(callsign) {
@@ -648,6 +686,7 @@ function isCoveringGenericIcaoCtr(callsign, icao) {
 function isCoveringCtr(callsign, icao) {
   return (
     isCoveringUsCtr(callsign, icao) ||
+    isCoveringUsApp(callsign, icao) ||
     isCoveringUkCtr(callsign, icao) ||
     isCoveringIndiaCtr(callsign, icao) ||
     isCoveringSouthAmericaCtr(callsign, icao) ||
