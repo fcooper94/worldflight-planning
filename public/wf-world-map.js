@@ -1,3 +1,36 @@
+const WF_CACHE_TTL = 1000 * 60 * 30; // 30 minutes
+
+function wfCacheKey(qs) {
+  return `wfWorldMap:v3:${qs || 'default'}`;
+}
+
+
+
+function getCachedMapData(key) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+
+    const { ts, data } = JSON.parse(raw);
+    if (Date.now() - ts > WF_CACHE_TTL) {
+      sessionStorage.removeItem(key);
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedMapData(key, data) {
+  try {
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({ ts: Date.now(), data })
+    );
+  } catch {}
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('wfWorldMap');
   if (!el || typeof L === 'undefined') return;
@@ -32,14 +65,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const atcLayer = L.layerGroup().addTo(map);
   const airportLayer = L.layerGroup().addTo(map);
 
-  /* Keep last good payload so modal can re-render instantly */
   let lastData = null;
 
   /* --------------------------------------------------
      Loading overlay
   -------------------------------------------------- */
   function ensureOverlay(container) {
-    // keep existing behavior; ensure position for overlay
     if (!container.style.position) container.style.position = 'relative';
 
     let o = container.querySelector('.wf-map-loading');
@@ -56,47 +87,36 @@ document.addEventListener('DOMContentLoaded', () => {
     return o;
   }
 
+  function formatUtcDatePretty(dateStr) {
+  if (!dateStr) return '';
+
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  if (isNaN(d)) return dateStr;
+
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  const dayName = days[d.getUTCDay()];
+  const dayNum = d.getUTCDate();
+  const monthName = months[d.getUTCMonth()];
+
+  const suffix =
+    dayNum % 10 === 1 && dayNum !== 11 ? 'st' :
+    dayNum % 10 === 2 && dayNum !== 12 ? 'nd' :
+    dayNum % 10 === 3 && dayNum !== 13 ? 'rd' : 'th';
+
+  return `${dayName} ${dayNum}${suffix} ${monthName}`;
+}
+
+
   function setOverlay(o, show, msg) {
     o.style.display = show ? 'flex' : 'none';
     const m = o.querySelector('#wfMapLoadingMsg');
     if (m && msg) m.textContent = msg;
   }
 
-  const WF_CACHE_TTL = 1000 * 60 * 30; // 30 minutes
-
-  function wfCacheKey(qs) {
-    return `wfWorldMap:${qs || 'default'}`;
-  }
-
-  function getCachedMapData(key) {
-    try {
-      const raw = sessionStorage.getItem(key);
-      if (!raw) return null;
-
-      const { ts, data } = JSON.parse(raw);
-      if (Date.now() - ts > WF_CACHE_TTL) {
-        sessionStorage.removeItem(key);
-        return null;
-      }
-      return data;
-    } catch {
-      return null;
-    }
-  }
-
-  function setCachedMapData(key, data) {
-    try {
-      sessionStorage.setItem(
-        key,
-        JSON.stringify({ ts: Date.now(), data })
-      );
-    } catch {
-      /* storage full / disabled — ignore */
-    }
-  }
-
   /* --------------------------------------------------
-     Airport marker
+     Airport icon + hover popup
   -------------------------------------------------- */
   function airportIcon(label) {
     return L.divIcon({
@@ -108,8 +128,61 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+function airportHoverHtml(icao, a) {
+  return `
+    <div class="wf-airport-hover">
+      <div class="wf-airport-hover-title">${icao}</div>
+
+      ${a.inbound ? `
+        <div class="wf-airport-hover-section inbound">
+          <div class="wf-airport-hover-subtitle">Inbound</div>
+
+          <div class="wf-airport-hover-leg">
+            ${a.inbound.wf} ${a.inbound.from} → ${a.inbound.to}
+          </div>
+
+          ${a.inbound.arrWindow ? `
+            <div class="wf-airport-hover-row">
+              <span>
+                ${formatUtcDatePretty(a.inbound.dateIso)} · Arr Window:
+              </span>
+              <strong>${a.inbound.arrWindow}</strong>
+            </div>
+          ` : ''}
+        </div>
+      ` : ''}
+
+      ${a.outbound ? `
+        <div class="wf-airport-hover-section outbound">
+          <div class="wf-airport-hover-subtitle">Outbound</div>
+
+          <div class="wf-airport-hover-leg">
+            ${a.outbound.wf} ${a.outbound.from} → ${a.outbound.to}
+          </div>
+
+          ${a.outbound.depWindow ? `
+            <div class="wf-airport-hover-row">
+              <span>
+                ${formatUtcDatePretty(a.outbound.dateIso)} · Dep Window:
+              </span>
+              <strong>${a.outbound.depWindow}</strong>
+            </div>
+          ` : ''}
+        </div>
+      ` : ''}
+
+      <div class="wf-airport-hover-cta">
+        Click for more details
+      </div>
+    </div>
+  `;
+}
+
+
+
+
   /* --------------------------------------------------
-     Antimeridian split (PHNL → PWAK fix)
+     Utilities
   -------------------------------------------------- */
   function splitAtDateline(points) {
     if (points.length < 2) return [];
@@ -130,53 +203,43 @@ document.addEventListener('DOMContentLoaded', () => {
     return segs;
   }
 
-  /* --------------------------------------------------
-     Rendering (reusable for modal map)
-  -------------------------------------------------- */
   function clearLeafletLayers(targetMap) {
-    // remove marker/popup/line layers we created (leave base tiles)
     targetMap.eachLayer(layer => {
       if (layer === targetMap._wfBaseTileLayer) return;
       targetMap.removeLayer(layer);
     });
   }
 
-function resizeMapToBoundsAspect(map, bounds, {
-  minHeight = 280,
-  maxHeight = 900,
-  padding = 24
-} = {}) {
-  if (!bounds || !bounds.length) return;
+  function resizeMapToBoundsAspect(map, bounds, {
+    minHeight = 280,
+    maxHeight = 900,
+    padding = 24
+  } = {}) {
+    if (!bounds.length) return;
 
-  const latLngBounds = L.latLngBounds(bounds);
-  const zoom = map.getZoom();
+    const latLngBounds = L.latLngBounds(bounds);
+    const zoom = map.getZoom();
+    const nw = latLngBounds.getNorthWest();
+    const se = latLngBounds.getSouthEast();
+    const pNW = map.project(nw, zoom);
+    const pSE = map.project(se, zoom);
 
-  const nw = latLngBounds.getNorthWest();
-  const se = latLngBounds.getSouthEast();
+    const w = Math.abs(pSE.x - pNW.x);
+    const h = Math.abs(pSE.y - pNW.y);
+    if (!w || !h) return;
 
-  const pNW = map.project(nw, zoom);
-  const pSE = map.project(se, zoom);
+    const container = map.getContainer();
+    let targetHeight = container.clientWidth * (h / w);
+    targetHeight += padding * 2;
+    targetHeight = Math.max(minHeight, Math.min(maxHeight, targetHeight));
 
-  const boundsPixelWidth  = Math.abs(pSE.x - pNW.x);
-  const boundsPixelHeight = Math.abs(pSE.y - pNW.y);
+    container.style.height = `${Math.round(targetHeight)}px`;
+    map.invalidateSize(true);
+  }
 
-  if (!boundsPixelWidth || !boundsPixelHeight) return;
-
-  const container = map.getContainer();
-  const containerWidth = container.clientWidth;
-
-  let targetHeight =
-    containerWidth * (boundsPixelHeight / boundsPixelWidth);
-
-  targetHeight += padding * 2;
-
-  targetHeight = Math.max(minHeight, Math.min(maxHeight, targetHeight));
-
-  container.style.height = `${Math.round(targetHeight)}px`;
-  map.invalidateSize(true);
-}
-
-
+  /* --------------------------------------------------
+     Render (shared for main + modal)
+  -------------------------------------------------- */
   function renderData(targetMap, data) {
     if (!data) return;
 
@@ -188,7 +251,6 @@ function resizeMapToBoundsAspect(map, bounds, {
     const booking = data.bookingLinks || {};
     const bounds = [];
 
-    // Airports
     wfPath.forEach(icao => {
       const a = airports[icao];
       if (!a) return;
@@ -198,17 +260,23 @@ function resizeMapToBoundsAspect(map, bounds, {
 
       L.marker(ll, { icon: airportIcon(icao) })
         .addTo(localAirports)
+        .bindTooltip(
+          airportHoverHtml(icao, a),
+          {
+            direction: 'top',
+            opacity: 0.95,
+            sticky: true,
+            className: 'wf-airport-hover-tooltip'
+          }
+        )
         .on('click', () => {
-          // keep existing behavior
-          window.location.href = booking[icao] || '/book';
-        })
-        .bindTooltip(icao, { direction: 'top', opacity: 0.9 });
+  window.location.href = `/icao/${icao}`;
+});
     });
 
-    // ATC Routes
     (data.atcPolylines || []).forEach(leg => {
       const pts = (leg.points || [])
-        .filter(p => p && p.lat != null && p.lon != null)
+        .filter(p => p?.lat != null && p?.lon != null)
         .map(p => [Number(p.lat), Number(p.lon)]);
 
       splitAtDateline(pts).forEach(seg => {
@@ -220,148 +288,68 @@ function resizeMapToBoundsAspect(map, bounds, {
           .addTo(localAtc)
           .bindPopup(
             `<strong>${leg.from} → ${leg.to}</strong><br>
-             <div style="margin-top:6px;
-               font-family: JetBrains Mono, monospace;
-               font-size:12px;
-               white-space:pre-wrap;">
+             <div style="margin-top:6px;font-family:JetBrains Mono,monospace;font-size:12px;white-space:pre-wrap;">
                ${(leg.atc_route || '').replace(/</g, '&lt;')}
              </div>`
           );
       });
     });
-// Fit
-if (bounds.length) {
-  targetMap.fitBounds(bounds, {
-    padding: [24, 24],
-    maxZoom: 5,
-    animate: false
-  });
 
-  requestAnimationFrame(() => {
-  // Only auto-resize inline map, NOT modal
-  if (targetMap.getContainer().id !== 'wfMapModalMap') {
-    resizeMapToBoundsAspect(targetMap, bounds);
-  } else {
-    targetMap.invalidateSize(true);
+    if (bounds.length) {
+      targetMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 5, animate: false });
+      requestAnimationFrame(() => {
+        if (targetMap.getContainer().id !== 'wfMapModalMap') {
+          resizeMapToBoundsAspect(targetMap, bounds);
+        } else {
+          targetMap.invalidateSize(true);
+        }
+      });
+    }
   }
-});
-
-}
-} // ← REQUIRED: closes renderData()
-
 
   /* --------------------------------------------------
-     Load + render (main map)
+     Load main map
   -------------------------------------------------- */
   async function load() {
-    const overlay = ensureOverlay(el);
-    setOverlay(overlay, true, 'Requesting route data…');
+  const overlay = ensureOverlay(el);
+  setOverlay(overlay, true, 'Requesting route data…');
 
-    const q = window.WF_MAP_QUERY || {};
-    const qs = new URLSearchParams(q).toString();
+  const qs = new URLSearchParams(window.WF_MAP_QUERY || {}).toString();
+  const cacheKey = wfCacheKey(qs);
 
-    const cacheKey = wfCacheKey(qs);
-    let data = getCachedMapData(cacheKey);
+  let data = getCachedMapData(cacheKey);
 
-    if (!data) {
-      const res = await fetch('/api/wf/world-map' + (qs ? `?${qs}` : ''), {
-        credentials: 'same-origin'
-      });
+   if (!data) {
+    const res = await fetch(
+      '/api/wf/world-map' + (qs ? `?${qs}` : ''),
+      { credentials: 'same-origin' }
+    );
 
-      if (!res.ok) {
-        setOverlay(overlay, true, `Failed (${res.status})`);
-        return;
-      }
-
-      const text = await res.text();
-      if (text.trim().startsWith('<')) {
-        setOverlay(overlay, true, 'Session expired – refresh');
-        return;
-      }
-
-      data = JSON.parse(text);
-      setCachedMapData(cacheKey, data);
+    if (!res.ok) {
+      setOverlay(overlay, true, `Failed (${res.status})`);
+      return;
     }
 
-    lastData = data;
-
-    // Clear and render on main map using existing layers
-    atcLayer.clearLayers();
-    airportLayer.clearLayers();
-
-    const airports = data.airports || {};
-    const wfPath = data.wfPath || [];
-    const booking = data.bookingLinks || {};
-    const bounds = [];
-
-    wfPath.forEach(icao => {
-      const a = airports[icao];
-      if (!a) return;
-
-      const ll = [a.lat, a.lon];
-      bounds.push(ll);
-
-      L.marker(ll, { icon: airportIcon(icao) })
-        .addTo(airportLayer)
-        .on('click', () => (window.location.href = booking[icao] || '/book'))
-        .bindTooltip(icao, { direction: 'top', opacity: 0.9 });
-    });
-
-    setOverlay(overlay, true, 'Rendering ATC routes…');
-
-    requestAnimationFrame(() => {
-      (data.atcPolylines || []).forEach(leg => {
-        const pts = (leg.points || [])
-          .filter(p => p && p.lat != null && p.lon != null)
-          .map(p => [Number(p.lat), Number(p.lon)]);
-
-        splitAtDateline(pts).forEach(seg => {
-          L.polyline(seg, {
-            weight: 4,
-            opacity: 0.95,
-            noClip: true
-          })
-            .addTo(atcLayer)
-            .bindPopup(
-              `<strong>${leg.from} → ${leg.to}</strong><br>
-               <div style="margin-top:6px;
-                 font-family: JetBrains Mono, monospace;
-                 font-size:12px;
-                 white-space:pre-wrap;">
-                 ${(leg.atc_route || '').replace(/</g, '&lt;')}
-               </div>`
-            );
-        });
-      });
-
-      setOverlay(overlay, false);
-    });
-
-    // FIX: boundsPts was undefined; use bounds
-    if (bounds.length) {
-      map.fitBounds(bounds, {
-        padding: [24, 24],
-        maxZoom: 5,
-        animate: false
-      });
-
-      setTimeout(() => {
-        map.invalidateSize(true);
-      }, 0);
-    }
+    data = await res.json();
+    setCachedMapData(cacheKey, data);
   }
+
+  lastData = data;
+
+  airportLayer.clearLayers();
+  atcLayer.clearLayers();
+
+  renderData(map, data);
+  setOverlay(overlay, false);
+}
+
 
   load().catch(console.error);
 
   /* --------------------------------------------------
-     EXPAND to modal (WF map)
-     - Creates modal DOM if missing
-     - Only triggers when click comes from within WF map container
+     Modal handling (unchanged behavior)
   -------------------------------------------------- */
   let modalMap = null;
-
-
-
 
   function ensureWfModal() {
     let modal = document.getElementById('wfMapModal');
@@ -369,22 +357,18 @@ if (bounds.length) {
 
     modal = document.createElement('div');
     modal.id = 'wfMapModal';
-    // Reuse your existing map-modal styling
     modal.className = 'map-modal hidden';
-
     modal.innerHTML = `
       <div class="map-modal-backdrop" data-wf-close="1"></div>
       <div class="map-modal-panel">
         <div class="map-modal-header">
           <span>WF Route Map</span>
-          <button type="button" aria-label="Close map" data-wf-close="1">✕</button>
+          <button type="button" data-wf-close="1">✕</button>
         </div>
         <div class="icao-map">
-          <div id="wfMapModalMap" style="width:100%;height:100%;min-height:0;"></div>
+          <div id="wfMapModalMap" style="width:100%;height:100%"></div>
         </div>
-      </div>
-    `;
-
+      </div>`;
     document.body.appendChild(modal);
     return modal;
   }
@@ -395,52 +379,29 @@ if (bounds.length) {
 
     setTimeout(() => {
       if (!modalMap) {
-        modalMap = L.map('wfMapModalMap', {
-          zoomControl: true,
-          attributionControl: false
-        });
-
-        // Use same base tiles (dark) as main map for now
-        const modalBase = L.tileLayer(
+        modalMap = L.map('wfMapModalMap', { zoomControl: true });
+        modalMap._wfBaseTileLayer = L.tileLayer(
           'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
           { subdomains: 'abcd', maxZoom: 19, noWrap: true }
         ).addTo(modalMap);
-
-        modalMap._wfBaseTileLayer = modalBase;
-      } else {
-        modalMap.invalidateSize(true);
       }
 
-      // Re-render into modal map
       clearLeafletLayers(modalMap);
       renderData(modalMap, lastData);
       modalMap.invalidateSize(true);
     }, 50);
   }
 
-  function closeWfModal() {
-    document.getElementById('wfMapModal')?.classList.add('hidden');
-  }
-
-  // Close handlers (backdrop + button + ESC)
-  document.addEventListener('click', (e) => {
-    const close = e.target.closest('[data-wf-close="1"]');
-    if (close) closeWfModal();
+  document.addEventListener('click', e => {
+    if (e.target.closest('[data-wf-close="1"]')) {
+      document.getElementById('wfMapModal')?.classList.add('hidden');
+    }
+    if (e.target.closest('[data-wf-expand="1"]')) openWfModal();
   });
 
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeWfModal();
-  });
-
-  // Expand button binding (scoped to WF map container)
-  document.addEventListener('click', (e) => {
-    const btn = e.target.closest('#wfExpandMapBtn, .wf-expand-map-btn, .map-expand-btn, [data-wf-expand="1"]');
-    if (!btn) return;
-
-    // Only respond if button is within the WF map area (avoid ICAO conflicts)
-    const wfContainer = el.closest('.card') || el.parentElement;
-    if (wfContainer && !wfContainer.contains(btn)) return;
-
-    openWfModal();
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      document.getElementById('wfMapModal')?.classList.add('hidden');
+    }
   });
 });

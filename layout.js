@@ -58,10 +58,6 @@ export default function renderLayout({
 </a>
 
       
-      <a href="/book" class="nav-item">
-        <span class="icon">🗓️</span>
-        <span class="label">Book a Slot</span>
-      </a>
       <a href="/wf/world-map" class="nav-item">
         <span class="icon">🗺️</span>
         <span class="label">Route Map</span>

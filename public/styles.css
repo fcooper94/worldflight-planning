@@ -4760,3 +4760,65 @@ body.sidebar-collapsed .schedule-page .card-full{
   max-width: none;       /* allow shrink */
 }
 
+.wf-airport-hover {
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  min-width: 220px;
+}
+
+.wf-airport-hover-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.wf-airport-hover-section {
+  padding: 6px 8px;
+  border-radius: 6px;
+  margin-bottom: 6px;
+  background: rgba(0,0,0,0.04);
+}
+
+.wf-airport-hover-section.inbound {
+  border-left: 3px solid #4fd1c5; /* teal */
+}
+
+.wf-airport-hover-section.outbound {
+  border-left: 3px solid #63b3ed; /* blue */
+}
+
+.wf-airport-hover-subtitle {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  opacity: 0.8;
+  margin-bottom: 2px;
+}
+
+.wf-airport-hover-leg {
+  font-weight: 500;
+}
+
+.wf-airport-hover-date {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-bottom: 2px;
+}
+
+.wf-airport-hover-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wf-airport-hover-row span {
+  opacity: 0.7;
+}
+
+.wf-airport-hover-cta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #60a5fa;
+  cursor: pointer;
+}

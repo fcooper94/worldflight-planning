@@ -566,6 +566,17 @@ function isCoveringSouthAmericaCtr(callsign, icao) {
   return false;
 }
 
+function computeArrivalDateUtc(dateUtc, depTimeUtc, blockTime) {
+  if (!dateUtc || !depTimeUtc || !blockTime) return dateUtc || '';
+
+  const dep = parseUtcDateTime(dateUtc, depTimeUtc);
+
+  const [bh, bm] = blockTime.split(':').map(Number);
+  const arr = new Date(dep.getTime() + (bh * 60 + bm) * 60000);
+
+  return arr.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
 
 function isCoveringUkCtr(callsign, icao) {
   const cs = callsign.toUpperCase();
@@ -2159,6 +2170,39 @@ function buildFullRouteChain(rows) {
   return chain;
 }
 
+function computeWindowDateIso(baseDateIso, timeUtc) {
+  if (!baseDateIso || !timeUtc) return baseDateIso;
+
+  const base = new Date(`${baseDateIso}T00:00:00Z`);
+  const [hh] = timeUtc.split(':').map(Number);
+
+  // If time is after midnight but schedule is previous evening
+  if (hh < 6) {
+    base.setUTCDate(base.getUTCDate() + 1);
+  }
+
+  return base.toISOString().slice(0, 10);
+}
+
+function normalizeDateToIso(dateUtc) {
+  if (!dateUtc) return '';
+
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateUtc)) {
+    return dateUtc;
+  }
+
+  // "Sat 2nd Nov"
+  const cleaned = dateUtc
+    .replace(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+/i, '')
+    .replace(/(\d+)(st|nd|rd|th)/i, '$1');
+
+  const year = new Date().getUTCFullYear();
+  const d = new Date(`${cleaned} ${year} UTC`);
+  return isNaN(d) ? '' : d.toISOString().slice(0, 10);
+}
+
+
 const atcRouteCache = new Map();
 
 app.get('/api/wf/world-map', async (req, res) => {
@@ -2168,126 +2212,173 @@ app.get('/api/wf/world-map', async (req, res) => {
 
   let legs = [];
 
-  // --------------------------------------------------
-  // Explicit A -> B -> C override (URL-driven)
-  // --------------------------------------------------
+  /* --------------------------------------------------
+     Explicit A → B → C override (URL-driven)
+  -------------------------------------------------- */
   if (a && b && c) {
-    const ab = adminSheetCache.find(r => r.from === a && r.to === b) || null;
-    const bc = adminSheetCache.find(r => r.from === b && r.to === c) || null;
-
+    const ab = adminSheetCache.find(r => r.from === a && r.to === b);
+    const bc = adminSheetCache.find(r => r.from === b && r.to === c);
     if (ab) legs.push(ab);
     if (bc) legs.push(bc);
   }
 
-  // --------------------------------------------------
-  // Default: FULL WF SCHEDULE (ordered by r.number)
-  // --------------------------------------------------
-  else {
+  /* --------------------------------------------------
+     Default: FULL WF schedule (ordered)
+  -------------------------------------------------- */
+  if (!legs.length) {
     legs = adminSheetCache
       .filter(r => r?.from && r?.to && r.number != null)
       .slice()
-      .sort((a, b) => Number(a.number) - Number(b.number));
+      .sort((x, y) => Number(x.number) - Number(y.number));
   }
 
-  // --------------------------------------------------
-  // Build full WF path: [A, B, C, D, ...]
-  // --------------------------------------------------
+  /* --------------------------------------------------
+     Build WF path: [A, B, C, D...]
+  -------------------------------------------------- */
   const wfPath = [];
   for (let i = 0; i < legs.length; i++) {
     if (i === 0) wfPath.push(legs[i].from);
     wfPath.push(legs[i].to);
   }
 
-  // --------------------------------------------------
-  // Fetch airport coordinates
-  // --------------------------------------------------
+  /* --------------------------------------------------
+     Airports (INBOUND / OUTBOUND SECTORS)
+  -------------------------------------------------- */
   const airports = {};
-  for (const icao of wfPath) {
-    const ap = await prisma.airport.findUnique({ where: { icao } });
-    if (ap) {
-      airports[icao] = {
-        icao,
-        name: ap.name || icao,
-        lat: ap.lat,
-        lon: ap.lon
-      };
+
+  function ensureAirport(icao, ap) {
+    airports[icao] ??= {
+      icao,
+      name: ap.name || icao,
+      lat: ap.lat,
+      lon: ap.lon,
+      inbound: null,
+      outbound: null
+    };
+  }
+
+  for (let i = 0; i < legs.length; i++) {
+    const leg = legs[i];
+    const depIcao = leg.from;
+    const arrIcao = leg.to;
+
+    /* ---- Outbound sector (this leg) */
+    const apDep = await prisma.airport.findUnique({ where: { icao: depIcao } });
+    if (apDep) {
+      ensureAirport(depIcao, apDep);
+
+      airports[depIcao].outbound = {
+  wf: leg.wf || leg.number || null,
+  from: leg.from,
+  to: leg.to,
+  dateIso: normalizeDateToIso(leg.date_utc),
+  depWindow: leg.dep_time_utc
+    ? `${subtractMinutes(leg.dep_time_utc, 60)}–${addMinutes(leg.dep_time_utc, 60)}`
+    : ''
+};
+
+
+
+    }
+
+    /* ---- Inbound sector (this leg) */
+    const apArr = await prisma.airport.findUnique({ where: { icao: arrIcao } });
+    if (apArr) {
+      ensureAirport(arrIcao, apArr);
+
+      const arrDateIso = computeWindowDateIso(
+  leg.date_iso,
+  leg.arr_time_utc || leg.dep_time_utc
+);
+
+airports[arrIcao].inbound = {
+  wf: leg.wf || leg.number || null,
+  from: leg.from,
+  to: leg.to,
+  dateIso: computeArrivalDateUtc(
+    normalizeDateToIso(leg.date_utc),
+    leg.dep_time_utc,
+    leg.block_time
+  ),
+  arrWindow: leg.arr_time_utc
+    ? `${subtractMinutes(leg.arr_time_utc, 60)}–${addMinutes(leg.arr_time_utc, 60)}`
+    : ''
+};
+
+
+
+
     }
   }
 
-  // --------------------------------------------------
-  // ATC polylines (one per leg)
-  // --------------------------------------------------
+  /* --------------------------------------------------
+     ATC polylines (unchanged)
+  -------------------------------------------------- */
   const atcPolylines = await Promise.all(
-  legs.map((leg) =>
-    limitAtc(async () => {
-      const cacheKey = `${leg.from}-${leg.to}-${leg.atc_route || ''}`;
+    legs.map((leg) =>
+      limitAtc(async () => {
+        const cacheKey = `${leg.from}-${leg.to}-${leg.atc_route || ''}`;
+        const cached = cacheGet(cacheKey);
+        if (cached) {
+          return {
+            from: leg.from,
+            to: leg.to,
+            atc_route: leg.atc_route || '',
+            dep_time_utc: leg.dep_time_utc || '',
+            points: await Promise.resolve(cached)
+          };
+        }
 
-      // 1) cache hit?
-      const cached = cacheGet(cacheKey);
-      if (cached) {
-        // cached may be a Promise (in-flight) or a final value
-        const points = await Promise.resolve(cached);
-        return {
-          from: leg.from,
-          to: leg.to,
-          atc_route: leg.atc_route || '',
-          dep_time_utc: leg.dep_time_utc || '',
-          points
-        };
-      }
+        const inflight = resolveAtcRoutePoints(
+          { fromIcao: leg.from, toIcao: leg.to, atcRoute: leg.atc_route },
+          prisma
+        );
 
-      // 2) cache miss -> store in-flight Promise to prevent stampede
-      const inflight = resolveAtcRoutePoints(
-        { fromIcao: leg.from, toIcao: leg.to, atcRoute: leg.atc_route },
-        prisma
-      );
+        ATC_CACHE.set(cacheKey, inflight);
 
-      ATC_CACHE.set(cacheKey, inflight);
+        try {
+          const points = await inflight;
+          cacheSet(cacheKey, points);
+          return {
+            from: leg.from,
+            to: leg.to,
+            atc_route: leg.atc_route || '',
+            dep_time_utc: leg.dep_time_utc || '',
+            points
+          };
+        } catch (err) {
+          ATC_CACHE.delete(cacheKey);
+          throw err;
+        }
+      })
+    )
+  );
 
-      try {
-        const points = await inflight;
-        cacheSet(cacheKey, points);
-
-        return {
-          from: leg.from,
-          to: leg.to,
-          atc_route: leg.atc_route || '',
-          dep_time_utc: leg.dep_time_utc || '',
-          points
-        };
-      } catch (err) {
-        ATC_CACHE.delete(cacheKey);
-        throw err;
-      }
-    })
-  )
-);
-
-
-
-  // --------------------------------------------------
-  // Booking links
-  // --------------------------------------------------
+  /* --------------------------------------------------
+     Booking links (optional legacy)
+  -------------------------------------------------- */
   const bookingLinks = {};
   for (const leg of legs) {
-    if (!leg?.from || !leg?.to || !leg?.dep_time_utc) continue;
-    bookingLinks[leg.from] =
-      `/book?from=${encodeURIComponent(leg.from)}&to=${encodeURIComponent(leg.to)}&depTimeUtc=${encodeURIComponent(leg.dep_time_utc)}`;
+    if (leg?.from && leg?.to && leg?.dep_time_utc) {
+      bookingLinks[leg.from] =
+        `/book?from=${encodeURIComponent(leg.from)}&to=${encodeURIComponent(leg.to)}&depTimeUtc=${encodeURIComponent(leg.dep_time_utc)}`;
+    }
   }
 
   const last = wfPath[wfPath.length - 1];
   if (last && !bookingLinks[last]) bookingLinks[last] = '/book';
 
-  // --------------------------------------------------
-  // Response
-  // --------------------------------------------------
+  /* --------------------------------------------------
+     Response
+  -------------------------------------------------- */
   res.json({
     airports,
-    wfPath,        // FULL WORLD FLIGHT PATH
-    atcPolylines,  // ONE PER LEG
+    wfPath,
+    atcPolylines,
     bookingLinks
   });
 });
+
 
 
 
@@ -6895,7 +6986,7 @@ const selected = value === preselectedKey ? 'selected' : '';
       data-dep="${s.dep_time_utc}"
       ${selected}
     >
-      ${s.from} → ${s.to} | ${s.dep_time_utc}Z
+      ${s.number} | ${s.from}–${s.to}
     </option>
   `;
 }).join('')}
@@ -7457,6 +7548,56 @@ document.addEventListener('click', async e => {
   location.reload(); // authoritative refresh
 });
 </script>
+<script>
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.cancel-slot-btn');
+  if (!btn) return;
+
+  e.preventDefault();
+
+  const slotKey = btn.dataset.slotKey;
+  if (!slotKey) return;
+
+  openConfirmModalAsync({
+    title: 'Cancel TOBT Slot',
+    message: 'Are you sure you want to cancel this booking?',
+    confirmText: 'Confirm',
+    cancelText: 'Cancel',
+
+    onConfirm: async ({ set, showOk }) => {
+      try {
+        const res = await fetch('/api/tobt/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slotKey })
+        });
+
+        if (!res.ok) {
+          let msg = 'Failed to cancel slot';
+          try {
+            const err = await res.json();
+            if (err?.error) msg = err.error;
+          } catch {}
+
+          // Show error, allow retry
+          set('Cancel failed', msg);
+          return false;
+        }
+
+        
+        // Refresh after short delay so user sees confirmation
+        setTimeout(() => location.reload(), 600);
+        return true;
+
+      } catch (err) {
+        set('Request failed', 'Network error. Please try again.');
+        return false;
+      }
+    }
+  });
+});
+</script>
+
 
 
 
