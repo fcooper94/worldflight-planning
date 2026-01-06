@@ -7387,137 +7387,38 @@ return true;
     e.target.blur();
   });
 </script>
-<script>
-(() => {
-  const modal = document.getElementById('callsignModal');
-  const input = document.getElementById('callsignModalInput');
-  const errorBox = document.getElementById('callsignModalError');
-
-  let activeSlotKey = null;
-  let originalCallsign = null;
-
-  function openModal(slotKey, callsign) {
-    activeSlotKey = slotKey;
-    originalCallsign = callsign;
-
-    input.value = callsign;
-    errorBox.classList.add('hidden');
-    errorBox.textContent = '';
-
-    modal.classList.remove('hidden');
-    input.focus();
-    input.select();
-  }
-
-  function closeModal() {
-    modal.classList.add('hidden');
-    activeSlotKey = null;
-    originalCallsign = null;
-  }
-
-  document.addEventListener('click', e => {
-    const btn = e.target.closest('.callsign-edit-btn');
-    if (!btn) return;
-
-    openModal(
-      btn.dataset.slotkey,
-      btn.dataset.callsign
-    );
-  });
-
-  modal.querySelector('.modal-btn-cancel').onclick = closeModal;
-  modal.querySelector('.modal-backdrop').onclick = closeModal;
-
-  modal.querySelector('.modal-btn-submit').onclick = async () => {
-    const newCallsign = input.value.trim().toUpperCase();
-
-    if (!newCallsign) {
-      errorBox.textContent = 'Callsign cannot be empty';
-      errorBox.classList.remove('hidden');
-      return;
-    }
-
-    const res = await fetch('/api/tobt/update-callsign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        slotKey: activeSlotKey,
-        callsign: newCallsign
-      })
-    });
-
-    if (!res.ok) {
-      let msg = 'Failed to update callsign';
-      try {
-        const err = await res.json();
-        if (err?.error) msg = err.error;
-      } catch {}
-      errorBox.textContent = msg;
-      errorBox.classList.remove('hidden');
-      return;
-    }
-
-    // Success → reload to reflect authoritative state
-    location.reload();
-  };
-
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && !modal.classList.contains('hidden')) {
-      closeModal();
-    }
-  });
-})();
-
-// Save on Enter key
-document.getElementById('callsignModalInput')
-  .addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      document
-        .querySelector('#callsignModal .modal-btn-submit')
-        .click();
-    }
-  });
-
-</script>
 
 <script>
-  document.addEventListener('click', async e => {
-    const btn = e.target.closest('.cancel-slot-btn');
-    if (!btn) return;
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('.callsign-edit-btn');
+  if (!btn) return;
 
-    const slotKey = btn.dataset.slotKey;
-    const callsign = btn.dataset.callsign || 'this booking';
+  const slotKey = btn.dataset.slotkey;
+  const currentCallsign = btn.dataset.callsign;
 
-    const confirmed = await openConfirmModal({
-      title: 'Cancel Slot',
-      message: 'Cancel TOBT booking for ' + callsign + '? This cannot be undone.'
+  const newCallsign = await openCallsignModal();
+  if (!newCallsign) return;
 
-    });
+  const res = await fetch('/api/tobt/update-callsign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slotKey, callsign: newCallsign })
+  });
 
-    if (!confirmed) return;
+  if (!res.ok) {
+    let msg = 'Failed to update callsign';
+    try {
+      const err = await res.json();
+      if (err?.error) msg = err.error;
+    } catch {}
+    showBookingError(msg);
+    return;
+  }
 
-    const res = await fetch('/api/tobt/cancel', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  credentials: 'same-origin',
-  body: JSON.stringify({ slotKey })
+  location.reload(); // authoritative refresh
 });
-
-
-    if (!res.ok) {
-      let errText = 'Failed to cancel slot';
-      try {
-        const err = await res.json();
-        if (err?.error) errText = err.error;
-      } catch {}
-      alert(errText);
-      return;
-    }
-
-    location.reload();
-  });
 </script>
+
 
 
 
