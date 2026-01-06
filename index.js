@@ -2394,17 +2394,7 @@ app.get('/wf/world-map', requireLogin, (req, res) => {
       <div class="icao-map" style="height: calc(100% - 46px);">
         <div id="wfWorldMap" style="width:100%; height:100%;"></div>
 
-        <div class="map-overlay-controls">
-          <button
-  id="wfExpandMapBtn"
-  class="map-overlay-btn"
-  title="Expand map"
-  aria-label="Expand map"
->
-  ⤢
-</button>
-
-        </div>
+        
       </div>
     </section>
 
