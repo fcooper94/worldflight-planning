@@ -153,7 +153,7 @@ function airportHoverHtml(icao, a) {
           <div class="wf-airport-meta">
             <span>${formatUtcDatePretty(a.inbound.dateIso)}</span>
             <span class="dot">•</span>
-            <span>Arr ${a.inbound.arrWindow}</span>
+            <span>Arr Window ${a.inbound.arrWindow}</span>
           </div>
         </div>
       ` : ''}
@@ -167,7 +167,7 @@ function airportHoverHtml(icao, a) {
           <div class="wf-airport-meta">
             <span>${formatUtcDatePretty(a.outbound.dateIso)}</span>
             <span class="dot">•</span>
-            <span>Dep ${a.outbound.depWindow}</span>
+            <span>Dep Window ${a.outbound.depWindow}</span>
           </div>
         </div>
       ` : ''}
