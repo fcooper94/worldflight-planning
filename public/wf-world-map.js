@@ -102,6 +102,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const d = new Date(`${dateStr}T00:00:00Z`);
   if (isNaN(d)) return dateStr;
 
+ 
+
+
   const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 

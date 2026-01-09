@@ -29,6 +29,8 @@ export default function renderLayout({
 <script src="/icao-map.js"></script>
 <script src="/wf-world-map.js"></script>
 <script src="/socket.io/socket.io.js"></script>
+<script src="/slot-banners.js" defer></script>
+
 
 </head>
 
@@ -900,6 +902,24 @@ document.addEventListener('click', (e) => {
   }
 })();
 
+</script>
+<script>
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.book-slot-btn');
+  if (!btn) return;
+
+  const isArrival = btn.classList.contains('arrival');
+  const isDeparture = btn.classList.contains('departure');
+
+  const callsign = await openCallsignModal();
+  if (!callsign) return;
+
+  if (isArrival) {
+    bookArrivalSlot(callsign);
+  } else if (isDeparture) {
+    bookDepartureSlot(callsign);
+  }
+});
 </script>
 
 

@@ -5106,3 +5106,227 @@ main.dashboard.map-layout {
   cursor: pointer;
   text-align: center;
 }
+
+/* =========================================================
+   SLOT BANNERS (Arrival / Departure)
+   ========================================================= */
+
+/* Grid container for the two banners */
+.slot-banners {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+/* Stack on smaller screens */
+@media (max-width: 900px) {
+  .slot-banners {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Individual banner card */
+.slot-banner {
+  background: linear-gradient(160deg, var(--panel), var(--panel2));
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px 28px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+
+  box-shadow: var(--shadow);
+  width: 100%;
+  min-width: 0;
+}
+
+/* Arrival / Departure accent bars */
+.slot-banner.arrival {
+  border-left: 4px solid var(--accent);
+}
+
+.slot-banner.departure {
+  border-left: 4px solid var(--wf-green);
+}
+
+/* Header label */
+.slot-type {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+/* Info container */
+.slot-info {
+  width: 100%;
+}
+
+/* Grid of details */
+.slot-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
+  gap: 14px 24px;
+}
+
+/* ATC route spans full width */
+.slot-grid .wide {
+  grid-column: span 4;
+}
+
+/* Labels */
+.slot-grid label {
+  font-size: 11px;
+  color: var(--muted2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* Values */
+.slot-grid strong {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* =========================================================
+   BOOK SLOT BUTTONS
+   ========================================================= */
+
+.book-slot-btn {
+  align-self: flex-end;
+  height: 38px;
+  padding: 0 22px;
+
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Arrival button */
+.book-slot-btn.arrival {
+  background: linear-gradient(160deg, #38bdf8, #0ea5e9);
+}
+
+/* Departure button */
+.book-slot-btn.departure {
+  background: linear-gradient(160deg, var(--wf-green), var(--wf-green-dark));
+}
+
+/* Hover effect */
+.book-slot-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.25);
+}
+/* Container that matches .card width WITHOUT background */
+.portal-width {
+  width: 100%;
+  padding: 32px 48px;  /* EXACT same padding as .card */
+  box-sizing: border-box;
+}
+.slot-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 26px;
+}
+.slot-route {
+  display: grid;
+  grid-template-columns: auto 20px auto 1fr;
+  align-items: center;
+  column-gap: 10px;
+}
+
+.slot-route .airport {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.slot-route .arrow {
+  font-size: 18px;
+  opacity: 0.6;
+}
+
+.slot-route .slot-date {
+  justify-self: end;
+  font-size: 14px;
+  color: var(--muted);
+}
+.slot-window {
+  background: rgba(255,255,255,0.04);
+  border-radius: 12px;
+  padding: 14px 18px;
+}
+
+.slot-window label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.window-time {
+  margin-top: 4px;
+  font-size: 20px;
+  font-weight: 700;
+}
+.arrival-window {
+  border-left: 4px solid #39c6ff;
+}
+
+.departure-window {
+  border-left: 4px solid #38d98c;
+}
+.slot-atc label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.route-text {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  opacity: 0.9;
+  word-break: break-word;
+}
+.slot-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+}
+.wf-book-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 22px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 14px;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+}
+
+.wf-book-btn.arrival {
+  background: linear-gradient(135deg, #2cc8ff, #1aa8e8);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(44,200,255,.35);
+}
+
+.wf-book-btn.departure {
+  background: linear-gradient(135deg, #28c76f, #1ea85c);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(40,199,111,.35);
+}
+
+.wf-book-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0,0,0,.35);
+}

@@ -428,6 +428,9 @@ function requireLogin(req, res, next) {
 }
 
 
+
+
+
 function isAirportController(cs, icao) {
   if (!cs || !icao) return false;
 
@@ -3411,51 +3414,9 @@ app.get('/icao/:icao', requireLogin, async (req, res) => {
     orderBy: { uploadedAt: 'desc' }
   });
   const content = `
- <div id="wfSlotBanner" class="wf-slot-banner hidden">
-  <div class="wf-slot-left">
-    <div class="wf-slot-header">
-  <span class="wf-slot-badge">WorldFlight</span>
-  <span class="wf-slot-title">Slots Available</span>
+  <div class="portal-header portal-width">
+  <div id="slotBanners" class="slot-banners"></div>
 </div>
-
-
-    <div class="wf-slot-grid">
-      <div class="wf-slot-item">
-        <span class="label">Departure</span>
-        <span class="value" id="wfDep"></span>
-      </div>
-
-      <div class="wf-slot-item">
-        <span class="label">Destination</span>
-        <span class="value" id="wfDest"></span>
-      </div>
-
-      <div class="wf-slot-item">
-        <span class="label">Date</span>
-        <span class="value" id="wfDate"></span>
-      </div>
-
-      <div class="wf-slot-item">
-        <span class="label">Dep Window</span>
-        <span class="value" id="wfWindow"></span>
-      </div>
-
-      <div class="wf-slot-item">
-        <span class="label">Block Time</span>
-        <span class="value" id="wfBlock"></span>
-      </div>
-    </div>
-  </div>
-
-  <div class="wf-slot-right">
-    <a id="wfSlotLink" class="wf-slot-cta" href="#">
-      Book Slot
-    </a>
-  </div>
-</div>
-
-
-
 
 
   <section class="card">
@@ -3821,6 +3782,9 @@ function escapeHtml(value) {
 
 
 
+
+
+
 function loadAtis(icao) {
   fetch('/api/icao/' + icao + '/atis-all')
     .then(res => res.json())
@@ -4019,6 +3983,26 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 </script>
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+  const pathParts = window.location.pathname.split('/');
+  const icao = pathParts[pathParts.length - 1].toUpperCase();
+
+  try {
+    const res = await fetch('/api/icao/' + icao + '/wf-slots');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+    const data = await res.json();
+    if (window.loadSlotBanners) {
+      window.loadSlotBanners(data);
+    }
+  } catch (err) {
+    console.error('[WF SLOT LOAD FAILED]', err);
+  }
+});
+</script>
+
+
 
 <script>
 document.addEventListener('click', (e) => {
@@ -4233,6 +4217,10 @@ if (!window.IS_LOGGED_IN && hint) {
 
 
 
+
+
+
+
 `;
 
   
@@ -4360,6 +4348,59 @@ app.post('/api/scenery/submit', requireLogin, async (req, res) => {
     res.status(500).json({ error: 'Failed to submit scenery' });
   }
 });
+
+app.get('/api/icao/:icao/wf-slots', (req, res) => {
+  const icao = req.params.icao.toUpperCase();
+
+  const arrivalLeg = adminSheetCache.find(r => r.to === icao);
+  const departureLeg = adminSheetCache.find(r => r.from === icao);
+
+  // 🔑 NEW: lookup previous sector dep time for ARRIVAL
+  const arrivalBookingLeg = arrivalLeg
+    ? adminSheetCache.find(r => r.from === arrivalLeg.from)
+    : null;
+
+  const arrivalWindow = arrivalLeg?.arr_time_utc
+    ? `${subtractMinutes(arrivalLeg.arr_time_utc, 60)}–${addMinutes(arrivalLeg.arr_time_utc, 60)}`
+    : null;
+
+  const departureWindow = departureLeg?.dep_time_utc
+    ? `${subtractMinutes(departureLeg.dep_time_utc, 60)}–${addMinutes(departureLeg.dep_time_utc, 60)}`
+    : null;
+
+  if (!arrivalLeg && !departureLeg) {
+    return res.json({ arrival: null, departure: null });
+  }
+
+  res.json({
+    arrival: arrivalLeg
+      ? {
+          from: arrivalLeg.from,
+          to: arrivalLeg.to,
+          date: arrivalLeg.date_utc,
+
+          // 👇 THIS is the important line
+          dep_time_utc: arrivalBookingLeg?.dep_time_utc || null,
+
+          arr_time_utc: arrivalLeg.arr_time_utc,
+          window: arrivalWindow,
+          atcRoute: arrivalLeg.atc_route
+        }
+      : null,
+
+    departure: departureLeg
+      ? {
+          from: departureLeg.from,
+          to: departureLeg.to,
+          date: departureLeg.date_utc,
+          dep_time_utc: departureLeg.dep_time_utc,
+          window: departureWindow,
+          atcRoute: departureLeg.atc_route
+        }
+      : null
+  });
+});
+
 
 
 app.get('/api/icao/:icao/controllers', async (req, res) => {
