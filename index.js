@@ -3452,11 +3452,13 @@ app.get('/icao/:icao', requireLogin, async (req, res) => {
 
 
     <!-- MIDDLE: Online Controllers -->
-    
+    <div class="controllers-card">
+    <div class="controllers-scroll">
     <ul id="onlineControllers" class="atc-list">
   <li class="atc-empty">Loading ATC...</li>
 </ul>
-
+</div>
+</div>
 
 
     <!-- RIGHT: Map -->
