@@ -3423,7 +3423,7 @@ app.get('/icao/:icao', requireLogin, async (req, res) => {
     orderBy: { uploadedAt: 'desc' }
   });
   const content = `
-  <div class="portal-header portal-width">
+  <div class="portal-header portal-width" id="slotBannerHeader">
   <div id="slotBanners" class="slot-banners"></div>
 </div>
 
