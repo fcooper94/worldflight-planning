@@ -4360,9 +4360,16 @@ app.post('/api/scenery/submit', requireLogin, async (req, res) => {
 
 app.get('/api/icao/:icao/wf-slots', (req, res) => {
   const icao = req.params.icao.toUpperCase();
+  const userCid = req.session?.user?.data?.cid ?? null;
 
-   const arrivalLeg   = adminSheetCache.find(r => r.to === icao);
+  const arrivalLeg   = adminSheetCache.find(r => r.to === icao);
   const departureLeg = adminSheetCache.find(r => r.from === icao);
+
+  /* ================= ARRIVAL ================= */
+
+  let arrivalHasSlots = false;
+  let arrivalFullyBooked = false;
+  let arrivalIHaveSlot = false;
 
   const arrivalBookingLeg = arrivalLeg
     ? adminSheetCache
@@ -4370,29 +4377,53 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
         .find(r => r.date_utc === arrivalLeg.date_utc)
     : null;
 
-const arrivalBooked =
-  arrivalLeg && arrivalBookingLeg
-    ? Object.keys(tobtBookingsBySlot).some(key =>
-        key.startsWith(
-          `${arrivalLeg.from}-${arrivalLeg.to}|${arrivalLeg.date_utc}|${arrivalBookingLeg.dep_time_utc}|`
-        )
-      )
-    : false;
+  if (arrivalLeg && arrivalBookingLeg) {
+    const prefix =
+      `${arrivalLeg.from}-${arrivalLeg.to}|${arrivalLeg.date_utc}|${arrivalBookingLeg.dep_time_utc}|`;
 
+    const allSlots = Object.keys(allTobtSlots)
+      .filter(k => k.startsWith(prefix));
 
-const departureBooked =
-  departureLeg
-    ? Object.keys(tobtBookingsBySlot).some(key =>
-        key.startsWith(
-          `${departureLeg.from}-${departureLeg.to}|${departureLeg.date_utc}|${departureLeg.dep_time_utc}|`
-        )
-      )
-    : false;
+    const bookedSlots = Object.keys(tobtBookingsBySlot)
+      .filter(k => k.startsWith(prefix));
 
+    arrivalHasSlots = allSlots.length > 0;
+    arrivalFullyBooked =
+      arrivalHasSlots && bookedSlots.length === allSlots.length;
 
+    if (userCid && tobtBookingsByCid[userCid]) {
+      arrivalIHaveSlot = [...tobtBookingsByCid[userCid]]
+        .some(k => k.startsWith(prefix));
+    }
+  }
 
+  /* ================= DEPARTURE ================= */
 
+  let departureHasSlots = false;
+  let departureFullyBooked = false;
+  let departureIHaveSlot = false;
 
+  if (departureLeg) {
+    const prefix =
+      `${departureLeg.from}-${departureLeg.to}|${departureLeg.date_utc}|${departureLeg.dep_time_utc}|`;
+
+    const allSlots = Object.keys(allTobtSlots)
+      .filter(k => k.startsWith(prefix));
+
+    const bookedSlots = Object.keys(tobtBookingsBySlot)
+      .filter(k => k.startsWith(prefix));
+
+    departureHasSlots = allSlots.length > 0;
+    departureFullyBooked =
+      departureHasSlots && bookedSlots.length === allSlots.length;
+
+    if (userCid && tobtBookingsByCid[userCid]) {
+      departureIHaveSlot = [...tobtBookingsByCid[userCid]]
+        .some(k => k.startsWith(prefix));
+    }
+  }
+
+  /* ================= WINDOWS ================= */
 
   const arrivalWindow = arrivalLeg?.arr_time_utc
     ? `${subtractMinutes(arrivalLeg.arr_time_utc, 60)}–${addMinutes(arrivalLeg.arr_time_utc, 60)}`
@@ -4402,32 +4433,37 @@ const departureBooked =
     ? `${subtractMinutes(departureLeg.dep_time_utc, 60)}–${addMinutes(departureLeg.dep_time_utc, 60)}`
     : null;
 
+  /* ================= RESPONSE ================= */
+
   res.json({
-  arrival: arrivalLeg ? {
-    from: arrivalLeg.from,
-    to: arrivalLeg.to,
-    dateUtc: arrivalLeg.date_utc,
-    dep_time_utc: arrivalBookingLeg?.dep_time_utc || null,
-    arr_time_utc: arrivalLeg.arr_time_utc,
-    window: arrivalWindow,
-    atcRoute: arrivalLeg.atc_route,
-    isBooked: arrivalBooked
-  } : null,
+    arrival: arrivalLeg ? {
+      from: arrivalLeg.from,
+      to: arrivalLeg.to,
+      dateUtc: arrivalLeg.date_utc,
+      dep_time_utc: arrivalBookingLeg?.dep_time_utc || null,
+      arr_time_utc: arrivalLeg.arr_time_utc,
+      window: arrivalWindow,
+      atcRoute: arrivalLeg.atc_route,
 
-  departure: departureLeg ? {
-    from: departureLeg.from,
-    to: departureLeg.to,
-    dateUtc: departureLeg.date_utc,
-    dep_time_utc: departureLeg.dep_time_utc,
-    window: departureWindow,
-    atcRoute: departureLeg.atc_route,
-    isBooked: departureBooked
-  } : null
+      hasSlots: arrivalHasSlots,
+      fullyBooked: arrivalFullyBooked,
+      iHaveSlot: arrivalIHaveSlot
+    } : null,
+
+    departure: departureLeg ? {
+      from: departureLeg.from,
+      to: departureLeg.to,
+      dateUtc: departureLeg.date_utc,
+      dep_time_utc: departureLeg.dep_time_utc,
+      window: departureWindow,
+      atcRoute: departureLeg.atc_route,
+
+      hasSlots: departureHasSlots,
+      fullyBooked: departureFullyBooked,
+      iHaveSlot: departureIHaveSlot
+    } : null
+  });
 });
-
-
-});
-
 
 
 

@@ -1,29 +1,4 @@
 /* ===============================
-   TIME HELPERS
-================================ */
-
-function pad(n) {
-  return String(n).padStart(2, '0');
-}
-
-function addMinutesUtc(time, mins) {
-  const [h, m] = time.split(':').map(Number);
-  const d = new Date(Date.UTC(2000, 0, 1, h, m));
-  d.setUTCMinutes(d.getUTCMinutes() + mins);
-  return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
-}
-
-function subtractMinutesUtc(time, mins) {
-  return addMinutesUtc(time, -mins);
-}
-
-
-function buildWindow(centerUtc) {
-  if (!centerUtc) return '—';
-  return addMinutesUtc(centerUtc, -60) + '–' + addMinutesUtc(centerUtc, 60);
-}
-
-/* ===============================
    RENDER SLOT BANNERS (GLOBAL)
 ================================ */
 
@@ -44,7 +19,6 @@ window.loadSlotBanners = function (data) {
     return;
   }
 
-  // Otherwise show header
   header.style.display = '';
   container.innerHTML = '';
 
@@ -73,41 +47,42 @@ window.loadSlotBanners = function (data) {
   ============================== */
 
   if (data.arrival) {
-    const arrivalWindow = data.arrival.arr_time_utc
-      ? buildWindow(data.arrival.arr_time_utc)
-      : '—';
+    const a = data.arrival;
 
     container.innerHTML +=
       '<div class="slot-banner arrival">' +
 
         '<div class="slot-header">' +
           '<span class="slot-badge arrival">Arrival - </span>' +
-          '<span class="slot-date">' + data.arrival.dateUtc + '</span>' +
+          '<span class="slot-date">' + a.dateUtc + '</span>' +
         '</div>' +
 
         '<div class="slot-route">' +
-          '<span>' + data.arrival.from + '</span>' +
+          '<span>' + a.from + '</span>' +
           '<span class="arrow">→</span>' +
-          '<span>' + data.arrival.to + '</span>' +
+          '<span>' + a.to + '</span>' +
         '</div>' +
 
         '<div class="slot-window">' +
-  '<span class="slot-window-label">Arrival window (UTC)</span>' +
-  '<span class="slot-window-value">' + arrivalWindow + '</span>' +
-'</div>' +
-
+          '<span class="slot-window-label">Arrival window (UTC)</span>' +
+          '<span class="slot-window-value">' + (a.window || '—') + '</span>' +
+        '</div>' +
 
         '<div class="slot-atc">' +
           '<span class="slot-atc-label">ATC Route</span>' +
-          '<span class="slot-atc-route">' + data.arrival.atcRoute + '</span>' +
+          '<span class="slot-atc-route">' + a.atcRoute + '</span>' +
         '</div>' +
 
         (
-          data.arrival.isBooked
-            ? '<span class="wf-book-btn disabled arrival">Slot already booked</span>'
-            : arrivalBookUrl
-              ? '<a class="wf-book-btn arrival" href="' + arrivalBookUrl + '">Book arrival slot</a>'
-              : '<span class="wf-book-btn disabled arrival">Booking unavailable</span>'
+          !a.hasSlots
+            ? '<span class="wf-book-btn disabled arrival">Bookings not yet available ✕</span>'
+          : a.iHaveSlot
+            ? '<span class="wf-book-btn disabled arrival">You already have a slot ✓</span>'
+          : a.fullyBooked
+            ? '<span class="wf-book-btn disabled arrival">All slots booked ✕</span>'
+          : arrivalBookUrl
+            ? '<a class="wf-book-btn arrival" href="' + arrivalBookUrl + '">Book arrival slot</a>'
+            : '<span class="wf-book-btn disabled arrival">Booking unavailable</span>'
         ) +
 
       '</div>';
@@ -118,62 +93,58 @@ window.loadSlotBanners = function (data) {
   ============================== */
 
   if (data.departure) {
-    const departureWindow = data.departure.dep_time_utc
-      ? buildWindow(data.departure.dep_time_utc)
-      : '—';
+    const d = data.departure;
 
     container.innerHTML +=
       '<div class="slot-banner departure">' +
 
         '<div class="slot-header">' +
           '<span class="slot-badge departure">Departure - </span>' +
-          '<span class="slot-date">' + data.departure.dateUtc + '</span>' +
+          '<span class="slot-date">' + d.dateUtc + '</span>' +
         '</div>' +
 
         '<div class="slot-route">' +
-          '<span>' + data.departure.from + '</span>' +
+          '<span>' + d.from + '</span>' +
           '<span class="arrow">→</span>' +
-          '<span>' + data.departure.to + '</span>' +
+          '<span>' + d.to + '</span>' +
         '</div>' +
 
         '<div class="slot-window">' +
-  '<span class="slot-window-label">Departure window (UTC)</span>' +
-  '<span class="slot-window-value">' + departureWindow + '</span>' +
-'</div>' +
-
+          '<span class="slot-window-label">Departure window (UTC)</span>' +
+          '<span class="slot-window-value">' + (d.window || '—') + '</span>' +
+        '</div>' +
 
         '<div class="slot-atc">' +
           '<span class="slot-atc-label">ATC Route</span>' +
-          '<span class="slot-atc-route">' + data.departure.atcRoute + '</span>' +
+          '<span class="slot-atc-route">' + d.atcRoute + '</span>' +
         '</div>' +
 
         (
-          data.departure.isBooked
-            ? '<span class="wf-book-btn disabled departure">Slot already booked</span>'
-            : departureBookUrl
-              ? '<a class="wf-book-btn departure" href="' + departureBookUrl + '">Book departure slot</a>'
-              : '<span class="wf-book-btn disabled departure">Booking unavailable</span>'
+          !d.hasSlots
+            ? '<span class="wf-book-btn disabled departure">Bookings not yet available ✕</span>'
+          : d.iHaveSlot
+            ? '<span class="wf-book-btn disabled departure">You already have a slot ✓</span>'
+          : d.fullyBooked
+            ? '<span class="wf-book-btn disabled departure">All slots booked ✕</span>'
+          : departureBookUrl
+            ? '<a class="wf-book-btn departure" href="' + departureBookUrl + '">Book departure slot</a>'
+            : '<span class="wf-book-btn disabled departure">Booking unavailable</span>'
         ) +
 
       '</div>';
   }
 };
 
-
 /* ===============================
    AUTO LOAD (GLOBAL ICAO)
 ================================ */
 
 document.addEventListener('DOMContentLoaded', function () {
-  var parts = window.location.pathname.split('/');
-  var icao = parts[parts.length - 1].toUpperCase();
+  const parts = window.location.pathname.split('/');
+  const icao = parts[parts.length - 1].toUpperCase();
 
   fetch('/api/icao/' + icao + '/wf-slots')
-    .then(function (res) { return res.json(); })
-    .then(function (data) {
-      window.loadSlotBanners(data);
-    })
-    .catch(function (err) {
-      console.error('Failed to load slot banners', err);
-    });
+    .then(res => res.json())
+    .then(data => window.loadSlotBanners(data))
+    .catch(err => console.error('Failed to load slot banners', err));
 });

@@ -5474,3 +5474,16 @@ main.dashboard.map-layout {
   font-weight: 600;
   color: #eaf6ff;
 }
+.wf-book-btn.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.wf-book-btn.disabled::after {
+  content: none; /* removes tick if you had one */
+}
+
+.wf-book-btn.disabled {
+  background: #2a2f3a;
+  color: #b0b6c3;
+}
