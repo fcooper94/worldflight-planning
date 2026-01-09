@@ -6,18 +6,17 @@ function pad(n) {
   return String(n).padStart(2, '0');
 }
 
-
-
 function addMinutesUtc(time, mins) {
-  if (!time) return '';
-  var parts = time.split(':');
-  if (parts.length !== 2) return '';
-
-  var d = new Date(Date.UTC(2000, 0, 1, Number(parts[0]), Number(parts[1])));
+  const [h, m] = time.split(':').map(Number);
+  const d = new Date(Date.UTC(2000, 0, 1, h, m));
   d.setUTCMinutes(d.getUTCMinutes() + mins);
-
   return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
 }
+
+function subtractMinutesUtc(time, mins) {
+  return addMinutesUtc(time, -mins);
+}
+
 
 function buildWindow(centerUtc) {
   if (!centerUtc) return '—';
@@ -31,25 +30,25 @@ function buildWindow(centerUtc) {
 window.loadSlotBanners = function (data) {
   if (!data) return;
 
-if (data.arrival && !data.arrival.dep_time_utc) return;
-if (data.departure && !data.departure.dep_time_utc) return;
-
-
-   var arrivalBookUrl =
-  '/book?' +
-  'from=' + encodeURIComponent(data.arrival.from) +
-  '&to=' + encodeURIComponent(data.arrival.to) +
-  '&dateUtc=' + encodeURIComponent(data.arrival.date) +
-  '&depTimeUtc=' + encodeURIComponent(data.arrival.dep_time_utc);
+   var arrivalBookUrl = data.arrival?.dep_time_utc
+  ? '/book?' +
+    'from=' + encodeURIComponent(data.arrival.from) +
+    '&to=' + encodeURIComponent(data.arrival.to) +
+    '&dateUtc=' + encodeURIComponent(data.arrival.dateUtc) +
+    '&depTimeUtc=' + encodeURIComponent(data.arrival.dep_time_utc)
+  : null;
 
 
 
-  var departureBookUrl =
-  '/book?' +
-  'from=' + encodeURIComponent(data.departure.from) +
-  '&to=' + encodeURIComponent(data.departure.to) +
-  '&dateUtc=' + encodeURIComponent(data.departure.date) +
-  '&depTimeUtc=' + encodeURIComponent(data.departure.dep_time_utc);
+
+  var departureBookUrl = data.departure?.dep_time_utc
+  ? '/book?' +
+    'from=' + encodeURIComponent(data.departure.from) +
+    '&to=' + encodeURIComponent(data.departure.to) +
+    '&dateUtc=' + encodeURIComponent(data.departure.dateUtc) +
+    '&depTimeUtc=' + encodeURIComponent(data.departure.dep_time_utc)
+  : null;
+
 
   var container = document.getElementById('slotBanners');
   if (!container) return;
@@ -67,7 +66,7 @@ if (data.departure && !data.departure.dep_time_utc) return;
 
     '<div class="slot-header">' +
       '<span class="slot-badge arrival">Arrival - </span>' +
-      '<span class="slot-date">' + data.arrival.date + '</span>' +
+      '<span class="slot-date">' + data.arrival.dateUtc + '</span>' +
     '</div>' +
 
     '<div class="slot-route">' +
@@ -86,9 +85,15 @@ if (data.departure && !data.departure.dep_time_utc) return;
       '<span class="route-text">' + data.arrival.atcRoute + '</span>' +
     '</div>' +
 
-    '<a class="wf-book-btn arrival" href="' + arrivalBookUrl + '">' +
-  'Book arrival slot' +
-'</a>'
+    (
+  data.arrival.isBooked
+    ? '<span class="wf-book-btn disabled arrival">Slot already booked</span>'
+    : arrivalBookUrl
+        ? '<a class="wf-book-btn arrival" href="' + arrivalBookUrl + '">Book arrival slot</a>'
+        : '<span class="wf-book-btn disabled arrival">Booking unavailable</span>'
+)
+
+
 ;
 
   }
@@ -106,7 +111,7 @@ if (data.departure && !data.departure.dep_time_utc) return;
 
     '<div class="slot-header">' +
       '<span class="slot-badge departure">Departure - </span>' +
-      '<span class="slot-date">' + data.departure.date + '</span>' +
+      '<span class="slot-date">' + data.departure.dateUtc + '</span>' +
     '</div>' +
 
     '<div class="slot-route">' +
@@ -125,9 +130,15 @@ if (data.departure && !data.departure.dep_time_utc) return;
       '<span class="route-text">' + data.departure.atcRoute + '</span>' +
     '</div>' +
 
-    '<a class="wf-book-btn departure" href="' + departureBookUrl + '">' +
-  'Book departure slot' +
-'</a>'
+    (
+  data.departure.isBooked
+    ? '<span class="wf-book-btn disabled departure">Slot already booked</span>'
+    : departureBookUrl
+        ? '<a class="wf-book-btn departure" href="' + departureBookUrl + '">Book departure slot</a>'
+        : '<span class="wf-book-btn disabled departure">Booking unavailable</span>'
+)
+
+
 ;
 
   }

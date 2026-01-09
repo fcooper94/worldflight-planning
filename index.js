@@ -301,6 +301,15 @@ function hhmmColonToHHMM(time) {
   return time.replace(':', '');
 }
 
+function formatDatePretty(dateUtc) {
+  const d = new Date(dateUtc + 'T00:00:00Z');
+  return d.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short'
+  });
+}
+
 
 const PHONETIC_TO_LETTER = {
   ALFA: 'A',
@@ -4352,13 +4361,38 @@ app.post('/api/scenery/submit', requireLogin, async (req, res) => {
 app.get('/api/icao/:icao/wf-slots', (req, res) => {
   const icao = req.params.icao.toUpperCase();
 
-  const arrivalLeg = adminSheetCache.find(r => r.to === icao);
+   const arrivalLeg   = adminSheetCache.find(r => r.to === icao);
   const departureLeg = adminSheetCache.find(r => r.from === icao);
 
-  // 🔑 NEW: lookup previous sector dep time for ARRIVAL
   const arrivalBookingLeg = arrivalLeg
-    ? adminSheetCache.find(r => r.from === arrivalLeg.from)
+    ? adminSheetCache
+        .filter(r => r.from === arrivalLeg.from && r.dep_time_utc)
+        .find(r => r.date_utc === arrivalLeg.date_utc)
     : null;
+
+const arrivalBooked =
+  arrivalLeg && arrivalBookingLeg
+    ? Object.keys(tobtBookingsBySlot).some(key =>
+        key.startsWith(
+          `${arrivalLeg.from}-${arrivalLeg.to}|${arrivalLeg.date_utc}|${arrivalBookingLeg.dep_time_utc}|`
+        )
+      )
+    : false;
+
+
+const departureBooked =
+  departureLeg
+    ? Object.keys(tobtBookingsBySlot).some(key =>
+        key.startsWith(
+          `${departureLeg.from}-${departureLeg.to}|${departureLeg.date_utc}|${departureLeg.dep_time_utc}|`
+        )
+      )
+    : false;
+
+
+
+
+
 
   const arrivalWindow = arrivalLeg?.arr_time_utc
     ? `${subtractMinutes(arrivalLeg.arr_time_utc, 60)}–${addMinutes(arrivalLeg.arr_time_utc, 60)}`
@@ -4368,38 +4402,32 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
     ? `${subtractMinutes(departureLeg.dep_time_utc, 60)}–${addMinutes(departureLeg.dep_time_utc, 60)}`
     : null;
 
-  if (!arrivalLeg && !departureLeg) {
-    return res.json({ arrival: null, departure: null });
-  }
-
   res.json({
-    arrival: arrivalLeg
-      ? {
-          from: arrivalLeg.from,
-          to: arrivalLeg.to,
-          date: arrivalLeg.date_utc,
+  arrival: arrivalLeg ? {
+    from: arrivalLeg.from,
+    to: arrivalLeg.to,
+    dateUtc: arrivalLeg.date_utc,
+    dep_time_utc: arrivalBookingLeg?.dep_time_utc || null,
+    arr_time_utc: arrivalLeg.arr_time_utc,
+    window: arrivalWindow,
+    atcRoute: arrivalLeg.atc_route,
+    isBooked: arrivalBooked
+  } : null,
 
-          // 👇 THIS is the important line
-          dep_time_utc: arrivalBookingLeg?.dep_time_utc || null,
-
-          arr_time_utc: arrivalLeg.arr_time_utc,
-          window: arrivalWindow,
-          atcRoute: arrivalLeg.atc_route
-        }
-      : null,
-
-    departure: departureLeg
-      ? {
-          from: departureLeg.from,
-          to: departureLeg.to,
-          date: departureLeg.date_utc,
-          dep_time_utc: departureLeg.dep_time_utc,
-          window: departureWindow,
-          atcRoute: departureLeg.atc_route
-        }
-      : null
-  });
+  departure: departureLeg ? {
+    from: departureLeg.from,
+    to: departureLeg.to,
+    dateUtc: departureLeg.date_utc,
+    dep_time_utc: departureLeg.dep_time_utc,
+    window: departureWindow,
+    atcRoute: departureLeg.atc_route,
+    isBooked: departureBooked
+  } : null
 });
+
+
+});
+
 
 
 
