@@ -7477,9 +7477,8 @@ const simbriefUrl =
   </button>
 </td>
 
-
-  <td class="col-departure">${r.from}</td>
-  <td class="col-destination">${r.to}</td>
+  <td class="col-departure"><a href="/icao/${r.from}">${r.from}</a></td>
+  <td class="col-destination"><a href="/icao/${r.to}">${r.to}</a></td>
 
   <td class="col-tobt tobt-primary">${r.tobt}Z</td>
   <td class="col-connect">${r.connectBy}Z</td>
