@@ -74,16 +74,17 @@ window.loadSlotBanners = function (data) {
         '</div>' +
 
         (
-          !a.hasSlots
-            ? '<span class="wf-book-btn disabled arrival">Bookings not yet available ✕</span>'
-          : a.iHaveSlot
-            ? '<span class="wf-book-btn disabled arrival">You already have a slot ✓</span>'
-          : a.fullyBooked
-            ? '<span class="wf-book-btn disabled arrival">All slots booked ✕</span>'
-          : arrivalBookUrl
-            ? '<a class="wf-book-btn arrival" href="' + arrivalBookUrl + '">Book arrival slot</a>'
-            : '<span class="wf-book-btn disabled arrival">Booking unavailable</span>'
-        ) +
+  !a.hasSlots
+    ? '<span class="wf-book-btn disabled arrival">Bookings not yet available ✕</span>'
+  : a.iHaveSlot
+    ? '<span class="wf-book-btn disabled arrival">You already have a slot ✓</span>'
+  : a.fullyBooked
+    ? '<span class="wf-book-btn disabled arrival">All slots booked ✕</span>'
+  : arrivalBookUrl
+    ? '<a class="wf-book-btn arrival" href="' + arrivalBookUrl + '">Book ' + a.from + ' departure slot</a>'
+    : '<span class="wf-book-btn disabled arrival">Booking unavailable</span>'
+)
+ +
 
       '</div>';
   }
@@ -120,16 +121,17 @@ window.loadSlotBanners = function (data) {
         '</div>' +
 
         (
-          !d.hasSlots
-            ? '<span class="wf-book-btn disabled departure">Bookings not yet available ✕</span>'
-          : d.iHaveSlot
-            ? '<span class="wf-book-btn disabled departure">You already have a slot ✓</span>'
-          : d.fullyBooked
-            ? '<span class="wf-book-btn disabled departure">All slots booked ✕</span>'
-          : departureBookUrl
-            ? '<a class="wf-book-btn departure" href="' + departureBookUrl + '">Book departure slot</a>'
-            : '<span class="wf-book-btn disabled departure">Booking unavailable</span>'
-        ) +
+  !d.hasSlots
+    ? '<span class="wf-book-btn disabled departure">Bookings not yet available ✕</span>'
+  : d.iHaveSlot
+    ? '<span class="wf-book-btn disabled departure">You already have a slot ✓</span>'
+  : d.fullyBooked
+    ? '<span class="wf-book-btn disabled departure">All slots booked ✕</span>'
+  : departureBookUrl
+    ? '<a class="wf-book-btn departure" href="' + departureBookUrl + '">Book ' + d.from + ' departure slot</a>'
+    : '<span class="wf-book-btn disabled departure">Booking unavailable</span>'
+)
+ +
 
       '</div>';
   }

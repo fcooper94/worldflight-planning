@@ -4373,15 +4373,11 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
   let arrivalFullyBooked = false;
   let arrivalIHaveSlot = false;
 
-  const arrivalBookingLeg = arrivalLeg
-    ? adminSheetCache
-        .filter(r => r.from === arrivalLeg.from && r.dep_time_utc)
-        .find(r => r.date_utc === arrivalLeg.date_utc)
-    : null;
+ 
 
-  if (arrivalLeg && arrivalBookingLeg) {
-    const prefix =
-      `${arrivalLeg.from}-${arrivalLeg.to}|${arrivalLeg.date_utc}|${arrivalBookingLeg.dep_time_utc}|`;
+  if (arrivalLeg && arrivalLeg.dep_time_utc) {
+  const prefix =
+    `${arrivalLeg.from}-${arrivalLeg.to}|${arrivalLeg.date_utc}|${arrivalLeg.dep_time_utc}|`;
 
     const allSlots = Object.keys(allTobtSlots)
       .filter(k => k.startsWith(prefix));
@@ -4442,7 +4438,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
       from: arrivalLeg.from,
       to: arrivalLeg.to,
       dateUtc: arrivalLeg.date_utc,
-      dep_time_utc: arrivalBookingLeg?.dep_time_utc || null,
+      dep_time_utc: arrivalLeg.dep_time_utc,
       arr_time_utc: arrivalLeg.arr_time_utc,
       window: arrivalWindow,
       atcRoute: arrivalLeg.atc_route,
