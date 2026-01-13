@@ -1,2 +1,6 @@
 # WorldFlight CDM Prototype
-Basic scaffold for backend and frontend.
+WorldFlight planning portal.
+- WF Schedule
+- Book Slots to take part
+- Plan your flight
+- Resource center for scenery / pilot briefs

@@ -190,23 +190,32 @@ function airportHoverHtml(icao, a) {
      Utilities
   -------------------------------------------------- */
   function splitAtDateline(points) {
-    if (points.length < 2) return [];
-    const segs = [];
-    let cur = [points[0]];
-
-    for (let i = 1; i < points.length; i++) {
-      const a = points[i - 1];
-      const b = points[i];
-      if (Math.abs(b[1] - a[1]) > 180) {
-        if (cur.length > 1) segs.push(cur);
-        cur = [b];
-      } else {
-        cur.push(b);
-      }
-    }
-    if (cur.length > 1) segs.push(cur);
-    return segs;
+  // 🔑 straight airport-to-airport line: never split
+  if (points.length === 2) {
+    return [points];
   }
+
+  if (points.length < 2) return [];
+
+  const segs = [];
+  let cur = [points[0]];
+
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+
+    if (Math.abs(b[1] - a[1]) > 180) {
+      if (cur.length > 1) segs.push(cur);
+      cur = [b];
+    } else {
+      cur.push(b);
+    }
+  }
+
+  if (cur.length > 1) segs.push(cur);
+  return segs;
+}
+
 
   function clearLeafletLayers(targetMap) {
     targetMap.eachLayer(layer => {

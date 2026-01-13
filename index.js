@@ -923,20 +923,20 @@ function buildUnassignedTobtsForICAO(icao) {
     .sort((a, b) => a.tobt.localeCompare(b.tobt));
 }
 
-function isWorldFlightDestination(icao) {
-  const upper = String(icao).toUpperCase();
-
-  return adminSheetCache.some(row =>
-    row.from === upper || row.to === upper
+function hasOutboundFlow(icao) {
+  const upper = icao.toUpperCase();
+  return Object.keys(sharedDepFlows).some(
+    key => key.startsWith(upper + '-')
   );
 }
+
 
 /* ===== ADMIN CID WHITELIST ===== */
 const ADMIN_CIDS = [10000010, 1303570, 10000005];
 
 /* ===== GOOGLE SHEET ===== */
 const GOOGLE_SHEET_CSV_URL =
-  'https://docs.google.com/spreadsheets/d/e/2PACX-1vQupCJv8FX-6OZ_wvbbtCgDXr8D5E8cOQJvotaQVUcDnbcnP6Og32_TEMI92-coC7MaOc2FqQs6LQ3c/pub?output=csv';
+  'https://docs.google.com/spreadsheets/d/e/2PACX-1vRG6DbmhAQpFmOophiGjjSh_UUGdTo-LA_sNNexrMpkkH2ECHl8eDsdxM24iY8Itw06pUZZXWtvmUNg/pub?output=csv';
 
 let adminSheetCache = [];
 let lastDepartureSnapshot = new Set();
@@ -1408,6 +1408,14 @@ if (icaoFromQuery) {
   });
 
   io.emit('depFlowUpdated', { sector: key, value: rate });
+  rebuildAllTobtSlots();
+const fromIcao = key.split('-')[0];
+
+io.to(`icao:${fromIcao}`).emit(
+  'unassignedTobtUpdate',
+  buildUnassignedTobtsForICAO(fromIcao)
+);
+
 });
 
   /* =========================================================
@@ -3412,7 +3420,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
 app.get('/icao/:icao', requireLogin, async (req, res) => {
   const icao = req.params.icao.toUpperCase();
-  const isWorldFlight = isWorldFlightDestination(icao);
+  const isWorldFlight = hasOutboundFlow(icao);
   const wfLeg = getWorldFlightLegForAirport(icao); // whatever function you already use
 
   
