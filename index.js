@@ -1094,6 +1094,18 @@ async function bootstrap() {
   await loadTobtBookingsFromDb();
 
   await refreshAdminSheet();   // 🔑 REQUIRED
+wfWorldMapCache.clear();
+
+// Warm default map cache once per server start (no overrides)
+await (async () => {
+  const key = wfWorldMapKey({ a: '', b: '', c: '' });
+  if (!wfWorldMapCache.has(key)) {
+    const payload = await buildWfWorldMapPayload({ a: '', b: '', c: '' });
+    wfWorldMapCache.set(key, { builtAt: Date.now(), payload });
+  }
+})();
+
+
   rebuildAllTobtSlots();       // 🔑 NOW WORKS
 
   setInterval(refreshPilots, 60000);
@@ -2222,13 +2234,12 @@ function normalizeDateToIso(dateUtc) {
   return isNaN(d) ? '' : d.toISOString().slice(0, 10);
 }
 
+async function buildWfWorldMapPayload({ a = '', b = '', c = '' } = {}) {
+  a = String(a).trim().toUpperCase();
+  b = String(b).trim().toUpperCase();
+  c = String(c).trim().toUpperCase();
 
-const atcRouteCache = new Map();
 
-app.get('/api/wf/world-map', async (req, res) => {
-  const a = (req.query.a || '').toString().trim().toUpperCase();
-  const b = (req.query.b || '').toString().trim().toUpperCase();
-  const c = (req.query.c || '').toString().trim().toUpperCase();
 
   let legs = [];
 
@@ -2391,13 +2402,75 @@ airports[arrIcao].inbound = {
   /* --------------------------------------------------
      Response
   -------------------------------------------------- */
-  res.json({
-    airports,
-    wfPath,
-    atcPolylines,
-    bookingLinks
-  });
+  return {
+  airports,
+  wfPath,
+  atcPolylines,
+  bookingLinks
+};
+
+}
+
+
+const atcRouteCache = new Map();
+
+// ===== WF WORLD MAP CACHE (SERVER-SIDE) =====
+const wfWorldMapCache = new Map(); // key -> { builtAt, payload }
+const wfWorldMapInFlight = new Map(); // key -> Promise<{ builtAt, payload }>
+
+function wfWorldMapKey(params = {}) {
+  const a = params.a || '';
+  const b = params.b || '';
+  const c = params.c || '';
+
+  return `a=${a}&b=${b}&c=${c}`;
+}
+
+
+
+app.get('/api/wf/world-map', async (req, res) => {
+  const a = (req.query.a || '').toString().trim().toUpperCase();
+  const b = (req.query.b || '').toString().trim().toUpperCase();
+  const c = (req.query.c || '').toString().trim().toUpperCase();
+
+  const key = wfWorldMapKey({
+  a: (req.query.a || '').toString().trim().toUpperCase(),
+  b: (req.query.b || '').toString().trim().toUpperCase(),
+  c: (req.query.c || '').toString().trim().toUpperCase()
 });
+
+
+  // 1) Serve from cache instantly
+  const cached = wfWorldMapCache.get(key);
+  if (cached) {
+    return res.json({ builtAt: cached.builtAt, ...cached.payload });
+  }
+
+  // 2) De-dupe concurrent builds (first request builds, others await)
+  let p = wfWorldMapInFlight.get(key);
+  if (!p) {
+    p = (async () => {
+      const payload = await buildWfWorldMapPayload({ a, b, c });
+      const builtAt = Date.now();
+      const entry = { builtAt, payload };
+      wfWorldMapCache.set(key, entry);
+      return entry;
+    })().finally(() => {
+      wfWorldMapInFlight.delete(key);
+    });
+
+    wfWorldMapInFlight.set(key, p);
+  }
+
+  try {
+    const built = await p;
+    return res.json({ builtAt: built.builtAt, ...built.payload });
+  } catch (err) {
+    console.error('[WF MAP] Build failed', err);
+    return res.status(500).json({ error: 'Failed to build world map' });
+  }
+});
+
 
 
 

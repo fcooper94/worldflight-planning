@@ -1,7 +1,15 @@
 const WF_CACHE_TTL = 1000 * 60 * 30; // 30 minutes
 
-function wfCacheKey(qs) {
-  return `wfWorldMap:v3:${qs || 'default'}`;
+// NEW: meta key used to remember server build timestamp for a given qs
+function wfMetaKey(qs) {
+  return `wfWorldMap:meta:v1:${qs || 'default'}`;
+}
+
+// CHANGED: cache key now includes server build timestamp when available
+function wfCacheKey(qs, builtAt) {
+  // Backwards-compatible fallback if server doesn't send builtAt
+  const tag = builtAt ? String(builtAt) : 'no-builtAt';
+  return `wfWorldMap:v4:${tag}:${qs || 'default'}`;
 }
 
 function getSidebarOffset() {
@@ -13,7 +21,6 @@ function getSidebarOffset() {
   }
   return 260; // expanded width (px)
 }
-
 
 function getCachedMapData(key) {
   try {
@@ -36,6 +43,33 @@ function setCachedMapData(key, data) {
     sessionStorage.setItem(
       key,
       JSON.stringify({ ts: Date.now(), data })
+    );
+  } catch {}
+}
+
+// NEW: store / read builtAt per qs so we can hit sessionStorage without fetching every time
+function getCachedBuiltAt(qs) {
+  try {
+    const raw = sessionStorage.getItem(wfMetaKey(qs));
+    if (!raw) return null;
+    const { ts, builtAt } = JSON.parse(raw);
+
+    // Tie meta to same TTL policy
+    if (Date.now() - ts > WF_CACHE_TTL) {
+      sessionStorage.removeItem(wfMetaKey(qs));
+      return null;
+    }
+    return builtAt ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedBuiltAt(qs, builtAt) {
+  try {
+    sessionStorage.setItem(
+      wfMetaKey(qs),
+      JSON.stringify({ ts: Date.now(), builtAt })
     );
   } catch {}
 }
@@ -97,29 +131,25 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function formatUtcDatePretty(dateStr) {
-  if (!dateStr) return '';
+    if (!dateStr) return '';
 
-  const d = new Date(`${dateStr}T00:00:00Z`);
-  if (isNaN(d)) return dateStr;
+    const d = new Date(`${dateStr}T00:00:00Z`);
+    if (isNaN(d)) return dateStr;
 
- 
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
+    const dayName = days[d.getUTCDay()];
+    const dayNum = d.getUTCDate();
+    const monthName = months[d.getUTCMonth()];
 
-  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const suffix =
+      dayNum % 10 === 1 && dayNum !== 11 ? 'st' :
+      dayNum % 10 === 2 && dayNum !== 12 ? 'nd' :
+      dayNum % 10 === 3 && dayNum !== 13 ? 'rd' : 'th';
 
-  const dayName = days[d.getUTCDay()];
-  const dayNum = d.getUTCDate();
-  const monthName = months[d.getUTCMonth()];
-
-  const suffix =
-    dayNum % 10 === 1 && dayNum !== 11 ? 'st' :
-    dayNum % 10 === 2 && dayNum !== 12 ? 'nd' :
-    dayNum % 10 === 3 && dayNum !== 13 ? 'rd' : 'th';
-
-  return `${dayName} ${dayNum}${suffix} ${monthName}`;
-}
-
+    return `${dayName} ${dayNum}${suffix} ${monthName}`;
+  }
 
   function setOverlay(o, show, msg) {
     o.style.display = show ? 'flex' : 'none';
@@ -140,8 +170,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-function airportHoverHtml(icao, a) {
-  return `
+  function airportHoverHtml(icao, a) {
+    return `
     <div class="wf-airport-popup">
       <div class="wf-airport-popup-header">
         ${icao}
@@ -180,42 +210,37 @@ function airportHoverHtml(icao, a) {
       </div>
     </div>
   `;
-}
-
-
-
-
+  }
 
   /* --------------------------------------------------
      Utilities
   -------------------------------------------------- */
   function splitAtDateline(points) {
-  // 🔑 straight airport-to-airport line: never split
-  if (points.length === 2) {
-    return [points];
-  }
-
-  if (points.length < 2) return [];
-
-  const segs = [];
-  let cur = [points[0]];
-
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1];
-    const b = points[i];
-
-    if (Math.abs(b[1] - a[1]) > 180) {
-      if (cur.length > 1) segs.push(cur);
-      cur = [b];
-    } else {
-      cur.push(b);
+    // 🔑 straight airport-to-airport line: never split
+    if (points.length === 2) {
+      return [points];
     }
+
+    if (points.length < 2) return [];
+
+    const segs = [];
+    let cur = [points[0]];
+
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+
+      if (Math.abs(b[1] - a[1]) > 180) {
+        if (cur.length > 1) segs.push(cur);
+        cur = [b];
+      } else {
+        cur.push(b);
+      }
+    }
+
+    if (cur.length > 1) segs.push(cur);
+    return segs;
   }
-
-  if (cur.length > 1) segs.push(cur);
-  return segs;
-}
-
 
   function clearLeafletLayers(targetMap) {
     targetMap.eachLayer(layer => {
@@ -223,8 +248,6 @@ function airportHoverHtml(icao, a) {
       targetMap.removeLayer(layer);
     });
   }
-
-  
 
   /* --------------------------------------------------
      Render (shared for main + modal)
@@ -259,8 +282,8 @@ function airportHoverHtml(icao, a) {
           }
         )
         .on('click', () => {
-  window.location.href = `/icao/${icao}`;
-});
+          window.location.href = `/icao/${icao}`;
+        });
     });
 
     (data.atcPolylines || []).forEach(leg => {
@@ -285,87 +308,94 @@ function airportHoverHtml(icao, a) {
     });
 
     if (bounds.length) {
-  const sidebarWidth = document.body.classList.contains('sidebar-collapsed')
-  ? 72
-  : 220;
+      const sidebarWidth = document.body.classList.contains('sidebar-collapsed')
+        ? 72
+        : 220;
 
-targetMap.fitBounds(bounds, {
-  paddingTopLeft: [sidebarWidth + 24, 24],
-  paddingBottomRight: [24, 24],
-  maxZoom: 5,
-  animate: false
-});
+      targetMap.fitBounds(bounds, {
+        paddingTopLeft: [sidebarWidth + 24, 24],
+        paddingBottomRight: [24, 24],
+        maxZoom: 5,
+        animate: false
+      });
 
-
-  requestAnimationFrame(() => {
-    if (targetMap.getContainer().id === 'wfWorldMap') {
-  targetMap.invalidateSize(true);
-} else {
-  
-}
-
-  });
-}
-
+      requestAnimationFrame(() => {
+        if (targetMap.getContainer().id === 'wfWorldMap') {
+          targetMap.invalidateSize(true);
+        } else {
+          // intentionally blank (original behavior)
+        }
+      });
+    }
   }
 
   window.addEventListener('sidebar:toggle', () => {
-  if (!map || !lastData) return;
+    if (!map || !lastData) return;
 
-  const bounds = [];
-  const airports = lastData.airports || {};
+    const bounds = [];
+    const airports = lastData.airports || {};
 
-  Object.values(airports).forEach(a => {
-    if (a.lat && a.lon) bounds.push([a.lat, a.lon]);
+    Object.values(airports).forEach(a => {
+      if (a.lat && a.lon) bounds.push([a.lat, a.lon]);
+    });
+
+    if (bounds.length) {
+      const sidebarWidth = document.body.classList.contains('sidebar-collapsed')
+        ? 72
+        : 240;
+
+      const topbarHeight = 64;
+
+      map.fitBounds(bounds, {
+        paddingTopLeft: [
+          sidebarWidth + 24,  // LEFT padding accounts for sidebar
+          topbarHeight + 24   // TOP padding accounts for header
+        ],
+        paddingBottomRight: [24, 24],
+        maxZoom: 4,
+        animate: false
+      });
+
+      map.once('moveend', () => {
+        if (map.getZoom() < 2.5) {
+          map.setZoom(2.5, { animate: false });
+        }
+      });
+
+      // FIXED: targetMap was undefined here; use map (the actual map instance)
+      requestAnimationFrame(() => {
+        map.invalidateSize(true);
+      });
+    }
   });
-
-  if (bounds.length) {
-
-  const sidebarWidth = document.body.classList.contains('sidebar-collapsed')
-  ? 72
-  : 240;
-
-const topbarHeight = 64;
-
-map.fitBounds(bounds, {
-  paddingTopLeft: [
-    sidebarWidth + 24,  // LEFT padding accounts for sidebar
-    topbarHeight + 24   // TOP padding accounts for header
-  ],
-  paddingBottomRight: [24, 24],
-  maxZoom: 4,
-  animate: false
-});
-
-map.once('moveend', () => {
-  if (map.getZoom() < 2.5) {
-    map.setZoom(2.5, { animate: false });
-  }
-});
-
-
-
-  requestAnimationFrame(() => {
-    targetMap.invalidateSize(true);
-  });
-}
-
-});
-
 
   /* --------------------------------------------------
      Load main map
   -------------------------------------------------- */
   async function load() {
-  const overlay = ensureOverlay(el);
-  setOverlay(overlay, true, 'Requesting route data…');
+    const overlay = ensureOverlay(el);
+    setOverlay(overlay, true, 'Requesting route data…');
 
-  const qs = new URLSearchParams(window.WF_MAP_QUERY || {}).toString();
-  const cacheKey = wfCacheKey(qs);
+    const qs = new URLSearchParams(window.WF_MAP_QUERY || {}).toString();
 
-  let data = getCachedMapData(cacheKey);
+    // NEW: try to use cached builtAt to avoid fetching when session cache is warm
+    const cachedBuiltAt = getCachedBuiltAt(qs);
+    if (cachedBuiltAt) {
+      const warmKey = wfCacheKey(qs, cachedBuiltAt);
+      const warm = getCachedMapData(warmKey);
+      if (warm) {
+        lastData = warm;
 
-   if (!data) {
+        airportLayer.clearLayers();
+        atcLayer.clearLayers();
+
+        renderData(map, warm);
+        setOverlay(overlay, false);
+        return;
+      }
+    }
+
+    // Fallback: fetch from server (fast once server-side caching is implemented)
     const res = await fetch(
       '/api/wf/world-map' + (qs ? `?${qs}` : ''),
       { credentials: 'same-origin' }
@@ -376,19 +406,23 @@ map.once('moveend', () => {
       return;
     }
 
-    data = await res.json();
-    setCachedMapData(cacheKey, data);
+    const payload = await res.json();
+
+    // NEW: if server returns builtAt, use it to pin cache to a server build
+    const builtAt = payload?.builtAt ?? null;
+    if (builtAt) setCachedBuiltAt(qs, builtAt);
+
+    const key = wfCacheKey(qs, builtAt);
+    setCachedMapData(key, payload);
+
+    lastData = payload;
+
+    airportLayer.clearLayers();
+    atcLayer.clearLayers();
+
+    renderData(map, payload);
+    setOverlay(overlay, false);
   }
-
-  lastData = data;
-
-  airportLayer.clearLayers();
-  atcLayer.clearLayers();
-
-  renderData(map, data);
-  setOverlay(overlay, false);
-}
-
 
   load().catch(console.error);
 
