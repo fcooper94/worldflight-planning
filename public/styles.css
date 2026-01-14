@@ -3262,6 +3262,7 @@ html[data-map-theme="light"] .runway-label > div {
 .atis-container {
   display: flex;
   gap: 14px;
+  width: 100%;
 }
 
 
@@ -3961,16 +3962,7 @@ html[data-map-theme="light"] .ac-label {
 .faa-atis .atis-container {
   display: flex;
   gap: 14px;
-  padding: 14px 16px;           /* ⬅ slightly tighter */
-  border-radius: 14px;
-
-  background: linear-gradient(
-    180deg,
-    rgba(255,255,255,0.04),
-    rgba(255,255,255,0.02)
-  );
-
-  border: 1px solid rgba(255,255,255,0.08);
+  
 }
 .atis-container {
   display: flex;
@@ -5548,3 +5540,9 @@ main.dashboard.map-layout {
     rgba(2, 6, 23, 0.85)
   );
 }
+/* ATIS root must fill the grid cell */
+#airportAtisCard {
+  width: 100%;
+  max-width: 100%;
+}
+
