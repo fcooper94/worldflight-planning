@@ -170,8 +170,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function airportHoverHtml(icao, a) {
-    return `
+  function airportPopupHtml(icao, a) {
+  return `
     <div class="wf-airport-popup">
       <div class="wf-airport-popup-header">
         ${icao}
@@ -205,12 +205,18 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
       ` : ''}
 
-      <div class="wf-airport-popup-footer">
-        Click for more details
+      <div class="wf-airport-popup-actions">
+        <button
+          class="wf-airport-action-btn"
+          data-icao="${icao}"
+        >
+          View Details / Book Slot
+        </button>
       </div>
     </div>
   `;
-  }
+}
+
 
   /* --------------------------------------------------
      Utilities
@@ -271,19 +277,17 @@ document.addEventListener('DOMContentLoaded', () => {
       bounds.push(ll);
 
       L.marker(ll, { icon: airportIcon(icao) })
-        .addTo(localAirports)
-        .bindTooltip(
-          airportHoverHtml(icao, a),
-          {
-            direction: 'top',
-            opacity: 0.95,
-            sticky: true,
-            className: 'wf-airport-hover-tooltip'
-          }
-        )
-        .on('click', () => {
-          window.location.href = `/icao/${icao}`;
-        });
+  .addTo(localAirports)
+  .bindPopup(
+    airportPopupHtml(icao, a),
+    {
+      closeButton: true,
+      autoPan: true,
+      maxWidth: 320,
+      className: 'wf-airport-leaflet-popup'
+    }
+  );
+
     });
 
     (data.atcPolylines || []).forEach(leg => {
@@ -328,6 +332,17 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
   }
+
+  document.addEventListener('click', e => {
+  const btn = e.target.closest('.wf-airport-action-btn');
+  if (!btn) return;
+
+  const icao = btn.getAttribute('data-icao');
+  if (!icao) return;
+
+  window.location.href = `/icao/${icao}`;
+});
+
 
   window.addEventListener('sidebar:toggle', () => {
     if (!map || !lastData) return;
