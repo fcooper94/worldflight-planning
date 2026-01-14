@@ -2390,9 +2390,6 @@ tr:hover .row-actions {
 
 /* Wrapper: controls width + scroll */
 .my-slots-table-wrapper {
- max-width: 1300px;
-  margin: 0 auto;
-
   overflow-x: auto;
   overflow-y: hidden;
 
@@ -2402,7 +2399,6 @@ tr:hover .row-actions {
 /* Table base */
 .my-slots-table {
   width: 100%;
-  max-width: 1300px;
   min-width: 1200px; /* 🔑 THIS FIXES IT */
   border-collapse: collapse;
   table-layout: fixed;
