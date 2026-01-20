@@ -2789,62 +2789,54 @@ app.get('/schedule', (req, res) => {
 
               <!-- ✅ SIMBRIEF PLAN -->
               <td class="col-plan">
-                ${
-                  (() => {
-                    let url =
-                      `https://dispatch.simbrief.com/options/custom` +
-                      `?orig=${r.from}` +
-                      `&dest=${r.to}` +
-                      `&route=${encodeURIComponent(r.atc_route)}`;
+  ${
+    (() => {
+      let url =
+        `https://dispatch.simbrief.com/options/custom` +
+        `?orig=${r.from}` +
+        `&dest=${r.to}` +
+        `&route=${encodeURIComponent(r.atc_route)}`;
 
-                    if (myBookings) {
-                      const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
-                      const mySlotKey = [...myBookings].find(k =>
-                        k.startsWith(sectorKey + '|')
-                      );
+      // 🔑 Optionally enrich with TOBT if user has one
+      if (myBookings) {
+        const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
+        const mySlotKey = [...myBookings].find(k =>
+          k.startsWith(sectorKey + '|')
+        );
 
-                      if (mySlotKey) {
-                        const booking = tobtBookingsBySlot[mySlotKey];
-                        if (!booking || !booking.tobtTimeUtc) {
-                          return `
-                            <a class="tobt-btn book"
-                               href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
-                              Book Slot
-                            </a>
-                          `;
-                        }
+        if (mySlotKey) {
+          const booking = tobtBookingsBySlot[mySlotKey];
 
-                        const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
-                        const hh = String(h).padStart(2, '0');
-                        const mm = String(m).padStart(2, '0');
+          if (booking?.tobtTimeUtc) {
+            const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+            const hh = String(h).padStart(2, '0');
+            const mm = String(m).padStart(2, '0');
 
-                        url +=
-                          `&callsign=${encodeURIComponent(booking.callsign)}` +
-                          `&deph=${hh}` +
-                          `&depm=${mm}` +
-                          `&manualrmk=${encodeURIComponent(
-                            `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
-                          )}`;
-                      } else {
-                        url += `&manualrmk=${encodeURIComponent(
-                          'Route validated from www.worldflight.center'
-                        )}`;
-                      }
-                    } else {
-                      url += `&manualrmk=${encodeURIComponent(
-                        'Route validated from www.worldflight.center'
-                      )}`;
-                    }
+            url +=
+              `&callsign=${encodeURIComponent(booking.callsign)}` +
+              `&deph=${hh}` +
+              `&depm=${mm}` +
+              `&manualrmk=${encodeURIComponent(
+                `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
+              )}`;
+          }
+        }
+      }
 
-                    return `
-                      <a class="simbrief-btn" href="${url}" target="_blank" rel="noopener">
-                        <span class="simbrief-logo">SB</span>
-                        <span class="simbrief-text">Plan with SimBrief</span>
-                      </a>
-                    `;
-                  })()
-                }
-              </td>
+      // Default remark (always present)
+      url += `&manualrmk=${encodeURIComponent(
+        'Route validated from www.worldflight.center'
+      )}`;
+
+      return `
+        <a class="simbrief-btn" href="${url}" target="_blank" rel="noopener">
+          <span class="simbrief-logo">SB</span>
+          <span class="simbrief-text">Plan with SimBrief</span>
+        </a>
+      `;
+    })()
+  }
+</td>
             </tr>
             `;
           }).join('')}
@@ -5147,6 +5139,7 @@ app.post('/api/tobt/book', requireLogin, async (req, res) => {
     if (!slotKey || !callsign) {
       return res.status(400).json({ error: 'Missing parameters' });
     }
+
 
     // 2️⃣ Extract user basics
     const userData = req.session.user.data;
