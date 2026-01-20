@@ -235,17 +235,30 @@ io.use((socket, next) => {
 
 /* ===== SHARED STATE (GLOBAL) ===== */
 const sharedToggles = {};      // { callsign: { clearance: bool, start: bool, sector?: "EGCC-EGLL" } }
-const sharedDepFlows = {};     // { "EGCC-EGLL": 3, ... }  (per sector: FROM-TO)
+const sharedDepFlows = {};     // sector -> rate (number)
+const sharedFlowTypes = {};    // sector -> 'NONE' | 'SLOTTED' | 'BOOKING_ONLY'
+
 const connectedUsers = {};     // { socketId: { cid, position } }
 
 /* ===== DEP FLOW PERSISTENCE ===== */
 async function loadDepFlowsFromDb() {
   const flows = await prisma.depFlow.findMany();
+
   flows.forEach(f => {
-    sharedDepFlows[f.sector] = f.rate;
+    // rate
+    sharedDepFlows[f.sector] = Number(f.rate) || 0;
+
+    // flow type (default NONE)
+    const ft = (f.flowtype || 'NONE').toString().toUpperCase();
+    sharedFlowTypes[f.sector] =
+      ft === 'SLOTTED' || ft === 'BOOKING_ONLY' || ft === 'NONE'
+        ? ft
+        : 'NONE';
   });
-  console.log(`[DEP FLOW] Loaded ${flows.length} flow rates from DB`);
+
+  console.log(`[DEP FLOW] Loaded ${flows.length} flow rates/types from DB`);
 }
+
 
 const tobtBookingsBySlot = {}; // slotKey -> { cid, createdAtISO, callsign }
 const tobtBookingsByCid = {};  // { cid: Set(slotKey) }
@@ -851,7 +864,6 @@ function rebuildAllTobtSlots() {
 
 
 
-
 /* ===== RECENTLY STARTED HELPER ===== */
 function buildRecentlyStartedForICAO(icao) {
   return Object.entries(recentlyStarted)
@@ -1169,10 +1181,13 @@ if (icaoFromQuery) rebuildTSATStateForICAO(icaoFromQuery);
 // ✅ These can stay as-is
 socket.emit('syncState', sharedToggles);
 socket.emit('syncDepFlows', sharedDepFlows);
+socket.emit('syncFlowTypes', sharedFlowTypes);
+
 socket.emit(
   'unassignedTobtUpdate',
   buildUnassignedTobtsForICAO(icaoFromQuery)
 );
+
 
 
 // ✅ IMPORTANT: emit a string map, not objects (fixes [object Object])
@@ -1396,39 +1411,137 @@ if (icaoFromQuery) {
      DEP FLOWS
      ========================================================= */
 
- socket.on('updateDepFlow', async ({ sector, value }) => {
+socket.on('updateDepFlow', async ({ sector, value }) => {
   const key = normalizeSectorKey(sector);
-  const rate = Number(value) || 0;
+  const rate = Number(value);
 
-  if (rate === 0) {
+  // treat blank / 0 / invalid as "remove rate"
+  if (!Number.isFinite(rate) || rate <= 0) {
     delete sharedDepFlows[key];
 
-    await prisma.depFlow.deleteMany({
-      where: { sector: key }
-    });
+    await prisma.depFlow.deleteMany({ where: { sector: key } });
 
     io.emit('depFlowUpdated', { sector: key, value: 0 });
+    rebuildAllTobtSlots();
+
+    const fromIcao = key.split('-')[0];
+    io.to(`icao:${fromIcao}`).emit(
+      'unassignedTobtUpdate',
+      buildUnassignedTobtsForICAO(fromIcao)
+    );
+
     return;
   }
 
   sharedDepFlows[key] = rate;
 
+  // preserve existing flowtype if row already exists
   await prisma.depFlow.upsert({
     where: { sector: key },
     update: { rate },
-    create: { sector: key, rate }
+    create: {
+      sector: key,
+      rate,
+      flowtype: sharedFlowTypes[key] || 'NONE'
+    }
   });
 
   io.emit('depFlowUpdated', { sector: key, value: rate });
   rebuildAllTobtSlots();
-const fromIcao = key.split('-')[0];
 
-io.to(`icao:${fromIcao}`).emit(
-  'unassignedTobtUpdate',
-  buildUnassignedTobtsForICAO(fromIcao)
-);
-
+  const fromIcao = key.split('-')[0];
+  io.to(`icao:${fromIcao}`).emit(
+    'unassignedTobtUpdate',
+    buildUnassignedTobtsForICAO(fromIcao)
+  );
 });
+
+socket.on('updateDepFlowType', async ({ sector, flowtype }) => {
+  const key = normalizeSectorKey(sector);
+
+  const ft = (flowtype || 'NONE').toString().toUpperCase();
+  const normalized =
+    ft === 'SLOTTED' || ft === 'BOOKING_ONLY' || ft === 'NONE'
+      ? ft
+      : 'NONE';
+
+  sharedFlowTypes[key] = normalized;
+
+  // ensure there is a row to store it
+  await prisma.depFlow.upsert({
+    where: { sector: key },
+    update: { flowtype: normalized },
+    create: {
+      sector: key,
+      rate: sharedDepFlows[key] || 0,
+      flowtype: normalized
+    }
+  });
+
+  io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized });
+});
+
+socket.on('createBookingOnly', async ({ sector, callsign }) => {
+
+  console.log('[BOOKING ONLY]', sector, callsign);
+
+  if (!sector || !callsign) return;
+  if (!user || !user.cid) return;   // ✅ pilot-based permission
+
+  const [leg, dateUtc, depTimeUtc] = sector.split('|');
+  if (!leg || !dateUtc || !depTimeUtc) return;
+
+  const [from, to] = leg.split('-');
+
+  const row = adminSheetCache.find(
+    r =>
+      r.from === from &&
+      r.to === to &&
+      r.date_utc === dateUtc &&
+      r.dep_time_utc === depTimeUtc
+  );
+  if (!row) return;
+
+  const slotKey =
+    `${from}-${to}|${row.date_utc}|${row.dep_time_utc}|BOOKING_ONLY`;
+
+  // Prevent duplicates
+  if (tobtBookingsBySlot[slotKey]) return;
+
+  await prisma.tobtBooking.create({
+    data: {
+      slotKey,
+      cid: Number(user.cid),              // ✅ ALWAYS STORE CID
+      callsign: callsign.trim().toUpperCase(),
+      from,
+      to,
+      dateUtc: row.date_utc,
+      depTimeUtc: row.dep_time_utc,
+      tobtTimeUtc: null
+    }
+  });
+
+  tobtBookingsBySlot[slotKey] = {
+    slotKey,
+    cid: Number(user.cid),
+    callsign: callsign.trim().toUpperCase(),
+    from,
+    to,
+    dateUtc: row.date_utc,
+    depTimeUtc: row.dep_time_utc,
+    tobtTimeUtc: null,
+    createdAtISO: new Date().toISOString()
+  };
+
+  if (!tobtBookingsByCid[user.cid]) {
+    tobtBookingsByCid[user.cid] = new Set();
+  }
+  tobtBookingsByCid[user.cid].add(slotKey);
+
+  io.emit('bookingCreated', { slotKey });
+});
+
+
 
   /* =========================================================
      CONNECTED USERS
@@ -1445,6 +1558,8 @@ io.to(`icao:${fromIcao}`).emit(
     console.log('Client disconnected:', socket.id);
   });
 });
+
+
 
 
 /* ===== ADMIN SHEET REFRESH ===== */
@@ -2514,8 +2629,8 @@ app.get('/auth/login', vatsimLogin);
 app.get('/auth/callback', vatsimCallback);
 app.get('/schedule', (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
-const isAdmin = ADMIN_CIDS.includes(cid);
-const myBookings = cid ? tobtBookingsByCid[cid] : null;
+  const isAdmin = ADMIN_CIDS.includes(cid);
+  const myBookings = cid ? tobtBookingsByCid[cid] : null;
 
   const content = `
   <section class="card card-full">
@@ -2524,82 +2639,142 @@ const myBookings = cid ? tobtBookingsByCid[cid] : null;
     <div class="table-scroll">
       <table class="departures-table">
         <thead>
-  <tr>
-    <th class="col-wf-sector">WF</th>
-    <th class="col-from">Dep</th>
-    <th class="col-to">Arr</th>
-    <th class="col-date">Date</th>
-    <th class="col-window">Dep Window</th>
-    <th class="col-window">Arr Window</th>
-    <th class="col-time">Block Time</th>
-    <th class="col-route">ATC Route</th>
-    <th class="col-book">Book Slot</th>
-    <th class="col-plan">Plan</th>
-    
-  </tr>
-</thead>
+          <tr>
+            <th class="col-wf-sector">WF</th>
+            <th class="col-from">Dep</th>
+            <th class="col-to">Arr</th>
+            <th class="col-date">Date</th>
+            <th class="col-window">Dep Window</th>
+            <th class="col-window">Arr Window</th>
+            <th class="col-time">Block Time</th>
+            <th class="col-route">ATC Route</th>
+            <th class="col-flowtype">Booking Type</th>
+            <th class="col-book">Book Slot</th>
+            <th class="col-plan">Plan</th>
+          </tr>
+        </thead>
 
         <tbody>
-          ${adminSheetCache.map(r => `
+          ${adminSheetCache.map(r => {
+            // ✅ FLOW TYPE — must live INSIDE map
+            const flowSectorKey = `${r.from}-${r.to}`;
+            const sectorInstanceKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
+            const flowtype = sharedFlowTypes[flowSectorKey] || 'NONE';
+            const flowtypeLabel =
+              flowtype === 'SLOTTED' ? 'Slotted' :
+              flowtype === 'BOOKING_ONLY' ? 'Booking Only' :
+              'None';
+
+            return `
             <tr>
               <td class="col-wf-sector">${r.number}</td>
+
               <td class="col-from">
-                <a href="/icao/${r.from}">
-                  ${r.from}
-                </a>
+                <a href="/icao/${r.from}">${r.from}</a>
               </td>
+
               <td class="col-to">
-                <a href="/icao/${r.to}">
-                  ${r.to}
-                </a>
+                <a href="/icao/${r.to}">${r.to}</a>
               </td>
+
               <td class="col-date">${r.date_utc}</td>
               <td class="col-window">${buildTimeWindow(r.dep_time_utc)}</td>
               <td class="col-window">${buildTimeWindow(r.arr_time_utc)}</td>
               <td class="col-time">${r.block_time}</td>
+
               <td class="col-route">
-  <div class="route-collapsible">
-    <span class="route-text collapsed">
-      ${escapeHtml(r.atc_route)}
-    </span>
-    <button
-      type="button"
-      class="route-toggle"
-      aria-expanded="false">
-      Expand
-    </button>
-  </div>
+                <div class="route-collapsible">
+                  <span class="route-text collapsed">
+                    ${escapeHtml(r.atc_route)}
+                  </span>
+                  <button type="button" class="route-toggle" aria-expanded="false">
+                    Expand
+                  </button>
+                </div>
+              </td>
+
+              <!-- ✅ FLOW TYPE COLUMN -->
+              <td class="col-flowtype">
+  <span class="flowtype-pill flowtype-${flowtype.toLowerCase()}">
+    ${
+      flowtype === 'SLOTTED'
+        ? 'Slot Required'
+        : flowtype === 'BOOKING_ONLY'
+        ? 'Booking Required'
+        : 'No Restrictions'
+    }
+  </span>
 </td>
 
-<td class="col-book">
+
+
+              <!-- ✅ BOOK SLOT -->
+              <td class="col-book">
   ${
     (() => {
+
+      /* ===== FLOW TYPE: NONE ===== */
+      if (flowtype === 'NONE') {
+        return `
+          <span class="tobt-not-required">
+            -
+          </span>
+        `;
+      }
+
+      if (flowtype === 'BOOKING_ONLY') {
+  const sectorInstanceKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
+
+  return `
+    <button
+  class="tobt-btn book booking-only"
+  data-sector="${sectorInstanceKey}">
+  Book
+</button>
+
+  `;
+}
+
+
+
+      /* ===== NO USER BOOKINGS ===== */
       if (!myBookings) {
+        const label =
+          flowtype === 'BOOKING_ONLY'
+            ? 'Book'
+            : 'Book Slot';
+
         return `
           <a class="tobt-btn book"
              href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
-            Book Slot
+            ${label}
           </a>
         `;
       }
 
+      /* ===== CHECK EXISTING BOOKING ===== */
       const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
 
       const mySlotKey = [...myBookings].find(k =>
-  k.startsWith(sectorKey + '|') &&
-  tobtBookingsBySlot[k]
-);
-
+        k.startsWith(sectorKey + '|') &&
+        tobtBookingsBySlot[k]
+      );
 
       if (!mySlotKey) {
+        const label =
+          flowtype === 'BOOKING_ONLY'
+            ? 'Book'
+            : 'Book Slot';
+
         return `
           <a class="tobt-btn book"
              href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
-            Book Slot
+            ${label}
           </a>
         `;
       }
 
+      /* ===== EXISTING BOOKING ===== */
       return `
         <button
           class="tobt-btn cancel"
@@ -2611,85 +2786,144 @@ const myBookings = cid ? tobtBookingsByCid[cid] : null;
   }
 </td>
 
-<td class="col-plan">
-  ${
-    (() => {
-      // Base SimBrief URL (always present)
-      let url =
-        `https://dispatch.simbrief.com/options/custom` +
-        `?orig=${r.from}` +
-        `&dest=${r.to}` +
-        `&route=${encodeURIComponent(r.atc_route)}`;
 
-      // If user has bookings, check this sector
-      if (myBookings) {
-        const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
+              <!-- ✅ SIMBRIEF PLAN -->
+              <td class="col-plan">
+                ${
+                  (() => {
+                    let url =
+                      `https://dispatch.simbrief.com/options/custom` +
+                      `?orig=${r.from}` +
+                      `&dest=${r.to}` +
+                      `&route=${encodeURIComponent(r.atc_route)}`;
 
-        const mySlotKey = [...myBookings].find(k =>
-          k.startsWith(sectorKey + '|')
-        );
+                    if (myBookings) {
+                      const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
+                      const mySlotKey = [...myBookings].find(k =>
+                        k.startsWith(sectorKey + '|')
+                      );
 
-        if (mySlotKey) {
-  const booking = tobtBookingsBySlot[mySlotKey];
+                      if (mySlotKey) {
+                        const booking = tobtBookingsBySlot[mySlotKey];
+                        if (!booking || !booking.tobtTimeUtc) {
+                          return `
+                            <a class="tobt-btn book"
+                               href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
+                              Book Slot
+                            </a>
+                          `;
+                        }
 
-  // 🔑 FIX: booking may no longer exist
-  if (!booking || !booking.tobtTimeUtc) {
-    return `
-      <a class="tobt-btn book"
-         href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
-        Book Slot
-      </a>
-    `;
-  }
+                        const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+                        const hh = String(h).padStart(2, '0');
+                        const mm = String(m).padStart(2, '0');
 
-  const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+                        url +=
+                          `&callsign=${encodeURIComponent(booking.callsign)}` +
+                          `&deph=${hh}` +
+                          `&depm=${mm}` +
+                          `&manualrmk=${encodeURIComponent(
+                            `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
+                          )}`;
+                      } else {
+                        url += `&manualrmk=${encodeURIComponent(
+                          'Route validated from www.worldflight.center'
+                        )}`;
+                      }
+                    } else {
+                      url += `&manualrmk=${encodeURIComponent(
+                        'Route validated from www.worldflight.center'
+                      )}`;
+                    }
 
-
-const hh = String(h).padStart(2, '0');
-const mm = String(m).padStart(2, '0');
-
-
-url +=
-  `&callsign=${encodeURIComponent(booking.callsign)}` +
-  `&deph=${hh}` +
-  `&depm=${mm}` +
-  `&manualrmk=${encodeURIComponent(`WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`)}`;
-
-        } else {
-          url +=
-            `&manualrmk=${encodeURIComponent(
-              'Route validated from www.worldflight.center'
-            )}`;
-        }
-      } else {
-        url +=
-          `&manualrmk=${encodeURIComponent(
-            'Route validated from www.worldflight.center'
-          )}`;
-      }
-
-      // ✅ THIS WAS MISSING
-      return `
-        <a class="simbrief-btn"
-           href="${url}"
-           target="_blank"
-           rel="noopener">
-          <span class="simbrief-logo">SB</span>
-          <span class="simbrief-text">Plan with SimBrief</span>
-        </a>
-      `;
-    })()
-  }
-</td>
-
-
+                    return `
+                      <a class="simbrief-btn" href="${url}" target="_blank" rel="noopener">
+                        <span class="simbrief-logo">SB</span>
+                        <span class="simbrief-text">Plan with SimBrief</span>
+                      </a>
+                    `;
+                  })()
+                }
+              </td>
             </tr>
-          `).join('')}
+            `;
+          }).join('')}
         </tbody>
       </table>
     </div>
-  </section>
+    </section>
+
+<script>
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.booking-only');
+  if (!btn) return;
+
+  const sector = btn.dataset.sector;
+  if (!sector) return;
+
+  const callsign = await openCallsignModal();
+  if (!callsign) return;
+
+  console.log('[CLIENT] booking-only submit', sector, callsign);
+
+  socket.emit('createBookingOnly', {
+    sector,
+    callsign
+  });
+});
+</script>
+<script>
+let bookingOnlySector = null;
+const socket = io(); // 🔑 THIS WAS MISSING
+
+function showCallsignModal(sector) {
+  bookingOnlySector = sector;
+
+  const modal = document.getElementById('callsignModal');
+  if (!modal) return;
+
+  modal.classList.add('open');
+
+  const input = modal.querySelector('#callsignInput');
+  input.value = '';
+  input.focus();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const confirmBtn = document.getElementById('callsignConfirm');
+  const cancelBtn  = document.getElementById('callsignCancel');
+  const input      = document.getElementById('callsignInput');
+
+  if (!confirmBtn || !input) return;
+
+  confirmBtn.addEventListener('click', () => {
+    const callsign = input.value.trim().toUpperCase();
+    if (!callsign || !bookingOnlySector) return;
+
+    console.log('[CLIENT] booking-only submit', bookingOnlySector, callsign);
+
+    socket.emit('createBookingOnly', {
+      sector: bookingOnlySector,
+      callsign
+    });
+
+    document.getElementById('callsignModal').classList.remove('open');
+    bookingOnlySector = null;
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    bookingOnlySector = null;
+    document.getElementById('callsignModal').classList.remove('open');
+  });
+});
+</script>
+
+
+
+
+  
   <script>
+
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.route-toggle');
   if (!btn) return;
@@ -2736,8 +2970,16 @@ document.addEventListener('click', async (e) => {
 });
 
 </script>
-
-
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.flowtype-select').forEach(sel => {
+    sel.dataset.flowtype = sel.value;
+    sel.addEventListener('change', () => {
+      sel.dataset.flowtype = sel.value;
+    });
+  });
+});
+</script>
 
   `;
 
@@ -4911,24 +5153,46 @@ app.post('/api/tobt/book', requireLogin, async (req, res) => {
     const cid = Number(userData.cid);
 
     // 3️⃣ Parse slotKey: FROM-TO|Date|DepTime|TOBT
-    const parts = slotKey.split('|');
-    if (parts.length !== 4) {
-      return res.status(400).json({ error: 'Invalid slot key format' });
-    }
+    // 3️⃣ Parse slotKey
+// 3️⃣ Parse slotKey
+const parts = slotKey.split('|');
 
-    const [sectorPart, dateUtc, depTimeUtc, tobtTimeUtc] = parts;
-    const [from, to] = sectorPart.split('-');
+let from, to, dateUtc, depTimeUtc, tobtTimeUtc;
 
-    if (!from || !to) {
-      return res.status(400).json({ error: 'Invalid sector format' });
-    }
+// BOOKING-ONLY
+if (parts.length === 3) {
+  const [sectorPart, dateUtcRaw, depTimeUtcRaw] = parts;
+  [from, to] = sectorPart.split('-');
+  dateUtc = dateUtcRaw;
+  depTimeUtc = depTimeUtcRaw;
+  tobtTimeUtc = null;
 
-    const fromIcao = from.toUpperCase();
+// NORMAL SLOT
+} else if (parts.length === 4) {
+  const [sectorPart, dateUtcRaw, depTimeUtcRaw, tobtRaw] = parts;
+  [from, to] = sectorPart.split('-');
+  dateUtc = dateUtcRaw;
+  depTimeUtc = depTimeUtcRaw;
+  tobtTimeUtc = tobtRaw;
 
-    // 4️⃣ Decide assignment mode
-    // manual=true means "ATC/admin assignment" (store cid NULL)
-    // Default is pilot booking (store user's CID)
-    const wantsManual = manual === true;
+} else {
+  return res.status(400).json({ error: 'Invalid slot key format' });
+}
+
+if (!from || !to) {
+  return res.status(400).json({ error: 'Invalid sector format' });
+}
+
+const fromIcao = from.toUpperCase();
+
+// ✅ MISSING LINE (THIS FIXES EVERYTHING)
+const isBookingOnly = tobtTimeUtc === null;
+
+// 4️⃣ Decide assignment mode
+// Booking-only is ALWAYS a pilot booking
+const wantsManual = !isBookingOnly && manual === true;
+
+
 
     // Permission to do a manual assignment
     const canManualAssign = wantsManual && canEditIcao(userData, fromIcao);
@@ -4973,7 +5237,10 @@ app.post('/api/tobt/book', requireLogin, async (req, res) => {
     // 9️⃣ Persist to DB
     // Manual assignment => cid NULL
     // Pilot booking     => cid user's CID
-    const storedCid = canManualAssign ? null : cid;
+    const storedCid = wantsManual && canEditIcao(userData, fromIcao)
+  ? null
+  : cid;
+
 
     await prisma.tobtBooking.create({
       data: {
@@ -5699,8 +5966,9 @@ const content = `
 <tr>
   <th>WF</th>
   <th>From</th>
-  <th>Dep Flow</th>
   <th>To</th>
+  <th>Dep Flow</th>
+  <th>Flow Type</th>
   <th>Date</th>
   <th>Dep</th>
   <th>Arr</th>
@@ -5714,6 +5982,7 @@ ${adminSheetCache.map(r => {
 <tr>
   <td>${r.number}</td>
   <td>${r.from}</td>
+  <td>${r.to}</td>
   <td>
     <input
       class="dep-flow-input"
@@ -5723,7 +5992,15 @@ ${adminSheetCache.map(r => {
       style="width:70px;"
     />
   </td>
-  <td>${r.to}</td>
+  <td class="col-flowtype">
+  <select class="flowtype-select" data-sector="${sectorKey}">
+  <option value="NONE">None</option>
+  <option value="SLOTTED">Slotted</option>
+  <option value="BOOKING_ONLY">Booking Only</option>
+</select>
+</td>
+
+
   <td>${r.date_utc}</td>
   <td>${r.dep_time_utc}</td>
   <td>${r.arr_time_utc}</td>
@@ -5936,6 +6213,42 @@ document.addEventListener('click', function (e) {
   text.classList.toggle('collapsed', expanded);
 });
 </script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+
+  /* ===== FLOW TYPE: INITIAL SYNC ===== */
+  socket.on('syncFlowTypes', types => {
+    window.sharedFlowTypes = types || {};
+
+    document.querySelectorAll('.flowtype-select').forEach(sel => {
+      const sector = sel.dataset.sector;
+      const value = window.sharedFlowTypes[sector] || 'NONE';
+      sel.value = value;
+    });
+  });
+
+  /* ===== FLOW TYPE: LIVE UPDATE ===== */
+  socket.on('depFlowTypeUpdated', ({ sector, flowtype }) => {
+    const sel = document.querySelector(
+      '.flowtype-select[data-sector="' + sector + '"]'
+    );
+    if (sel) sel.value = flowtype || 'NONE';
+  });
+
+  /* ===== FLOW TYPE: LOCAL EDIT ===== */
+  document.querySelectorAll('.flowtype-select').forEach(sel => {
+    sel.addEventListener('change', () => {
+      socket.emit('updateDepFlowType', {
+        sector: sel.dataset.sector,
+        flowtype: sel.value
+      });
+    });
+  });
+
+});
+</script>
+
+
 
 `;
 res.send(
@@ -7472,73 +7785,72 @@ app.get('/my-slots', requireLogin, (req, res) => {
 
   const user = req.session.user.data;
   const cid = Number(user.cid);
-
-  const isAdmin = ADMIN_CIDS.includes(Number(cid));
+  const isAdmin = ADMIN_CIDS.includes(cid);
 
   const mySlots = Array.from(tobtBookingsByCid[cid] || []);
 
   const rows = mySlots.map(slotKey => {
-  const booking = tobtBookingsBySlot[slotKey];
-  
+    const booking = tobtBookingsBySlot[slotKey];
+    if (!booking) return null; // safety
 
-  const [sectorKey, dateUtc, depTimeUtc, tobtTimeUtc] = slotKey.split('|');
-  const [from, to] = sectorKey.split('-');
+    const [sectorKey, dateUtc, depTimeUtc] = slotKey.split('|');
+    const [from, to] = sectorKey.split('-');
 
-  const wfRow = adminSheetCache.find(
-    r =>
-      r.from === from &&
-      r.to === to &&
-      r.date_utc === dateUtc &&
-      r.dep_time_utc === depTimeUtc
-  );
+    const wfRow = adminSheetCache.find(
+      r =>
+        r.from === from &&
+        r.to === to &&
+        r.date_utc === dateUtc &&
+        r.dep_time_utc === depTimeUtc
+    );
 
-  const wfSector = wfRow?.number || '-';
-  const atcRoute = wfRow?.atc_route || '-';
+    const wfSector = wfRow?.number || '-';
+    const atcRoute = wfRow?.atc_route || '-';
+    const callsign = booking.callsign || '';
 
-  const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+    let connectBy = '—';
+    let simbriefUrl = null;
+    let tobtDisplay = '—';
 
-const hh = String(h).padStart(2, '0');
-const mm = String(m).padStart(2, '0');
-  const connectDate = new Date(Date.UTC(2000, 0, 1, hh, mm - 30));
-  const connectBy =
-    connectDate.getUTCHours().toString().padStart(2, '0') +
-    ':' +
-    connectDate.getUTCMinutes().toString().padStart(2, '0');
+    // ✅ NORMAL TOBT HANDLING
+    if (typeof booking.tobtTimeUtc === 'string') {
+      tobtDisplay = booking.tobtTimeUtc;
 
-  const callsign = booking?.callsign || '';
- const [rawH, rawM] = booking.tobtTimeUtc.split(':');
+      const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+      const hh = String(h).padStart(2, '0');
+      const mm = String(m).padStart(2, '0');
 
-const deph = rawH.padStart(2, '0');
-const depm = rawM.padStart(2, '0');
+      const connectDate = new Date(Date.UTC(2000, 0, 1, hh, mm - 30));
+      connectBy =
+        connectDate.getUTCHours().toString().padStart(2, '0') +
+        ':' +
+        connectDate.getUTCMinutes().toString().padStart(2, '0');
 
+      simbriefUrl =
+        'https://dispatch.simbrief.com/options/custom' +
+        '?orig=' + from +
+        '&dest=' + to +
+        '&callsign=' + encodeURIComponent(callsign) +
+        '&deph=' + hh +
+        '&depm=' + mm +
+        '&route=' + encodeURIComponent(atcRoute || '') +
+        '&manualrmk=' + encodeURIComponent(
+          `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
+        );
+    }
 
-const simbriefUrl =
-  'https://dispatch.simbrief.com/options/custom' +
-  '?orig=' + from +
-  '&dest=' + to +
-  '&callsign=' + encodeURIComponent(callsign) +
-  '&deph=' + hh +
-  '&depm=' + mm +
-  '&route=' + encodeURIComponent(atcRoute || '') +
-  '&manualrmk=' + encodeURIComponent(
-    `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
-  );
-
-
-
-
-  return {
-    slotKey,
-    callsign: booking?.callsign || '',
-    wfSector,
-    from,
-    to,
-    tobt: tobtTimeUtc,
-    connectBy,
-    atcRoute,
-    simbriefUrl
-  };
-});
+    return {
+      slotKey,
+      callsign,
+      wfSector,
+      from,
+      to,
+      tobt: tobtDisplay,
+      connectBy,
+      atcRoute,
+      simbriefUrl
+    };
+  }).filter(Boolean); // remove null safety rows
 
 
 
@@ -7595,8 +7907,14 @@ const simbriefUrl =
   <td class="col-departure"><a href="/icao/${r.from}">${r.from}</a></td>
   <td class="col-destination"><a href="/icao/${r.to}">${r.to}</a></td>
 
-  <td class="col-tobt tobt-primary">${r.tobt}Z</td>
-  <td class="col-connect">${r.connectBy}Z</td>
+  <td class="col-tobt ${r.tobt && r.tobt !== '—' && r.tobt !== 'N/A' ? 'tobt-primary' : ''}">
+  ${r.tobt && r.tobt !== '—' && r.tobt !== 'N/A' ? (r.tobt + 'Z') : 'N/A'}
+</td>
+
+<td class="col-connect">
+  ${r.connectBy && r.connectBy !== '—' && r.connectBy !== 'N/A' ? (r.connectBy + 'Z') : 'N/A'}
+</td>
+
 
   <td class="col-route">
     <div class="route-box">

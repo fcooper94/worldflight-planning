@@ -66,7 +66,7 @@ export default function renderLayout({
       </a>
       <a href="/my-slots" class="nav-item">
         <span class="icon">✈️</span>
-        <span class="label">My Slots</span>
+        <span class="label">My Slots / Bookings</span>
       </a>
     </div>
 

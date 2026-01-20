@@ -31,6 +31,7 @@ model DepFlow {
   id        Int      @id @default(autoincrement())
   sector    String   @unique
   rate      Int
+  flowtype  String   @default("NONE")
   updatedAt DateTime @updatedAt
 }
 
@@ -43,7 +44,7 @@ model TobtBooking {
   to          String
   dateUtc     String
   depTimeUtc  String
-  tobtTimeUtc String
+  tobtTimeUtc String?
   createdAt   DateTime @default(now())
 }
 

@@ -81,7 +81,6 @@ button:disabled, input:disabled, select:disabled{
 }
 .sidebar.collapsed{ width: var(--sidebar-collapsed); }
 
-/* Brand row (logo area). Kept compatible with existing markup */
 .sidebar-brand{
   height: var(--topbar-h);
   display:flex;
@@ -4227,20 +4226,18 @@ html[data-map-theme="light"] .ac-label {
 .icao-map {
   position: relative;  /* REQUIRED */
 }
-/* 1. Ensure wrapper creates a stacking context */
 .icao-map {
   position: relative;
   z-index: 0;
 }
 
-/* 2. Explicitly demote Leaflet */
+
 #icaoMap,
 #mapModalMap {
   position: relative;
   z-index: 1;
 }
 
-/* 3. Explicitly promote overlay controls ABOVE the map */
 .map-overlay-controls {
   position: absolute;
   top: 12px;
@@ -5603,4 +5600,235 @@ main.dashboard.map-layout {
 
 .leaflet-container .leaflet-popup-tip {
   display: none !important;
+}
+.flowtype-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+
+  background:
+    linear-gradient(180deg, #141a25, #0f1420);
+  color: #e6ecff;
+
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+
+  padding: 6px 34px 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+
+  cursor: pointer;
+  min-width: 140px;
+
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 2px 8px rgba(0, 0, 0, 0.4);
+
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+
+/* ▼ caret */
+.flowtype-select {
+  background-image:
+    url("data:image/svg+xml;utf8,\
+    <svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.65)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>\
+    <polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px;
+}
+
+/* Hover */
+.flowtype-select:hover {
+  border-color: rgba(110, 170, 255, 0.55);
+}
+
+/* Focus */
+.flowtype-select:focus {
+  outline: none;
+  border-color: #5ea2ff;
+  box-shadow:
+    0 0 0 2px rgba(94, 162, 255, 0.25),
+    0 6px 18px rgba(0, 0, 0, 0.6);
+}
+
+/* Disabled (if you ever need it) */
+.flowtype-select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Dropdown options (limited support but helps) */
+.flowtype-select option {
+  background: #0f1420;
+  color: #e6ecff;
+}
+.flowtype-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  margin-right: 8px;
+  padding: 3px 8px;
+
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+
+  border-radius: 999px;
+  text-transform: uppercase;
+  white-space: nowrap;
+
+  background: rgba(255, 255, 255, 0.08);
+  color: #e6ecff;
+
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* Booking Only → blue */
+.flowtype-booking_only {
+  background: rgba(90, 160, 255, 0.18);
+  border-color: rgba(90, 160, 255, 0.45);
+  color: #b9d7ff;
+}
+
+/* Slotted → amber */
+.flowtype-slotted {
+  background: rgba(255, 180, 90, 0.18);
+  border-color: rgba(255, 180, 90, 0.5);
+  color: #ffd8a3;
+}
+/* Flow type column */
+.col-flowtype{
+  width: 130px;
+  min-width: 130px;
+  text-align: center;
+}
+
+.flowtype-pill{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  font-size: 12px;
+  font-weight: 700;
+  color: #cbd5f5;
+}
+/* ===== FLOW TYPE DROPDOWN COLOURS ===== */
+
+.flowtype-select {
+  transition: 
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+
+/* NONE → GREEN */
+.flowtype-select[data-flowtype="NONE"] {
+  background: rgba(60, 200, 120, 0.15);
+  border-color: rgba(60, 200, 120, 0.6);
+  color: #b9f5cf;
+}
+
+/* BOOKING ONLY → AMBER */
+.flowtype-select[data-flowtype="BOOKING_ONLY"] {
+  background: rgba(255, 180, 90, 0.18);
+  border-color: rgba(255, 180, 90, 0.7);
+  color: #ffe0b0;
+}
+
+/* SLOTTED → RED */
+.flowtype-select[data-flowtype="SLOTTED"] {
+  background: rgba(255, 90, 90, 0.18);
+  border-color: rgba(255, 90, 90, 0.7);
+  color: #ffc4c4;
+}
+/* ===== FLOW TYPE PILLS (PUBLIC) ===== */
+
+.flowtype-pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+/* NONE → GREEN */
+.flowtype-none {
+  background: rgba(60, 200, 120, 0.18);
+  border-color: rgba(60, 200, 120, 0.6);
+  color: #b9f5cf;
+}
+
+/* BOOKING ONLY → AMBER */
+.flowtype-booking_only {
+  background: rgba(255, 180, 90, 0.2);
+  border-color: rgba(255, 180, 90, 0.7);
+  color: #ffe0b0;
+}
+
+/* SLOTTED → RED */
+.flowtype-slotted {
+  background: rgba(255, 90, 90, 0.2);
+  border-color: rgba(255, 90, 90, 0.7);
+  color: #ffc4c4;
+}
+/* ===== FLOW TYPE INFO BADGE ===== */
+
+.flowtype-pill {
+  display: inline-block;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+
+  /* key differences from buttons */
+  cursor: default;
+  user-select: none;
+  pointer-events: none;
+  box-shadow: none;
+}
+/* NONE → GREEN */
+.flowtype-none {
+  color: #7fe0a7;
+  background: rgba(60, 200, 120, 0.15);
+  border: 1px solid rgba(60, 200, 120, 0.35);
+}
+
+/* BOOKING ONLY → AMBER */
+.flowtype-booking_only {
+  color: #ffd28a;
+  background: rgba(255, 180, 90, 0.18);
+  border: 1px solid rgba(255, 180, 90, 0.45);
+}
+
+/* SLOTTED → RED */
+.flowtype-slotted {
+  color: #ffb3b3;
+  background: rgba(255, 90, 90, 0.18);
+  border: 1px solid rgba(255, 90, 90, 0.45);
+}
+/* ===== FLOW TYPE INFO BADGE (SQUARE) ===== */
+
+.flowtype-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+
+  border-radius: 4px;   /* 👈 key change (was 999px) */
+  cursor: default;
+  user-select: none;
+  pointer-events: none;
+  box-shadow: none;
 }
