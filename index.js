@@ -177,27 +177,29 @@ async function loadTobtBookingsFromDb() {
   const bookings = await prisma.tobtBooking.findMany();
 
   bookings.forEach(b => {
-    tobtBookingsBySlot[b.slotKey] = {
-  slotKey: b.slotKey,   // ← REQUIRED
-  cid: b.cid,
-  callsign: b.callsign,
-  from: b.from,
-  to: b.to,
-  dateUtc: b.dateUtc,
-  depTimeUtc: b.depTimeUtc,
-  tobtTimeUtc: b.tobtTimeUtc,
-  createdAtISO: b.createdAt.toISOString()
-};
+  // cid MUST exist for pilot bookings (your rule)
+  if (b.cid === null) return;
 
+  const bookingKey = `${b.cid}:${b.slotKey}`;
 
-    // ONLY index by CID if CID exists (pilot booking)
-    if (b.cid !== null) {
-      if (!tobtBookingsByCid[b.cid]) {
-        tobtBookingsByCid[b.cid] = new Set();
-      }
-      tobtBookingsByCid[b.cid].add(b.slotKey);
-    }
-  });
+  tobtBookingsByKey[bookingKey] = {
+    bookingKey,
+    slotKey: b.slotKey,
+    cid: b.cid,
+    callsign: b.callsign,
+    from: b.from,
+    to: b.to,
+    dateUtc: b.dateUtc,
+    depTimeUtc: b.depTimeUtc,
+    tobtTimeUtc: b.tobtTimeUtc,
+    createdAtISO: b.createdAt.toISOString()
+  };
+
+  if (!tobtBookingsByCid[b.cid]) {
+    tobtBookingsByCid[b.cid] = new Set();
+  }
+  tobtBookingsByCid[b.cid].add(bookingKey);
+});
 
   console.log(`[TOBT] Loaded ${bookings.length} bookings from DB`);
 }
@@ -260,8 +262,10 @@ async function loadDepFlowsFromDb() {
 }
 
 
-const tobtBookingsBySlot = {}; // slotKey -> { cid, createdAtISO, callsign }
-const tobtBookingsByCid = {};  // { cid: Set(slotKey) }
+// MODEL 2 (per-user bookings)
+// bookingKey = `${cid}:${slotKey}`
+const tobtBookingsByKey = {};  // bookingKey -> booking
+const tobtBookingsByCid = {};  // cid -> Set(bookingKey)
 
 
 /**
@@ -298,7 +302,7 @@ const tsatQueues = {};
 function getTobtBookingForCallsign(callsign, icao) {
   const cs = callsign.trim().toUpperCase();
 
-  for (const booking of Object.values(tobtBookingsBySlot)) {
+  for (const booking of Object.values(tobtBookingsByKey)) {
     if (
       booking.callsign === cs &&
       booking.from === icao
@@ -427,7 +431,7 @@ function getNextAvailableTobts(from, to, limit = 5) {
     .filter(([slotKey, slot]) =>
       slot.from === from &&
       slot.to === to &&
-      !tobtBookingsBySlot[slotKey]
+      !tobtBookingsByKey[slotKey]
     )
     .map(([slotKey, slot]) => ({
       slotKey,
@@ -925,7 +929,7 @@ function buildUnassignedTobtsForICAO(icao) {
     .filter(([key, slot]) => {
       return (
         slot.from === normalizedIcao &&
-        !tobtBookingsBySlot[key]   // ✅ NOT BOOKED
+        !tobtBookingsByKey[key]   // ✅ NOT BOOKED
       );
     })
     .map(([key, slot]) => ({
@@ -1506,7 +1510,7 @@ socket.on('createBookingOnly', async ({ sector, callsign }) => {
     `${from}-${to}|${row.date_utc}|${row.dep_time_utc}|BOOKING_ONLY`;
 
   // Prevent duplicates
-  if (tobtBookingsBySlot[slotKey]) return;
+  if (tobtBookingsByKey[slotKey]) return;
 
   await prisma.tobtBooking.create({
     data: {
@@ -1521,7 +1525,7 @@ socket.on('createBookingOnly', async ({ sector, callsign }) => {
     }
   });
 
-  tobtBookingsBySlot[slotKey] = {
+  tobtBookingsByKey[slotKey] = {
     slotKey,
     cid: Number(user.cid),
     callsign: callsign.trim().toUpperCase(),
@@ -2757,7 +2761,7 @@ app.get('/schedule', (req, res) => {
 
       const mySlotKey = [...myBookings].find(k =>
         k.startsWith(sectorKey + '|') &&
-        tobtBookingsBySlot[k]
+        tobtBookingsByKey[k]
       );
 
       if (!mySlotKey) {
@@ -2805,7 +2809,7 @@ app.get('/schedule', (req, res) => {
         );
 
         if (mySlotKey) {
-          const booking = tobtBookingsBySlot[mySlotKey];
+          const booking = tobtBookingsByKey[mySlotKey];
 
           if (booking?.tobtTimeUtc) {
             const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
@@ -2962,6 +2966,7 @@ document.addEventListener('click', async (e) => {
 });
 
 </script>
+
 <script>
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.flowtype-select').forEach(sel => {
@@ -4697,7 +4702,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
     const allSlots = Object.keys(allTobtSlots)
       .filter(k => k.startsWith(prefix));
 
-    const bookedSlots = Object.keys(tobtBookingsBySlot)
+    const bookedSlots = Object.keys(tobtBookingsByKey)
       .filter(k => k.startsWith(prefix));
 
     arrivalHasSlots = allSlots.length > 0;
@@ -4723,7 +4728,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
     const allSlots = Object.keys(allTobtSlots)
       .filter(k => k.startsWith(prefix));
 
-    const bookedSlots = Object.keys(tobtBookingsBySlot)
+    const bookedSlots = Object.keys(tobtBookingsByKey)
       .filter(k => k.startsWith(prefix));
 
     departureHasSlots = allSlots.length > 0;
@@ -4923,7 +4928,7 @@ app.get('/api/tobt/slots', (req, res) => {
 
   const slots = generateTobtSlots({ from, to, dateUtc, depTimeUtc });
 
-  // ✅ MUST check before using slots
+  // No flow defined
   if (slots === null) {
     return res.json({
       noFlow: true,
@@ -4932,6 +4937,16 @@ app.get('/api/tobt/slots', (req, res) => {
   }
 
   const results = [];
+
+  // 🔑 detect BOOKING-ONLY made by *this user* for this sector
+  const myBookingOnly = Object.values(tobtBookingsByKey).find(b =>
+    b.cid === cid &&
+    b.from === from &&
+    b.to === to &&
+    b.dateUtc === dateUtc &&
+    b.depTimeUtc === depTimeUtc &&
+    b.tobtTimeUtc === null
+  );
 
   slots.forEach(tobt => {
     const slotKey = makeTobtSlotKey({
@@ -4942,19 +4957,28 @@ app.get('/api/tobt/slots', (req, res) => {
       tobtTimeUtc: tobt
     });
 
-    const booking = tobtBookingsBySlot[slotKey];
+    const myBookingKey = `${cid}:${slotKey}`;
+    const myBooking = tobtBookingsByKey[myBookingKey];
 
     results.push({
       tobt,
-      slotKey,                 // 🔑 REQUIRED
-      booked: !!booking,
-      byMe: booking?.cid === cid,
-      callsign: booking?.callsign || null
+      slotKey,
+      booked: !!myBooking, // booked-by-me only
+      byMe: !!myBooking,
+      callsign: myBooking?.callsign || null
     });
   });
 
+  // 🔑 Anchor booking-only so Cancel appears
+  if (myBookingOnly && results.length) {
+    results[0].byMe = true;
+    results[0].booked = true;
+    results[0].callsign = myBookingOnly.callsign || null;
+  }
+
   res.json(results);
 });
+
 
 
 
@@ -4965,70 +4989,55 @@ app.post('/wf-schedule/refresh-schedule', requireAdmin, async (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/tobt/cancel', async (req, res) => {
-  const cid = Number(req.session?.user?.data?.cid);
-  if (!cid) {
-    return res.status(401).json({ error: 'Not logged in' });
-  }
-
-  const { slotKey } = req.body;
-  if (!slotKey) {
-    return res.status(400).json({ error: 'Missing slotKey' });
-  }
-
-  const booking = tobtBookingsBySlot[slotKey];
-
-  if (!booking) {
-    return res.status(404).json({ error: 'Booking not found' });
-  }
-
-  const isAdmin =
-  ADMIN_CIDS.includes(cid) ||
-  !!req.session?.user?.data?.controller;
-
-// Pilot can cancel own booking
-if (booking.cid !== null && booking.cid !== cid) {
-  return res.status(403).json({ error: 'Forbidden' });
-}
-
-// ATC/Admin can cancel ATC-assigned bookings
-if (booking.cid === null && !isAdmin) {
-  return res.status(403).json({ error: 'Forbidden' });
-}
-
-
-  await prisma.tobtBooking.delete({
-    where: { slotKey }
-  });
-
-  delete tobtBookingsBySlot[slotKey];
-
-  // 🔑 Maintain CID index (remove from My Slots)
-if (booking.cid !== null && tobtBookingsByCid[booking.cid]) {
-  tobtBookingsByCid[booking.cid].delete(slotKey);
-
-  if (tobtBookingsByCid[booking.cid].size === 0) {
-    delete tobtBookingsByCid[booking.cid];
-  }
-}
-
-
-  if (tobtBookingsByCid[cid]) {
-    tobtBookingsByCid[cid].delete(slotKey);
-    if (tobtBookingsByCid[cid].size === 0) {
-      delete tobtBookingsByCid[cid];
+app.post('/api/tobt/cancel', requireLogin, async (req, res) => {
+  try {
+    const { slotKey } = req.body;
+    if (!slotKey) {
+      return res.status(400).json({ error: 'Missing slotKey' });
     }
+
+    const cid = Number(req.session.user.data.cid);
+    const bookingKey = `${cid}:${slotKey}`;
+
+    const booking = tobtBookingsByKey[bookingKey];
+    if (!booking) {
+      return res.status(404).json({
+        error: 'Booking not found or already cancelled.'
+      });
+    }
+
+    // 🔥 Delete from DB (MODEL 2: cid + slotKey)
+    await prisma.tobtBooking.deleteMany({
+      where: {
+        cid,
+        slotKey
+      }
+    });
+
+    // 🔥 Delete from memory
+    delete tobtBookingsByKey[bookingKey];
+
+    if (tobtBookingsByCid[cid]) {
+      tobtBookingsByCid[cid].delete(bookingKey);
+      if (tobtBookingsByCid[cid].size === 0) {
+        delete tobtBookingsByCid[cid];
+      }
+    }
+
+    // 🔔 Notify clients
+    emitToIcao(booking.from, 'departures:update');
+    emitToIcao(
+      booking.from,
+      'unassignedTobtUpdate',
+      buildUnassignedTobtsForICAO(booking.from)
+    );
+
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error('[TOBT] Cancel failed:', err);
+    return res.status(500).json({ error: 'Failed to cancel booking' });
   }
-
-emitToIcao(
-  booking.from,
-  'unassignedTobtUpdate',
-  buildUnassignedTobtsForICAO(booking.from)
-);
-
-
-
-  res.json({ success: true });
 });
 
 
@@ -5196,7 +5205,7 @@ const wantsManual = !isBookingOnly && manual === true;
     }
 
     // 5️⃣ Prevent double booking
-    if (tobtBookingsBySlot[slotKey]) {
+    if (tobtBookingsByKey[slotKey]) {
       return res.status(409).json({ error: 'Slot already booked' });
     }
 
@@ -5214,18 +5223,18 @@ const wantsManual = !isBookingOnly && manual === true;
     // 8️⃣ Prevent duplicate sector + callsign
     const sectorKey = parts.slice(0, 3).join('|');
 
-    for (const existingSlotKey in tobtBookingsBySlot) {
-      const existingSectorKey = existingSlotKey.split('|').slice(0, 3).join('|');
-      const existing = tobtBookingsBySlot[existingSlotKey];
+    // block duplicates per-user per-sector (MODEL 2)
+for (const existing of Object.values(tobtBookingsByKey)) {
+  if (existing.cid !== cid) continue;
 
-      if (existingSectorKey === sectorKey && existing.callsign === normalizedCallsign) {
-        return res.status(409).json({
-          error:
-            'A booking has already been made with this callsign on ' +
-            sectorKey.split('|')[0]
-        });
-      }
-    }
+  const existingSectorKey = `${existing.from}-${existing.to}|${existing.dateUtc}|${existing.depTimeUtc}`;
+  if (existingSectorKey === sectorKey) {
+    return res.status(409).json({
+      error: 'You already have a booking for this sector.'
+    });
+  }
+}
+
 
     // 9️⃣ Persist to DB
     // Manual assignment => cid NULL
@@ -5249,7 +5258,7 @@ const wantsManual = !isBookingOnly && manual === true;
     });
 
     // 🔟 Update in-memory cache
-    tobtBookingsBySlot[slotKey] = {
+    tobtBookingsByKey[slotKey] = {
       slotKey,
       cid: storedCid,
       callsign: normalizedCallsign,
@@ -5260,13 +5269,25 @@ const wantsManual = !isBookingOnly && manual === true;
       tobtTimeUtc
     };
 
-    // 1️⃣1️⃣ Index My Slots (PILOT ONLY)
-    if (storedCid !== null) {
-      if (!tobtBookingsByCid[storedCid]) {
-        tobtBookingsByCid[storedCid] = new Set();
-      }
-      tobtBookingsByCid[storedCid].add(slotKey);
-    }
+    const bookingKey = `${storedCid}:${slotKey}`;
+
+tobtBookingsByKey[bookingKey] = {
+  bookingKey,
+  slotKey,
+  cid: storedCid,
+  callsign: normalizedCallsign,
+  from: fromIcao,
+  to: to.toUpperCase(),
+  dateUtc,
+  depTimeUtc,
+  tobtTimeUtc
+};
+
+if (!tobtBookingsByCid[storedCid]) {
+  tobtBookingsByCid[storedCid] = new Set();
+}
+tobtBookingsByCid[storedCid].add(bookingKey);
+
 
     // 1️⃣2️⃣ Notify clients
     emitToIcao(fromIcao, 'departures:update');
@@ -5287,84 +5308,53 @@ const wantsManual = !isBookingOnly && manual === true;
 
 
 
-app.post('/api/tobt/update-callsign', async (req, res) => {
-  const cid = Number(req.session?.user?.data?.cid);
-  if (!cid) {
-    return res.status(401).json({ error: 'Not logged in' });
-  }
-
-  const { slotKey, callsign } = req.body;
-  if (!slotKey || !callsign) {
-    return res.status(400).json({ error: 'Missing parameters' });
-  }
-
-  const booking = tobtBookingsBySlot[slotKey];
-  if (!booking || booking.cid !== cid) {
-    return res.status(403).json({ error: 'Not your booking' });
-  }
-
-// 🔒 Enforce unique callsign per sector on UPDATE
-// 🔒 Enforce unique callsign per sector on UPDATE
-const normalizedCallsign = callsign.trim().toUpperCase();
-
-// 🔒 Reserved Official Team callsign enforcement (UPDATE)
-const teamCheck = await isReservedTeamCallsign(normalizedCallsign, cid);
-
-if (teamCheck.reserved && !teamCheck.allowed) {
-  return res.status(403).json({
-    error: `Callsign ${normalizedCallsign} is reserved for an official team.`
-  });
-}
-
-
-// sector = FROM-TO|date|depTime
-const sectorKey = slotKey.split('|').slice(0, 3).join('|');
-
-for (const existingSlotKey in tobtBookingsBySlot) {
-  if (existingSlotKey === slotKey) continue; // ignore own booking
-
-  const existingSectorKey = existingSlotKey
-    .split('|')
-    .slice(0, 3)
-    .join('|');
-
-  const existing = tobtBookingsBySlot[existingSlotKey];
-
-  if (
-    existingSectorKey === sectorKey &&
-    existing.callsign === normalizedCallsign
-  ) {
-    return res.status(409).json({
-      error:
-        'A booking has already been made with this callsign on ' +
-        sectorKey.split('|')[0]
-    });
-  }
-}
- 
-
+app.post('/api/tobt/update-callsign', requireLogin, async (req, res) => {
   try {
-    await prisma.tobtBooking.update({
-      where: { slotKey },
+    const { slotKey, callsign } = req.body;
+    if (!slotKey || !callsign) {
+      return res.status(400).json({ error: 'Missing parameters' });
+    }
+
+    const cid = Number(req.session.user.data.cid);
+    const bookingKey = `${cid}:${slotKey}`;
+
+    const booking = tobtBookingsByKey[bookingKey];
+    if (!booking) {
+      return res.status(403).json({
+        error: 'Not your booking'
+      });
+    }
+
+    const normalizedCallsign = callsign.trim().toUpperCase();
+
+    // Reserved team callsign enforcement
+    const teamCheck = await isReservedTeamCallsign(normalizedCallsign, cid);
+    if (teamCheck.reserved && !teamCheck.allowed) {
+      return res.status(403).json({
+        error: `Callsign ${normalizedCallsign} is reserved for an official team.`
+      });
+    }
+
+    // Update DB (Model 2: cid + slotKey)
+    await prisma.tobtBooking.updateMany({
+      where: {
+        cid,
+        slotKey
+      },
       data: {
-        callsign: normalizedCallsign,
-        from: booking.from,
-        to: booking.to,
-        dateUtc: booking.dateUtc,
-        depTimeUtc: booking.depTimeUtc,
-        tobtTimeUtc: booking.tobtTimeUtc
+        callsign: normalizedCallsign
       }
     });
+
+    // Update in-memory cache
+    booking.callsign = normalizedCallsign;
+
+    return res.json({ success: true });
+
   } catch (err) {
-    console.error('[TOBT] Callsign update failed:', err);
+    console.error('[TOBT] Update callsign failed:', err);
     return res.status(500).json({ error: 'Failed to update callsign' });
   }
-
-  // ✅ Update in-memory cache
-  booking.callsign = normalizedCallsign;
-
-
-  res.json({ success: true });
 });
 
 
@@ -7293,8 +7283,8 @@ app.post('/api/tobt/clear-manual', requireLogin, async (req, res) => {
   }
 
   // 1) Identify matching manual bookings from in-memory cache (source of UI truth)
-  const matchingSlotKeys = Object.keys(tobtBookingsBySlot).filter(k => {
-    const b = tobtBookingsBySlot[k];
+  const matchingSlotKeys = Object.keys(tobtBookingsByKey).filter(k => {
+    const b = tobtBookingsByKey[k];
     return b && b.from === from && b.callsign === cs && b.cid === null;
   });
 
@@ -7313,7 +7303,7 @@ app.post('/api/tobt/clear-manual', requireLogin, async (req, res) => {
 
   // 3) Remove from in-memory cache so the UI updates
   for (const slotKey of matchingSlotKeys) {
-    delete tobtBookingsBySlot[slotKey];
+    delete tobtBookingsByKey[slotKey];
   }
 
   // 4) Clear TSAT using normalized callsign
@@ -7366,7 +7356,7 @@ app.post('/api/tobt/remove', async (req, res) => {
     where: { slotKey }
   });
 
-  delete tobtBookingsBySlot[slotKey];
+  delete tobtBookingsByKey[slotKey];
 
   emitToIcao(booking.from, 'departures:update');
 
@@ -7780,79 +7770,91 @@ app.get('/my-slots', requireLogin, (req, res) => {
   const cid = Number(user.cid);
   const isAdmin = ADMIN_CIDS.includes(cid);
 
-  const mySlots = Array.from(tobtBookingsByCid[cid] || []);
+  // 🔑 bookingKeys, not slotKeys (MODEL 2)
+  const myBookingKeys = Array.from(tobtBookingsByCid[cid] || []);
 
-  const rows = mySlots.map(slotKey => {
-    const booking = tobtBookingsBySlot[slotKey];
-    if (!booking) return null; // safety
+  const rows = myBookingKeys
+    .map(bookingKey => {
+      const booking = tobtBookingsByKey[bookingKey];
+      if (!booking) return null;
 
-    const [sectorKey, dateUtc, depTimeUtc] = slotKey.split('|');
-    const [from, to] = sectorKey.split('-');
+      const slotKey = booking.slotKey;
 
-    const wfRow = adminSheetCache.find(
-      r =>
-        r.from === from &&
-        r.to === to &&
-        r.date_utc === dateUtc &&
-        r.dep_time_utc === depTimeUtc
-    );
+      // slotKey may be:
+      // FROM-TO|date|dep
+      // FROM-TO|date|dep|tobt
+      const parts = slotKey.split('|');
+      const sectorPart = parts[0];
+      const dateUtc = parts[1];
+      const depTimeUtc = parts[2];
+      const tobtTimeUtc = parts.length === 4 ? parts[3] : null;
 
-    const wfSector = wfRow?.number || '-';
-    const atcRoute = wfRow?.atc_route || '-';
-    const callsign = booking.callsign || '';
+      const [from, to] = sectorPart.split('-');
 
-    let connectBy = '—';
-    let simbriefUrl = null;
-    let tobtDisplay = '—';
+      const wfRow = adminSheetCache.find(
+        r =>
+          r.from === from &&
+          r.to === to &&
+          r.date_utc === dateUtc &&
+          r.dep_time_utc === depTimeUtc
+      );
 
-    // ✅ NORMAL TOBT HANDLING
-    if (typeof booking.tobtTimeUtc === 'string') {
-      tobtDisplay = booking.tobtTimeUtc;
+      const wfSector = wfRow?.number || '-';
+      const atcRoute = wfRow?.atc_route || '-';
+      const callsign = booking.callsign || '';
 
-      const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
-      const hh = String(h).padStart(2, '0');
-      const mm = String(m).padStart(2, '0');
-
-      const connectDate = new Date(Date.UTC(2000, 0, 1, hh, mm - 30));
-      connectBy =
-        connectDate.getUTCHours().toString().padStart(2, '0') +
-        ':' +
-        connectDate.getUTCMinutes().toString().padStart(2, '0');
-
-      simbriefUrl =
+      let connectBy = '—';
+      let simbriefUrl =
         'https://dispatch.simbrief.com/options/custom' +
         '?orig=' + from +
         '&dest=' + to +
-        '&callsign=' + encodeURIComponent(callsign) +
-        '&deph=' + hh +
-        '&depm=' + mm +
         '&route=' + encodeURIComponent(atcRoute || '') +
         '&manualrmk=' + encodeURIComponent(
-          `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
+          'Route validated from www.worldflight.center'
         );
-    }
 
-    return {
-      slotKey,
-      callsign,
-      wfSector,
-      from,
-      to,
-      tobt: tobtDisplay,
-      connectBy,
-      atcRoute,
-      simbriefUrl
-    };
-  }).filter(Boolean); // remove null safety rows
+      let tobtDisplay = 'N/A';
 
+      // ✅ TOBT SLOT
+      if (typeof booking.tobtTimeUtc === 'string') {
+        tobtDisplay = booking.tobtTimeUtc;
 
+        const [h, m] = booking.tobtTimeUtc.split(':').map(Number);
+        const hh = String(h).padStart(2, '0');
+        const mm = String(m).padStart(2, '0');
+
+        const connectDate = new Date(Date.UTC(2000, 0, 1, hh, mm - 30));
+        connectBy =
+          connectDate.getUTCHours().toString().padStart(2, '0') +
+          ':' +
+          connectDate.getUTCMinutes().toString().padStart(2, '0');
+
+        simbriefUrl +=
+          '&callsign=' + encodeURIComponent(callsign) +
+          '&deph=' + hh +
+          '&depm=' + mm +
+          '&manualrmk=' + encodeURIComponent(
+            `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
+          );
+      }
+
+      return {
+        bookingKey,
+        slotKey,
+        callsign,
+        wfSector,
+        from,
+        to,
+        tobt: tobtDisplay,
+        connectBy,
+        atcRoute,
+        simbriefUrl
+      };
+    })
+    .filter(Boolean);
 
   const content = `
-  <div id="bookingErrorBanner" class="booking-banner cancel hidden">
-  <span id="errorMessage"></span>
-</div>
-  
-  <section class="card card-full my-slots-card">
+ <section class="card card-full my-slots-card">
       <h2>My Slots</h2>
 
       ${rows.length === 0 ? `
@@ -7931,7 +7933,7 @@ app.get('/my-slots', requireLogin, (req, res) => {
       class="tobt-btn cancel cancel-slot-btn"
       data-slot-key="${r.slotKey}"
       data-callsign="${r.callsign}">
-      Cancel Slot
+      Cancel
     </button>
   </td>
 </tr>
@@ -7946,102 +7948,7 @@ app.get('/my-slots', requireLogin, (req, res) => {
       `}
       
     </section>
-    
     <script>
-  function showBookingError(message) {
-    const banner = document.getElementById('bookingErrorBanner');
-    const msg = document.getElementById('errorMessage');
-    if (!banner || !msg) return;
-
-    msg.textContent = message;
-    banner.classList.remove('hidden');
-  }
-
-  function hideBookingError() {
-    const banner = document.getElementById('bookingErrorBanner');
-    if (banner) banner.classList.add('hidden');
-  }
-
-  async function saveCallsign(input) {
-    hideBookingError();
-
-    const callsign = input.value.trim().toUpperCase();
-    const slotKey = input.dataset.slotkey;
-
-    const res = await fetch('/api/tobt/update-callsign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slotKey, callsign })
-    });
-
-    if (!res.ok) {
-  let errText = 'Failed to update callsign';
-  try {
-    const err = await res.json();
-    if (err && err.error) errText = err.error;
-  } catch {}
-
-  // 🔁 revert input to last valid value
-  input.value = input.dataset.original || '';
-
-  showBookingError(errText);
-  return false;
-}
-
-
-    // success
-input.dataset.original = callsign;
-return true;
-  }
-
-  // Save when user clicks away
-  document.addEventListener('change', e => {
-    if (!e.target.classList.contains('callsign-input')) return;
-    saveCallsign(e.target);
-  });
-
-  // Save when user presses Enter
-  document.addEventListener('keydown', async e => {
-    if (!e.target.classList.contains('callsign-input')) return;
-    if (e.key !== 'Enter') return;
-
-    e.preventDefault();
-    await saveCallsign(e.target);
-    e.target.blur();
-  });
-</script>
-
-<script>
-document.addEventListener('click', async e => {
-  const btn = e.target.closest('.callsign-edit-btn');
-  if (!btn) return;
-
-  const slotKey = btn.dataset.slotkey;
-  const currentCallsign = btn.dataset.callsign;
-
-  const newCallsign = await openCallsignModal();
-  if (!newCallsign) return;
-
-  const res = await fetch('/api/tobt/update-callsign', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ slotKey, callsign: newCallsign })
-  });
-
-  if (!res.ok) {
-    let msg = 'Failed to update callsign';
-    try {
-      const err = await res.json();
-      if (err?.error) msg = err.error;
-    } catch {}
-    showBookingError(msg);
-    return;
-  }
-
-  location.reload(); // authoritative refresh
-});
-</script>
-<script>
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.cancel-slot-btn');
   if (!btn) return;
@@ -8057,45 +7964,52 @@ document.addEventListener('click', (e) => {
     confirmText: 'Confirm',
     cancelText: 'Cancel',
 
-    onConfirm: async ({ set, showOk }) => {
-      try {
-        const res = await fetch('/api/tobt/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ slotKey })
-        });
+    onConfirm: async ({ set }) => {
+      const res = await fetch('/api/tobt/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotKey })
+      });
 
-        if (!res.ok) {
-          let msg = 'Failed to cancel slot';
-          try {
-            const err = await res.json();
-            if (err?.error) msg = err.error;
-          } catch {}
-
-          // Show error, allow retry
-          set('Cancel failed', msg);
-          return false;
-        }
-
-        
-        // Refresh after short delay so user sees confirmation
-        setTimeout(() => location.reload(), 600);
-        return true;
-
-      } catch (err) {
-        set('Request failed', 'Network error. Please try again.');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        set('Cancel failed', err.error || 'Unable to cancel slot');
         return false;
       }
+
+      setTimeout(() => location.reload(), 500);
+      return true;
     }
   });
 });
 </script>
+<script>
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.callsign-edit-btn');
+  if (!btn) return;
+
+  const slotKey = btn.dataset.slotkey;
+  const callsign = await openCallsignModal();
+  if (!callsign) return;
+
+  const res = await fetch('/api/tobt/update-callsign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slotKey, callsign })
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(err.error || 'Failed to update callsign');
+    return;
+  }
+
+  location.reload();
+});
+</script>
 
 
-
-
-
-  `;
+`;
 
   res.send(
     renderLayout({
@@ -8107,6 +8021,7 @@ document.addEventListener('click', (e) => {
     })
   );
 });
+
 
 
 /* ===== LOGOUT ===== */

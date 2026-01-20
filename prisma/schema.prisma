@@ -36,17 +36,20 @@ model DepFlow {
 }
 
 model TobtBooking {
-  id          Int      @id @default(autoincrement())
-  slotKey     String   @unique
-  cid         Int?
-  callsign    String
-  from        String
-  to          String
-  dateUtc     String
-  depTimeUtc  String
-  tobtTimeUtc String?
-  createdAt   DateTime @default(now())
+  id           Int      @id @default(autoincrement())
+  slotKey      String
+  cid          Int
+  callsign     String
+  from         String
+  to           String
+  dateUtc      String
+  depTimeUtc   String
+  tobtTimeUtc  String?
+  createdAt    DateTime @default(now())
+
+  @@unique([cid, slotKey])   // ✅ THIS
 }
+
 
 model User {
   cid  Int    @id
