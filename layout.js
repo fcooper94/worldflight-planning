@@ -72,6 +72,18 @@ export default function renderLayout({
       </a>` : ''}
     </div>
 
+    ${pv('suggest-airport') ? `<div class="nav-section">
+      <div class="nav-title">Suggestions</div>
+      <a href="/suggest-airport" class="nav-item">
+        <span class="icon">💡</span>
+        <span class="label">Suggest Airport</span>
+      </a>
+      <a href="/view-suggestions" class="nav-item">
+        <span class="icon">📊</span>
+        <span class="label">View Suggestions</span>
+      </a>
+    </div>` : ''}
+
     ${pv('atc') ? `<div class="nav-section">
       <div class="nav-title">Controllers</div>
       <a href="/atc" class="nav-item">
@@ -105,6 +117,16 @@ export default function renderLayout({
     Doc Upload Perms
     <span id="docAccessBadge" class="nav-badge hidden"></span>
   </span>
+</a>
+
+<a href="/admin/visited-airports" class="nav-item">
+  <span class="icon">🌍</span>
+  <span class="label">Visited Airports</span>
+</a>
+
+<a href="/admin/suggestions" class="nav-item">
+  <span class="icon">💡</span>
+  <span class="label">Suggestions</span>
 </a>
 
 <a href="/admin/settings" class="nav-item">

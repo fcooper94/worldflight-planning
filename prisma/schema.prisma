@@ -132,6 +132,32 @@ model DocumentationAccessRequest {
   @@index([status])
 }
 
+model WfVisitedAirport {
+  id        Int      @id @default(autoincrement())
+  icao      String   @db.VarChar(4)
+  year      Int
+  eventName String?
+
+  @@unique([icao, year])
+  @@index([icao])
+}
+
+model AirportSuggestion {
+  id          Int      @id @default(autoincrement())
+  firstName   String
+  lastName    String
+  icao        String   @db.VarChar(4)
+  type        String   @default("visit") @db.VarChar(10)
+  association String
+  reason      String
+  contact     String
+  cid         Int?
+  createdAt   DateTime @default(now())
+
+  @@index([icao])
+  @@index([type])
+}
+
 model PageVisibility {
   key     String  @id
   enabled Boolean @default(true)

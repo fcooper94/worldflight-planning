@@ -1182,6 +1182,890 @@ await (async () => {
 }
 
 
+/* ===== ADMIN: VISITED AIRPORTS ===== */
+app.get('/admin/visited-airports', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+
+  const visits = await prisma.wfVisitedAirport.findMany({
+    orderBy: [{ year: 'desc' }, { icao: 'asc' }]
+  });
+
+  const rows = visits.map(v => `
+    <tr>
+      <td><strong>${v.icao}</strong></td>
+      <td>${v.year}</td>
+      <td>
+        <button class="action-btn btn-delete-visit" data-id="${v.id}" style="font-size:12px;">Delete</button>
+      </td>
+    </tr>
+  `).join('');
+
+  const content = `
+    <section class="card card-full">
+      <h2>Visited Airports</h2>
+
+      <form id="addVisitForm" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:20px;flex-wrap:wrap;">
+        <label style="font-size:13px;">
+          ICAO
+          <input type="text" id="visitIcao" placeholder="EGLL" maxlength="4" required
+            style="width:100px;padding:6px 8px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e5e7eb;text-transform:uppercase;font-family:monospace;" />
+        </label>
+        <label style="font-size:13px;">
+          Year
+          <input type="number" id="visitYear" placeholder="2025" min="2000" max="2099" required
+            style="width:90px;padding:6px 8px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e5e7eb;" />
+        </label>
+        <button type="submit" class="action-btn primary" style="padding:7px 16px;">Add</button>
+        <span id="visitMsg" style="font-size:13px;margin-left:8px;" class="hidden"></span>
+      </form>
+
+      <div class="table-scroll">
+        <table class="departures-table" id="visitedTable">
+          <thead>
+            <tr>
+              <th>ICAO</th>
+              <th>Year</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || '<tr><td colspan="3" class="empty">No visited airports yet</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <script>
+    document.getElementById('addVisitForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      var icao = document.getElementById('visitIcao').value.trim().toUpperCase();
+      var year = Number(document.getElementById('visitYear').value);
+      var msg = document.getElementById('visitMsg');
+
+      if (!/^[A-Z]{4}$/.test(icao)) { alert('Invalid ICAO'); return; }
+
+      var res = await fetch('/admin/api/visited-airports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ icao: icao, year: year })
+      });
+
+      if (res.ok) {
+        window.location.reload();
+      } else {
+        var data = await res.json().catch(function() { return {}; });
+        msg.textContent = data.error || 'Failed to add';
+        msg.style.color = 'var(--danger)';
+        msg.classList.remove('hidden');
+      }
+    });
+
+    document.getElementById('visitedTable').addEventListener('click', async function(e) {
+      var btn = e.target.closest('.btn-delete-visit');
+      if (!btn) return;
+      if (!confirm('Delete this entry?')) return;
+
+      var res = await fetch('/admin/api/visited-airports/' + btn.dataset.id, { method: 'DELETE' });
+      if (res.ok) window.location.reload();
+    });
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'Visited Airports', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/admin/api/visited-airports', requireAdmin, async (req, res) => {
+  const { icao, year } = req.body;
+  const normalized = icao?.toUpperCase?.().trim();
+
+  if (!normalized || !/^[A-Z]{4}$/.test(normalized)) {
+    return res.status(400).json({ error: 'Invalid ICAO' });
+  }
+  if (!year || year < 2000 || year > 2099) {
+    return res.status(400).json({ error: 'Invalid year' });
+  }
+
+  const existing = await prisma.wfVisitedAirport.findFirst({
+    where: { icao: normalized, year }
+  });
+  if (existing) {
+    return res.status(409).json({ error: normalized + ' ' + year + ' already exists' });
+  }
+
+  await prisma.wfVisitedAirport.create({
+    data: { icao: normalized, year, eventName: 'WorldFlight' }
+  });
+
+  res.json({ success: true });
+});
+
+app.delete('/admin/api/visited-airports/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await prisma.wfVisitedAirport.delete({ where: { id } });
+  } catch (err) {
+    if (err.code === 'P2025') return res.json({ ok: true });
+    throw err;
+  }
+  res.json({ ok: true });
+});
+
+/* ===== ADMIN: SUGGESTIONS ===== */
+app.get('/admin/suggestions', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+
+  const [suggestions, visitedAirports] = await Promise.all([
+    prisma.airportSuggestion.findMany({ orderBy: { createdAt: 'desc' } }),
+    prisma.wfVisitedAirport.findMany({ select: { icao: true } })
+  ]);
+
+  const visitedSet = new Set(visitedAirports.map(v => v.icao));
+
+  const visits = suggestions.filter(s => s.type !== 'avoid');
+  const avoids = suggestions.filter(s => s.type === 'avoid');
+
+  // Unique ICAOs from visit suggestions that we've never been to (exclude wildcards)
+  const neverVisitedMap = {};
+  for (const s of visits) {
+    if (/\*/.test(s.icao)) continue;
+    if (visitedSet.has(s.icao)) continue;
+    if (!neverVisitedMap[s.icao]) neverVisitedMap[s.icao] = 0;
+    neverVisitedMap[s.icao]++;
+  }
+  const neverVisited = Object.entries(neverVisitedMap)
+    .sort((a, b) => b[1] - a[1])
+    .map(([icao, count]) => ({ icao, count }));
+
+  function buildRows(list) {
+    if (!list.length) return '<tr><td colspan="7" class="empty">None yet</td></tr>';
+    return list.map(s => {
+      const date = new Date(s.createdAt).toISOString().replace('T', ' ').slice(0, 16);
+      return `
+        <tr data-icao="${s.icao}" data-name="${s.firstName} ${s.lastName}" data-assoc="${s.association}" data-date="${s.createdAt}">
+          <td><strong>${s.icao}</strong></td>
+          <td>${s.firstName} ${s.lastName}</td>
+          <td>${s.association}</td>
+          <td style="max-width:300px;font-size:12px;">
+            <div class="reason-cell">${s.reason}</div>
+            ${s.reason.length > 100 ? '<button class="reason-expand">Show more</button>' : ''}
+          </td>
+          <td style="font-size:12px;">${s.contact}</td>
+          <td style="font-size:12px;">${date}</td>
+          <td>
+            <button class="action-btn btn-delete-suggestion" data-id="${s.id}" style="font-size:12px;">Delete</button>
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  function buildTable(id, rows) {
+    return `
+      <div class="table-scroll">
+        <table class="departures-table sortable-table" id="${id}">
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="icao">ICAO <span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="name">Name <span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="assoc">Association <span class="sort-arrow"></span></th>
+              <th>Reason</th>
+              <th>Contact</th>
+              <th class="sortable" data-sort="date">Date <span class="sort-arrow"></span></th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  const content = `
+    <div style="margin-bottom:24px;">
+      <button id="deleteAllSuggestionsBtn" class="action-btn" style="background:var(--danger);color:#fff;">Delete All Suggestions</button>
+    </div>
+
+    <section class="card card-full">
+      <h2 style="color:var(--accent);">Never Visited — Suggested Airports</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">
+        ${neverVisited.length} airport${neverVisited.length !== 1 ? 's' : ''} suggested that we have never visited
+      </p>
+      ${neverVisited.length ? `
+      <div class="suggestion-chips">
+        ${neverVisited.map(n => `
+          <div class="suggestion-chip">
+            <span class="chip-icao">${n.icao}</span>
+            <span class="chip-count">${n.count} vote${n.count !== 1 ? 's' : ''}</span>
+          </div>
+        `).join('')}
+      </div>` : '<p style="color:var(--muted);font-size:13px;">All suggested airports have been visited before.</p>'}
+    </section>
+
+    <section class="card card-full" style="margin-top:24px;">
+      <h2 style="color:#4ade80;">Suggested Airports to Visit</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">${visits.length} suggestion${visits.length !== 1 ? 's' : ''}</p>
+      <div class="admin-table-scroll">
+        ${buildTable('visitTable', buildRows(visits))}
+      </div>
+    </section>
+
+    <section class="card card-full" style="margin-top:24px;">
+      <h2 style="color:#f87171;">Suggested Airports to Avoid</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">${avoids.length} suggestion${avoids.length !== 1 ? 's' : ''}</p>
+      <div class="admin-table-scroll">
+        ${buildTable('avoidTable', buildRows(avoids))}
+      </div>
+    </section>
+
+    <style>
+      .admin-table-scroll {
+        max-height: 640px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255,255,255,0.08) transparent;
+      }
+      .admin-table-scroll::-webkit-scrollbar { width: 4px; }
+      .admin-table-scroll::-webkit-scrollbar-track { background: transparent; }
+      .admin-table-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+      .admin-table-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+
+      .admin-table-scroll thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+
+      .suggestion-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+      .suggestion-chip {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 14px; border-radius: 8px;
+        background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.15);
+      }
+      .chip-icao { font-family: monospace; font-weight: 700; font-size: 15px; color: var(--accent); }
+      .chip-count { font-size: 12px; color: var(--muted); }
+
+      .reason-cell {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        white-space: normal;
+        line-height: 1.5;
+      }
+      .reason-cell.expanded {
+        -webkit-line-clamp: unset;
+        display: block;
+      }
+      .reason-expand {
+        background: none; border: none; color: var(--accent);
+        font-size: 11px; cursor: pointer; padding: 2px 0 0; font-weight: 600;
+      }
+      .reason-expand:hover { text-decoration: underline; }
+
+      .sortable { cursor: pointer; user-select: none; }
+      .sortable:hover { color: var(--accent); }
+      .sort-arrow { font-size: 10px; margin-left: 4px; }
+      .sort-arrow.asc::after { content: '▲'; }
+      .sort-arrow.desc::after { content: '▼'; }
+    </style>
+
+    <script>
+    (function() {
+      document.querySelectorAll('.sortable-table').forEach(function(table) {
+        var currentSort = { key: null, dir: 'asc' };
+
+        table.querySelector('thead').addEventListener('click', function(e) {
+          var th = e.target.closest('.sortable');
+          if (!th) return;
+
+          var key = th.dataset.sort;
+          if (currentSort.key === key) {
+            currentSort.dir = currentSort.dir === 'asc' ? 'desc' : 'asc';
+          } else {
+            currentSort.key = key;
+            currentSort.dir = 'asc';
+          }
+
+          // Update arrows
+          table.querySelectorAll('.sort-arrow').forEach(function(a) { a.className = 'sort-arrow'; });
+          th.querySelector('.sort-arrow').className = 'sort-arrow ' + currentSort.dir;
+
+          // Sort rows
+          var tbody = table.querySelector('tbody');
+          var rows = Array.from(tbody.querySelectorAll('tr[data-icao]'));
+
+          rows.sort(function(a, b) {
+            var va = (a.dataset[key] || '').toLowerCase();
+            var vb = (b.dataset[key] || '').toLowerCase();
+            if (key === 'date') { va = a.dataset.date; vb = b.dataset.date; }
+            var cmp = va < vb ? -1 : va > vb ? 1 : 0;
+            return currentSort.dir === 'desc' ? -cmp : cmp;
+          });
+
+          rows.forEach(function(r) { tbody.appendChild(r); });
+        });
+      });
+
+      document.getElementById('deleteAllSuggestionsBtn').addEventListener('click', function() {
+        openConfirmModal({
+          title: 'Delete All Suggestions',
+          message: 'This will permanently delete all suggestions. This cannot be undone.'
+        }).then(async function(ok) {
+          if (!ok) return;
+          var res = await fetch('/admin/api/suggestions/all', { method: 'DELETE' });
+          if (res.ok) window.location.reload();
+        });
+      });
+
+      document.addEventListener('click', async function(e) {
+        var expandBtn = e.target.closest('.reason-expand');
+        if (expandBtn) {
+          var cell = expandBtn.previousElementSibling;
+          var expanded = cell.classList.toggle('expanded');
+          expandBtn.textContent = expanded ? 'Show less' : 'Show more';
+          return;
+        }
+
+        var btn = e.target.closest('.btn-delete-suggestion');
+        if (!btn) return;
+        if (!confirm('Delete this suggestion?')) return;
+
+        var res = await fetch('/admin/api/suggestions/' + btn.dataset.id, { method: 'DELETE' });
+        if (res.ok) window.location.reload();
+      });
+    })();
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'Airport Suggestions', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.delete('/admin/api/suggestions/all', requireAdmin, async (req, res) => {
+  await prisma.airportSuggestion.deleteMany({});
+  res.json({ ok: true });
+});
+
+app.delete('/admin/api/suggestions/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await prisma.airportSuggestion.delete({ where: { id } });
+  } catch (err) {
+    if (err.code === 'P2025') return res.json({ ok: true });
+    throw err;
+  }
+  res.json({ ok: true });
+});
+
+/* ===== SUGGEST AIRPORT PAGE ===== */
+app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) => {
+  const user = req.session?.user?.data || null;
+  const cid = Number(user?.cid) || null;
+  const isAdmin = cid && ADMIN_CIDS.includes(cid);
+
+  const firstName = user?.personal?.name_first || '';
+  const lastName = user?.personal?.name_last || '';
+
+  const content = `
+  <div class="suggest-layout">
+
+    <section class="card suggest-info">
+      <img src="/logo.png" alt="WorldFlight" class="suggest-logo" />
+      <h2 class="suggest-heading">WorldFlight 2026</h2>
+      <p class="suggest-dates">October 31st &mdash; November 7th</p>
+
+      <div class="suggest-body">
+        <p>Please use the form to suggest a WorldFlight 2026 airport.</p>
+        <p>You can request we visit or avoid a specific airport/region/division.</p>
+
+        <p class="suggest-contact">
+          <a href="mailto:contact@worldflight.center">contact@worldflight.center</a>
+        </p>
+
+        <p>
+          WorldFlight is a group flight that flies around the world in 7 days.
+          Our main purpose is to raise money for dozens of charities all around the world,
+          with millions of dollars raised since the event started.
+        </p>
+
+        <p>
+          The event has become one of the most popular events on VATSIM, with it not uncommon
+          to have upwards of 70 aircraft flying each leg.
+        </p>
+
+        <p>
+          Naturally, this makes WorldFlight an extremely busy event, and careful planning is required.
+        </p>
+
+        <p>
+          If you would like to support WorldFlight please send us a suggestion and we will be in
+          touch to work with you during our planning phase.
+        </p>
+
+        <p>
+          Obviously, it is impossible to arrive at every airport at a sociable time, however,
+          we do make every effort to make it work. If we arrive at your airport during unsociable
+          hours, we will endeavor to visit it again in future events at a better time.
+        </p>
+
+        <p class="suggest-signoff">Happy Flyings &amp; Thank you for your continued support.</p>
+      </div>
+    </section>
+
+    <section class="card suggest-form-card">
+      <h2>Suggest an Airport</h2>
+
+      <form id="suggestForm">
+        <label>
+          First Name
+          <input type="text" id="suggestFirst" value="${firstName}" required />
+        </label>
+
+        <label>
+          Last Name
+          <input type="text" id="suggestLast" value="${lastName}" required />
+        </label>
+
+        <label>
+          I would like WorldFlight to...
+          <select id="suggestType" required>
+            <option value="visit">Visit this airport</option>
+            <option value="avoid">Avoid this airport</option>
+          </select>
+        </label>
+
+        <label>
+          Airport ICAO
+          <input type="text" id="suggestIcao" placeholder="e.g. EGLL, EG**, K***" maxlength="4" required autocomplete="off" style="text-transform:uppercase;font-family:monospace;" />
+        </label>
+        <div id="icaoVisitInfo" class="icao-visit-info hidden"></div>
+
+        <label>
+          What is your VATSIM association with this airport?
+          <select id="suggestAssociation" required>
+            <option value="">Select...</option>
+            <option value="Division Director">Division Director</option>
+            <option value="Division Staff">Division Staff</option>
+            <option value="vACC Director">vACC Director</option>
+            <option value="vACC Staff">vACC Staff</option>
+            <option value="Controller">Controller</option>
+            <option value="Pilot">Pilot</option>
+            <option value="Other">Other</option>
+          </select>
+        </label>
+
+        <label>
+          Reason for your suggestion
+          <textarea id="suggestReason" rows="4" required placeholder="Tell us why we should visit (or avoid) this airport..."></textarea>
+        </label>
+
+        <label>
+          Email or Discord ID
+          <input type="text" id="suggestContact" required placeholder="you@example.com or User#1234" />
+        </label>
+
+        <div id="suggestMsg" class="modal-message hidden" style="margin-top:8px;"></div>
+
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="submit" class="modal-btn modal-btn-submit" id="suggestSubmitBtn">Submit Suggestion</button>
+        </div>
+      </form>
+    </section>
+
+  </div>
+
+  <style>
+    .suggest-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .suggest-layout { grid-template-columns: 1fr; }
+    }
+
+    .suggest-info { text-align: center; }
+    .suggest-logo { width: 80px; height: 80px; border-radius: 50%; margin-bottom: 16px; }
+    .suggest-heading { color: var(--accent); font-size: 24px; margin-bottom: 4px; }
+    .suggest-dates { color: var(--text); font-size: 16px; font-weight: 600; margin-bottom: 24px; }
+    .suggest-body { text-align: left; }
+    .suggest-body p { color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px; }
+    .suggest-contact { text-align: center; }
+    .suggest-contact a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    .suggest-contact a:hover { text-decoration: underline; }
+    .suggest-signoff { color: var(--text) !important; font-weight: 600; font-style: italic; text-align: center; margin-top: 20px; }
+
+    .suggest-form-card label { display: block; font-size: 13px; margin-top: 12px; font-weight: 600; }
+    .suggest-form-card input,
+    .suggest-form-card select,
+    .suggest-form-card textarea {
+      width: 100%; margin-top: 4px; padding: 8px;
+      background: #0f172a; border: 1px solid #1e293b; border-radius: 6px;
+      color: #e5e7eb; font-family: inherit; font-size: 13px;
+    }
+    .suggest-form-card input[readonly] {
+      color: #4a5568; background: #080d17; cursor: not-allowed;
+    }
+    .suggest-form-card textarea { resize: vertical; }
+
+    .icao-visit-info {
+      margin-top: 6px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+      border: 1px solid var(--border);
+    }
+    .icao-visit-info.visited {
+      background: rgba(56,189,248,0.08);
+      border-color: rgba(56,189,248,0.25);
+      color: var(--text);
+    }
+    .icao-visit-info.not-visited {
+      background: rgba(34,197,94,0.08);
+      border-color: rgba(34,197,94,0.25);
+      color: var(--success);
+    }
+    .icao-visit-info .visit-count {
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .icao-visit-info .visit-years {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
+  </style>
+
+  <script>
+  (function() {
+    var icaoInput = document.getElementById('suggestIcao');
+    var visitInfo = document.getElementById('icaoVisitInfo');
+    var debounceTimer = null;
+
+    icaoInput.addEventListener('input', function() {
+      clearTimeout(debounceTimer);
+      var val = icaoInput.value.trim().toUpperCase();
+
+      if (!/^[A-Z*]{2,4}$/.test(val) || !/[A-Z]/.test(val)) {
+        visitInfo.classList.add('hidden');
+        return;
+      }
+
+      debounceTimer = setTimeout(async function() {
+        try {
+          var res = await fetch('/api/airport-visits/' + val);
+          if (!res.ok) { visitInfo.classList.add('hidden'); return; }
+          var data = await res.json();
+
+          if (data.totalVisits > 0) {
+            visitInfo.innerHTML = data.totalVisits === 1
+              ? 'We have visited <span class="visit-count">' + data.icao + '</span> once before. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.'
+              : 'We have visited <span class="visit-count">' + data.icao + '</span> <span class="visit-count">' + data.totalVisits + '</span> times. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.';
+            visitInfo.className = 'icao-visit-info visited';
+          } else {
+            visitInfo.innerHTML =
+              'We have never visited <strong>' + data.icao + '</strong> before — great suggestion!';
+            visitInfo.className = 'icao-visit-info not-visited';
+          }
+        } catch(err) {
+          visitInfo.classList.add('hidden');
+        }
+      }, 300);
+    });
+  })();
+
+  document.getElementById('suggestForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var btn = document.getElementById('suggestSubmitBtn');
+    var msg = document.getElementById('suggestMsg');
+
+    var icao = document.getElementById('suggestIcao').value.trim().toUpperCase();
+    if (!/^[A-Z*]{2,4}$/.test(icao) || !/[A-Z]/.test(icao)) {
+      msg.textContent = 'Please enter a valid ICAO code or pattern (e.g. EGLL, EG**, K***).';
+      msg.style.color = 'var(--danger)';
+      msg.classList.remove('hidden');
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Submitting...';
+    msg.classList.add('hidden');
+
+    try {
+      var res = await fetch('/api/suggest-airport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          firstName: document.getElementById('suggestFirst').value.trim(),
+          lastName: document.getElementById('suggestLast').value.trim(),
+          icao: icao,
+          type: document.getElementById('suggestType').value,
+          association: document.getElementById('suggestAssociation').value,
+          reason: document.getElementById('suggestReason').value.trim(),
+          contact: document.getElementById('suggestContact').value.trim()
+        })
+      });
+
+      if (!res.ok) {
+        var data = await res.json().catch(function() { return {}; });
+        throw new Error(data.error || 'Failed to submit');
+      }
+
+      msg.textContent = 'Thank you! Your suggestion has been submitted.';
+      msg.style.color = 'var(--success)';
+      msg.classList.remove('hidden');
+      btn.textContent = 'Submitted';
+
+      // Reset form fields (except name)
+      document.getElementById('suggestIcao').value = '';
+      document.getElementById('suggestType').value = 'visit';
+      document.getElementById('suggestAssociation').value = '';
+      document.getElementById('suggestReason').value = '';
+      document.getElementById('suggestContact').value = '';
+
+      setTimeout(function() { btn.disabled = false; btn.textContent = 'Submit Suggestion'; }, 3000);
+    } catch(err) {
+      msg.textContent = err.message || 'Something went wrong. Please try again.';
+      msg.style.color = 'var(--danger)';
+      msg.classList.remove('hidden');
+      btn.disabled = false;
+      btn.textContent = 'Submit Suggestion';
+    }
+  });
+  </script>
+  `;
+
+  res.send(renderLayout({
+    title: 'Suggest an Airport',
+    user,
+    isAdmin,
+    content,
+    layoutClass: 'dashboard-full'
+  }));
+});
+
+app.get('/api/airport-visits/:icao', async (req, res) => {
+  const icao = req.params.icao?.toUpperCase();
+  if (!icao || !/^[A-Z]{4}$/.test(icao)) {
+    return res.status(400).json({ error: 'Invalid ICAO' });
+  }
+
+  const visits = await prisma.wfVisitedAirport.findMany({
+    where: { icao },
+    orderBy: { year: 'desc' }
+  });
+
+  res.json({
+    icao,
+    totalVisits: visits.length,
+    lastVisit: visits.length > 0 ? visits[0].year : null,
+    visits: visits.map(v => ({ year: v.year, eventName: v.eventName }))
+  });
+});
+
+app.post('/api/suggest-airport', async (req, res) => {
+  const { firstName, lastName, icao, type, association, reason, contact } = req.body;
+
+  if (!firstName || !lastName || !icao || !association || !reason || !contact) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  if (!/^[A-Z*]{2,4}$/.test(icao.toUpperCase()) || !/[A-Z]/.test(icao.toUpperCase())) {
+    return res.status(400).json({ error: 'Invalid ICAO code' });
+  }
+
+  const suggestionType = type === 'avoid' ? 'avoid' : 'visit';
+  const cid = Number(req.session?.user?.data?.cid) || null;
+
+  await prisma.airportSuggestion.create({
+    data: {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      icao: icao.toUpperCase(),
+      type: suggestionType,
+      association,
+      reason: reason.trim(),
+      contact: contact.trim(),
+      cid
+    }
+  });
+
+  res.json({ success: true });
+});
+
+/* ===== VIEW SUGGESTIONS PAGE ===== */
+app.get('/api/suggestion-stats', async (req, res) => {
+  const all = await prisma.airportSuggestion.findMany({
+    select: { icao: true, type: true }
+  });
+
+  const visitCounts = {};
+  const avoidCounts = {};
+
+  for (const s of all) {
+    if (s.type === 'avoid') {
+      avoidCounts[s.icao] = (avoidCounts[s.icao] || 0) + 1;
+    } else {
+      visitCounts[s.icao] = (visitCounts[s.icao] || 0) + 1;
+    }
+  }
+
+  const topVisit = Object.entries(visitCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([icao, count]) => ({ icao, count }));
+
+  const topAvoid = Object.entries(avoidCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([icao, count]) => ({ icao, count }));
+
+  res.json({ topVisit, topAvoid, totalVisit: Object.values(visitCounts).reduce((a, b) => a + b, 0), totalAvoid: Object.values(avoidCounts).reduce((a, b) => a + b, 0) });
+});
+
+app.get('/view-suggestions', requirePageEnabled('suggest-airport'), (req, res) => {
+  const user = req.session?.user?.data || null;
+  const cid = Number(user?.cid) || null;
+  const isAdmin = cid && ADMIN_CIDS.includes(cid);
+
+  const content = `
+  <div class="suggestions-view">
+
+    <section class="card">
+      <h2>Top 10 Suggested Airports</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Airports the community wants WorldFlight to visit</p>
+      <div id="topVisitList" class="suggestion-list">
+        <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Top 10 Airports to Avoid</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Airports the community has suggested we avoid</p>
+      <div id="topAvoidList" class="suggestion-list">
+        <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
+      </div>
+    </section>
+
+  </div>
+
+  <style>
+    .suggestions-view {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .suggestions-view { grid-template-columns: 1fr; }
+    }
+
+    .suggestion-list { display: flex; flex-direction: column; gap: 4px; }
+
+    .suggestion-rank {
+      display: flex;
+      align-items: center;
+      padding: 12px 16px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      transition: background .15s;
+    }
+    .suggestion-rank:hover { background: rgba(255,255,255,0.04); }
+
+    .rank-pos {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--muted2);
+      min-width: 36px;
+      text-align: center;
+    }
+    .rank-pos.gold { color: #fbbf24; }
+    .rank-pos.silver { color: #94a3b8; }
+    .rank-pos.bronze { color: #cd7f32; }
+
+    .rank-icao {
+      font-family: monospace;
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+      min-width: 70px;
+    }
+
+    .rank-bar-wrap {
+      flex: 1;
+      margin: 0 16px;
+      height: 8px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .rank-bar {
+      height: 100%;
+      border-radius: 4px;
+      transition: width .5s ease;
+    }
+    .rank-bar.visit { background: var(--accent); }
+    .rank-bar.avoid { background: var(--danger); }
+
+    .rank-count {
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--text);
+      min-width: 50px;
+      text-align: right;
+    }
+
+    .suggestion-empty {
+      padding: 32px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
+  </style>
+
+  <script>
+  (async function() {
+    var res = await fetch('/api/suggestion-stats');
+    var data = await res.json();
+
+    function renderList(containerId, items, barClass) {
+      var el = document.getElementById(containerId);
+      if (!items.length) {
+        el.innerHTML = '<div class="suggestion-empty">No suggestions yet. Be the first to <a href="/suggest-airport" style="color:var(--accent);">suggest an airport</a>!</div>';
+        return;
+      }
+
+      var max = items[0].count;
+
+      el.innerHTML = items.map(function(item, i) {
+        var posClass = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
+        var pct = Math.round((item.count / max) * 100);
+        var voteWord = item.count === 1 ? 'vote' : 'votes';
+
+        return '<div class="suggestion-rank">' +
+          '<span class="rank-pos ' + posClass + '">#' + (i + 1) + '</span>' +
+          '<span class="rank-icao">' + item.icao + '</span>' +
+          '<div class="rank-bar-wrap"><div class="rank-bar ' + barClass + '" style="width:' + pct + '%"></div></div>' +
+          '<span class="rank-count">' + item.count + ' ' + voteWord + '</span>' +
+        '</div>';
+      }).join('');
+    }
+
+    renderList('topVisitList', data.topVisit, 'visit');
+    renderList('topAvoidList', data.topAvoid, 'avoid');
+  })();
+  </script>
+  `;
+
+  res.send(renderLayout({
+    title: 'View Suggestions',
+    user,
+    isAdmin,
+    content,
+    layoutClass: 'dashboard-full'
+  }));
+});
+
 bootstrap().catch(err => {
   console.error('Startup failed:', err);
   process.exit(1);
@@ -3663,9 +4547,16 @@ app.delete(
   async (req, res) => {
     const id = Number(req.params.id);
 
-    await prisma.documentationAccessRequest.delete({
-      where: { id }
-    });
+    try {
+      await prisma.documentationAccessRequest.delete({
+        where: { id }
+      });
+    } catch (err) {
+      if (err.code === 'P2025') {
+        return res.json({ ok: true }); // already deleted
+      }
+      throw err;
+    }
 
     res.json({ ok: true });
   }
