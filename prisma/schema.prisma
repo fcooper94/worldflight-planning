@@ -119,6 +119,9 @@ model DocumentationAccessRequest {
   id          Int       @id @default(autoincrement())
   cid         Int
   pattern     String    @db.VarChar(4)
+  name        String?
+  email       String?
+  role        String?   @db.VarChar(20)
   requestedAt DateTime  @default(now()) @db.Timestamp(6)
   status      String    @default("PENDING") @db.VarChar(20)
   reviewedBy  Int?
@@ -127,6 +130,11 @@ model DocumentationAccessRequest {
 
   @@index([cid])
   @@index([status])
+}
+
+model PageVisibility {
+  key     String  @id
+  enabled Boolean @default(true)
 }
 
 enum Simulator {

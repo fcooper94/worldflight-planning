@@ -141,7 +141,11 @@ import axios from 'axios';
 import vatsimLogin from './auth/login.js';
 import vatsimCallback from './auth/callback.js';
 import cron from 'node-cron';
-import renderLayout from './layout.js';
+import nodemailer from 'nodemailer';
+import _renderLayout from './layout.js';
+function renderLayout(opts) {
+  return _renderLayout({ ...opts, pageVisibility });
+}
 
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -234,6 +238,55 @@ io.use((socket, next) => {
 });
 
 
+
+/* ===== PAGE VISIBILITY (GLOBAL) ===== */
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport'];
+const pageVisibility = {};     // key -> boolean (true = enabled)
+
+async function loadPageVisibility() {
+  const rows = await prisma.pageVisibility.findMany();
+  const found = new Set();
+  for (const r of rows) {
+    pageVisibility[r.key] = r.enabled;
+    found.add(r.key);
+  }
+  // default missing keys to true
+  for (const k of PAGE_KEYS) {
+    if (!found.has(k)) pageVisibility[k] = true;
+  }
+  console.log('[PAGE VIS] Loaded page visibility:', pageVisibility);
+}
+
+function isPageEnabled(key) {
+  return pageVisibility[key] !== false;
+}
+
+function requirePageEnabled(pageKey) {
+  return (req, res, next) => {
+    const cid = req.session?.user?.data?.cid;
+    const isAdmin = cid && ADMIN_CIDS.includes(Number(cid));
+    if (isAdmin || isPageEnabled(pageKey)) return next();
+    return res.status(403).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Page Unavailable</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="login-page no-layout">
+  <div class="login-overlay"></div>
+  <div class="login-container">
+    <img src="/logo.png" alt="WorldFlight" class="login-logo" />
+    <h1>Page Unavailable</h1>
+    <h2>Temporarily Disabled</h2>
+    <p class="login-subtitle">This page has been disabled by an administrator.</p>
+    <a href="/" class="login-btn">Back to Homepage</a>
+  </div>
+</body>
+</html>`);
+  };
+}
 
 /* ===== SHARED STATE (GLOBAL) ===== */
 const sharedToggles = {};      // { callsign: { clearance: bool, start: bool, sector?: "EGCC-EGLL" } }
@@ -1108,6 +1161,7 @@ async function bootstrap() {
   await refreshPilots();
   await loadDepFlowsFromDb();
   await loadTobtBookingsFromDb();
+  await loadPageVisibility();
 
   await refreshAdminSheet();   // 🔑 REQUIRED
 wfWorldMapCache.clear();
@@ -1615,7 +1669,7 @@ cron.schedule('0 0 * * *', refreshAdminSheet);
 // HOME: logged in → dashboard, logged out → login page
 
 
-app.get('/dashboard', (req, res) => {
+app.get('/dashboard', requirePageEnabled('schedule'), (req, res) => {
   return res.redirect(301, '/schedule');
 });
 
@@ -1625,7 +1679,25 @@ app.get('/dashboard', (req, res) => {
 function requireAdmin(req, res, next) {
   const cid = req.session?.user?.data?.cid;
   if (!cid || !ADMIN_CIDS.includes(Number(cid))) {
-    return res.status(403).send('Access Denied: Admins Only');
+    return res.status(403).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Access Denied</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="login-page no-layout">
+  <div class="login-overlay"></div>
+  <div class="login-container">
+    <img src="/logo.png" alt="WorldFlight" class="login-logo" />
+    <h1>Access Denied</h1>
+    <h2>Administrators Only</h2>
+    <p class="login-subtitle">You do not have permission to view this page.</p>
+    <a href="/" class="login-btn">Back to Homepage</a>
+  </div>
+</body>
+</html>`);
   }
   next();
 }
@@ -2595,7 +2667,7 @@ app.get('/api/wf/world-map', async (req, res) => {
 
 
 
-app.get('/wf/world-map', requireLogin, (req, res) => {
+app.get('/wf/world-map', requireLogin, requirePageEnabled('world-map'), (req, res) => {
   const user = req.session.user?.data || null;
   const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
 
@@ -2631,7 +2703,7 @@ app.get('/wf/world-map', requireLogin, (req, res) => {
 
 app.get('/auth/login', vatsimLogin);
 app.get('/auth/callback', vatsimCallback);
-app.get('/schedule', (req, res) => {
+app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
   const isAdmin = ADMIN_CIDS.includes(cid);
   const myBookings = cid ? tobtBookingsByCid[cid] : null;
@@ -3062,18 +3134,99 @@ app.get('/admin/documentation-access', requireAdmin, (req, res) => {
     <thead>
       <tr>
         <th>CID</th>
+        <th>Name</th>
+        <th>Email</th>
+        <th>Role</th>
         <th>Pattern</th>
         <th>Requested</th>
         <th>Status</th>
-<th>Actions</th>
-
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody id="docAccessRequestsTable">
-      <tr><td colspan="4" class="empty">Loading...</td></tr>
+      <tr><td colspan="8" class="empty">Loading...</td></tr>
     </tbody>
   </table>
 </section>
+
+<!-- APPROVAL MODAL -->
+<div id="approvalModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:560px;">
+    <h3 id="approvalModalTitle">Review Access Request</h3>
+
+    <div class="approval-info">
+      <div class="approval-info-row">
+        <span class="approval-label">Name</span>
+        <span id="approvalName">—</span>
+      </div>
+      <div class="approval-info-row">
+        <span class="approval-label">Email</span>
+        <span id="approvalEmail">—</span>
+      </div>
+      <div class="approval-info-row">
+        <span class="approval-label">Role</span>
+        <span id="approvalRole">—</span>
+      </div>
+      <div class="approval-info-row">
+        <span class="approval-label">CID</span>
+        <span id="approvalCid">—</span>
+      </div>
+      <div class="approval-info-row">
+        <span class="approval-label">Requested</span>
+        <span id="approvalPattern">—</span>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;">
+      <label style="display:block;font-size:13px;font-weight:600;margin-bottom:6px;">
+        Permissions
+        <span style="font-weight:400;color:var(--muted);"> — add or remove ICAO patterns (e.g. EGLL, EG**, K***)</span>
+      </label>
+      <div id="approvalPermissions" class="approval-perms"></div>
+      <div class="approval-add-perm">
+        <input type="text" id="approvalNewPerm" placeholder="e.g. EGLL or EG**" maxlength="4" style="flex:1;" />
+        <button type="button" id="approvalAddPermBtn" class="action-btn" style="flex-shrink:0;">Add</button>
+      </div>
+    </div>
+
+    <label style="display:block;margin-top:16px;font-size:13px;font-weight:600;">
+      Message <span style="font-weight:400;color:var(--muted);"> — included in the email to the user</span>
+    </label>
+    <textarea id="approvalMessage" rows="3" placeholder="Optional message to include in the email..." style="width:100%;margin-top:4px;padding:8px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e5e7eb;resize:vertical;font-family:inherit;font-size:13px;"></textarea>
+
+    <div id="approvalModalMsg" class="modal-message hidden" style="margin-top:12px;"></div>
+
+    <div class="modal-actions" style="margin-top:16px;gap:8px;flex-wrap:wrap;">
+      <button type="button" id="approvalCancelBtn" class="modal-btn modal-btn-cancel">Cancel</button>
+      <button type="button" id="approvalDenyBtn" class="modal-btn" style="background:var(--danger);color:#fff;">Deny & Send Email</button>
+      <button type="button" id="approvalSaveBtn" class="modal-btn" style="background:var(--muted2);color:#fff;">Save Changes</button>
+      <button type="button" id="approvalApproveBtn" class="modal-btn modal-btn-submit">Approve & Send Email</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .approval-info { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
+  .approval-info-row { display:flex; gap:12px; font-size:13px; }
+  .approval-label { color:var(--muted); min-width:80px; font-weight:600; }
+  .approval-perms { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; min-height:32px; }
+  .approval-perm-tag {
+    display:inline-flex; align-items:center; gap:6px;
+    background:#1e293b; color:#e5e7eb; padding:4px 10px;
+    border-radius:6px; font-size:13px; font-family:monospace; font-weight:600;
+  }
+  .approval-perm-tag .remove-perm {
+    cursor:pointer; color:var(--danger); font-size:15px; line-height:1;
+  }
+  .approval-perm-tag .remove-perm:hover { color:#f87171; }
+  .approval-perm-tag.perm-new { border:1px dashed var(--accent); background:rgba(56,189,248,0.08); }
+  .approval-add-perm { display:flex; gap:6px; }
+  .approval-add-perm input {
+    padding:6px 8px; background:#0f172a; border:1px solid #1e293b;
+    border-radius:6px; color:#e5e7eb; text-transform:uppercase; font-family:monospace;
+  }
+</style>
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
@@ -3186,10 +3339,15 @@ document.addEventListener('DOMContentLoaded', function () {
                 '<button class="action-btn btn-deny" data-id="' + r.id + '">Deny</button>';
             }
 
+            var roleLabel = r.role === 'director' ? 'Director' : r.role === 'staff' ? 'Staff Member' : r.role || '—';
+
             // ✅ Then render row
             return (
               '<tr data-status="' + r.status + '">' +
                 '<td>' + escapeHtml(r.cid) + '</td>' +
+                '<td>' + escapeHtml(r.name || '—') + '</td>' +
+                '<td>' + escapeHtml(r.email || '—') + '</td>' +
+                '<td>' + escapeHtml(roleLabel) + '</td>' +
                 '<td><strong>' + escapeHtml(r.pattern) + '</strong></td>' +
                 '<td>' + requested + '</td>' +
                 '<td>' + statusLabel + '</td>' +
@@ -3197,76 +3355,267 @@ document.addEventListener('DOMContentLoaded', function () {
               '</tr>'
             );
           }).join('')
-        : '<tr><td colspan="5" class="empty">No requests</td></tr>';
+        : '<tr><td colspan="8" class="empty">No requests</td></tr>';
     })
     .catch(function () {
       requestsTable.innerHTML =
-        '<tr><td colspan="5" class="empty">Failed to load requests</td></tr>';
+        '<tr><td colspan="8" class="empty">Failed to load requests</td></tr>';
     });
 }
 
 
 
+  /* ===============================
+     APPROVAL MODAL LOGIC
+     =============================== */
+
+  var approvalModal = document.getElementById('approvalModal');
+  var approvalPerms = document.getElementById('approvalPermissions');
+  var approvalNewPerm = document.getElementById('approvalNewPerm');
+  var approvalMsg = document.getElementById('approvalModalMsg');
+  var currentRequestData = null;
+  var permissionsList = []; // { pattern, isExisting, id? }
+
+  function openApprovalModal(requestRow) {
+    currentRequestData = requestRow;
+
+    document.getElementById('approvalName').textContent = requestRow.name || '—';
+    document.getElementById('approvalEmail').textContent = requestRow.email || '—';
+    var roleLabel = requestRow.role === 'director' ? 'Director' : requestRow.role === 'staff' ? 'Staff Member' : requestRow.role || '—';
+    document.getElementById('approvalRole').textContent = roleLabel;
+    document.getElementById('approvalCid').textContent = requestRow.cid;
+    document.getElementById('approvalPattern').textContent = requestRow.pattern;
+    document.getElementById('approvalMessage').value = '';
+    approvalMsg.classList.add('hidden');
+
+    // Load existing permissions for this user
+    permissionsList = [];
+    fetch('/admin/api/documentation/' + requestRow.cid)
+      .then(function(r) { return r.json(); })
+      .then(function(rows) {
+        rows.forEach(function(r) {
+          permissionsList.push({ pattern: r.pattern, isExisting: true, id: r.id });
+        });
+        // Add the requested pattern if not already present
+        if (!permissionsList.some(function(p) { return p.pattern === requestRow.pattern; })) {
+          permissionsList.push({ pattern: requestRow.pattern, isExisting: false });
+        }
+        renderPermissions();
+      });
+
+    approvalModal.classList.remove('hidden');
+  }
+
+  function closeApprovalModal() {
+    approvalModal.classList.add('hidden');
+    currentRequestData = null;
+  }
+
+  function renderPermissions() {
+    approvalPerms.innerHTML = permissionsList.map(function(p, i) {
+      var cls = p.isExisting ? 'approval-perm-tag' : 'approval-perm-tag perm-new';
+      return '<span class="' + cls + '">' +
+        escapeHtml(p.pattern) +
+        ' <span class="remove-perm" data-idx="' + i + '">&times;</span>' +
+      '</span>';
+    }).join('');
+  }
+
+  approvalPerms.addEventListener('click', function(e) {
+    var rm = e.target.closest('.remove-perm');
+    if (!rm) return;
+    var idx = Number(rm.dataset.idx);
+    permissionsList.splice(idx, 1);
+    renderPermissions();
+  });
+
+  document.getElementById('approvalAddPermBtn').addEventListener('click', function() {
+    var val = approvalNewPerm.value.trim().toUpperCase();
+    if (!/^[A-Z*]{4}$/.test(val)) { alert('Enter a valid 4-character ICAO pattern (e.g. EGLL, EG**, K***)'); return; }
+    if (permissionsList.some(function(p) { return p.pattern === val; })) { approvalNewPerm.value = ''; return; }
+    permissionsList.push({ pattern: val, isExisting: false });
+    renderPermissions();
+    approvalNewPerm.value = '';
+  });
+
+  approvalNewPerm.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('approvalAddPermBtn').click(); }
+  });
+
+  document.getElementById('approvalCancelBtn').addEventListener('click', closeApprovalModal);
+  approvalModal.querySelector('.modal-backdrop').addEventListener('click', closeApprovalModal);
+
+  function showApprovalMsg(text, color) {
+    approvalMsg.textContent = text;
+    approvalMsg.style.color = color || 'var(--text)';
+    approvalMsg.classList.remove('hidden');
+  }
+
+  function setApprovalButtonsDisabled(disabled) {
+    ['approvalApproveBtn','approvalDenyBtn','approvalSaveBtn','approvalCancelBtn'].forEach(function(id) {
+      document.getElementById(id).disabled = disabled;
+    });
+  }
+
+  // APPROVE & SEND EMAIL
+  document.getElementById('approvalApproveBtn').addEventListener('click', async function() {
+    if (!currentRequestData) return;
+    setApprovalButtonsDisabled(true);
+    showApprovalMsg('Approving and sending email...', 'var(--accent)');
+
+    try {
+      var res = await fetch('/admin/api/documentation-access-requests/' + currentRequestData.id + '/approve-full', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          permissions: permissionsList.map(function(p) { return p.pattern; }),
+          message: document.getElementById('approvalMessage').value.trim(),
+          sendEmail: true
+        })
+      });
+      if (!res.ok) throw new Error('Failed');
+      showApprovalMsg('Approved and email sent!', 'var(--success)');
+      setTimeout(function() { closeApprovalModal(); loadRequests(); }, 1500);
+    } catch(err) {
+      showApprovalMsg('Failed to approve. Please try again.', 'var(--danger)');
+      setApprovalButtonsDisabled(false);
+    }
+  });
+
+  // DENY
+  document.getElementById('approvalDenyBtn').addEventListener('click', async function() {
+    if (!currentRequestData) return;
+    setApprovalButtonsDisabled(true);
+    showApprovalMsg('Denying request...', 'var(--accent)');
+
+    try {
+      var res = await fetch('/admin/api/documentation-access-requests/' + currentRequestData.id + '/approve-full', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'deny',
+          message: document.getElementById('approvalMessage').value.trim(),
+          sendEmail: !!currentRequestData.email
+        })
+      });
+      if (!res.ok) throw new Error('Failed');
+      showApprovalMsg('Request denied.', 'var(--danger)');
+      setTimeout(function() { closeApprovalModal(); loadRequests(); }, 1500);
+    } catch(err) {
+      showApprovalMsg('Failed to deny. Please try again.', 'var(--danger)');
+      setApprovalButtonsDisabled(false);
+    }
+  });
+
+  // SAVE CHANGES (permissions only, no email, no status change)
+  document.getElementById('approvalSaveBtn').addEventListener('click', async function() {
+    if (!currentRequestData) return;
+    setApprovalButtonsDisabled(true);
+    showApprovalMsg('Saving permissions...', 'var(--accent)');
+
+    try {
+      var res = await fetch('/admin/api/documentation-access-requests/' + currentRequestData.id + '/approve-full', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save',
+          permissions: permissionsList.map(function(p) { return p.pattern; })
+        })
+      });
+      if (!res.ok) throw new Error('Failed');
+      showApprovalMsg('Permissions saved.', 'var(--success)');
+      setTimeout(function() { closeApprovalModal(); loadRequests(); }, 1500);
+    } catch(err) {
+      showApprovalMsg('Failed to save. Please try again.', 'var(--danger)');
+      setApprovalButtonsDisabled(false);
+    }
+  });
+
+  /* ===============================
+     REQUEST TABLE CLICK HANDLERS
+     =============================== */
+
+  // Store loaded request data for modal use
+  var loadedRequests = [];
+
+  var _origLoadRequests = loadRequests;
+  loadRequests = function() {
+    fetch('/admin/api/documentation-access-requests')
+      .then(function(r) { return r.json(); })
+      .then(function(rows) {
+        loadedRequests = rows;
+
+        requestsTable.innerHTML = rows.length
+          ? rows.map(function (r) {
+              var requested = r.requestedAt
+                ? new Date(r.requestedAt).toISOString().replace('T',' ').slice(0,19)
+                : '';
+
+              var statusLabel =
+                r.status === 'DENIED'
+                  ? '<span class="badge badge-denied">Denied</span>'
+                  : '<span class="badge badge-pending">Pending</span>';
+
+              var roleLabel = r.role === 'director' ? 'Director' : r.role === 'staff' ? 'Staff Member' : r.role || '\u2014';
+
+              var actionsHtml;
+              if (r.status === 'DENIED') {
+                actionsHtml =
+                  '<button class="action-btn btn-review" data-id="' + r.id + '">Review</button> ' +
+                  '<button class="action-btn btn-delete" data-id="' + r.id + '">Delete</button>';
+              } else {
+                actionsHtml =
+                  '<button class="action-btn btn-review" data-id="' + r.id + '">Review</button>';
+              }
+
+              return (
+                '<tr data-status="' + r.status + '">' +
+                  '<td>' + escapeHtml(r.cid) + '</td>' +
+                  '<td>' + escapeHtml(r.name || '\u2014') + '</td>' +
+                  '<td>' + escapeHtml(r.email || '\u2014') + '</td>' +
+                  '<td>' + escapeHtml(roleLabel) + '</td>' +
+                  '<td><strong>' + escapeHtml(r.pattern) + '</strong></td>' +
+                  '<td>' + requested + '</td>' +
+                  '<td>' + statusLabel + '</td>' +
+                  '<td>' + actionsHtml + '</td>' +
+                '</tr>'
+              );
+            }).join('')
+          : '<tr><td colspan="8" class="empty">No requests</td></tr>';
+      })
+      .catch(function () {
+        requestsTable.innerHTML =
+          '<tr><td colspan="8" class="empty">Failed to load requests</td></tr>';
+      });
+  };
+
   requestsTable.addEventListener('click', function (e) {
-    var approveBtn = e.target.closest('.btn-approve');
-var denyBtn = e.target.closest('.btn-deny');
-var deleteBtn = e.target.closest('.btn-delete');
+    var reviewBtn = e.target.closest('.btn-review');
+    var deleteBtn = e.target.closest('.btn-delete');
 
-    if (!approveBtn && !denyBtn && !deleteBtn) return;
+    if (reviewBtn) {
+      var rid = Number(reviewBtn.dataset.id);
+      var row = loadedRequests.find(function(r) { return r.id === rid; });
+      if (row) openApprovalModal(row);
+      return;
+    }
 
-var id = (approveBtn || denyBtn || deleteBtn).dataset.id;
-var action = approveBtn
-  ? 'approve'
-  : denyBtn
-    ? 'deny'
-    : 'delete';
-
-
-    openConfirmModal({
-  title:
-    action === 'delete'
-      ? 'Delete Request'
-      : action === 'approve'
-        ? 'Approve Access'
-        : 'Deny Access',
-  message:
-    action === 'delete'
-      ? 'This will permanently remove the request. This cannot be undone.'
-      : action === 'approve'
-        ? 'Grant documentation upload access?'
-        : 'Deny this access request?'
-}).then(function (ok) {
-  if (!ok) return;
-
-  var url;
-var method = 'POST';
-
-if (action === 'approve') {
-  url = '/admin/api/documentation-access-requests/' + id + '/approve';
-} else if (action === 'deny') {
-  url = '/admin/api/documentation-access-requests/' + id + '/deny';
-} else if (action === 'delete') {
-  url = '/admin/api/documentation-access-requests/' + id;
-  method = 'DELETE';
-}
-
-fetch(url, {
-  method,
-  headers: { 'Content-Type': 'application/json' }
-})
-.then(function (r) {
-  if (!r.ok) throw new Error('Request failed');
-  return r.json();
-})
-.then(function () {
-  loadRequests();
-})
-.catch(function (err) {
-  alert(err.message || 'Failed to process request');
-});
-
-});
-
+    if (deleteBtn) {
+      var did = deleteBtn.dataset.id;
+      openConfirmModal({
+        title: 'Delete Request',
+        message: 'This will permanently remove the request. This cannot be undone.'
+      }).then(function(ok) {
+        if (!ok) return;
+        fetch('/admin/api/documentation-access-requests/' + did, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' }
+        })
+        .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.json(); })
+        .then(function() { loadRequests(); })
+        .catch(function(err) { alert(err.message || 'Failed'); });
+      });
+    }
   });
 
   // initial load
@@ -3434,6 +3783,207 @@ app.post('/admin/api/documentation-access-requests/:id/deny', requireAdmin, asyn
 
   res.json({ success: true });
 });
+
+/* ===== FULL APPROVAL ENDPOINT (approve/deny/save + email) ===== */
+app.post('/admin/api/documentation-access-requests/:id/approve-full', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const adminCid = Number(req.session.user?.data?.cid);
+  const adminName = req.session.user?.data?.personal?.name_full || 'WorldFlight Admin';
+  const { action, permissions, message, sendEmail } = req.body;
+
+  const request = await prisma.documentationAccessRequest.findUnique({ where: { id } });
+  if (!request) return res.status(404).json({ error: 'Not found' });
+
+  const isDeny = action === 'deny';
+  const isSave = action === 'save';
+
+  await prisma.$transaction(async (tx) => {
+    // Update permissions if provided (for approve or save)
+    if (Array.isArray(permissions) && !isDeny) {
+      // Delete all existing permissions for this user
+      await tx.documentationPermission.deleteMany({ where: { cid: request.cid } });
+      // Re-create with the new set
+      for (const pattern of permissions) {
+        const normalized = pattern.toUpperCase().trim();
+        if (/^[A-Z*]{4}$/.test(normalized)) {
+          await tx.documentationPermission.create({
+            data: { cid: request.cid, pattern: normalized }
+          });
+        }
+      }
+    }
+
+    // Update request status (unless just saving)
+    if (!isSave) {
+      await tx.documentationAccessRequest.update({
+        where: { id },
+        data: {
+          status: isDeny ? 'DENIED' : 'APPROVED',
+          reviewedBy: adminCid,
+          reviewedAt: new Date()
+        }
+      });
+    }
+  });
+
+  // Send email if requested and user has an email
+  if (sendEmail && request.email) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: false,
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS
+        }
+      });
+
+      const permList = Array.isArray(permissions)
+        ? permissions.map(p => p.toUpperCase()).join(', ')
+        : request.pattern;
+
+      const userName = request.name || 'there';
+
+      // For denials, fetch existing permissions to remind user
+      let existingPerms = [];
+      if (isDeny) {
+        const rows = await prisma.documentationPermission.findMany({ where: { cid: request.cid } });
+        existingPerms = rows.map(r => r.pattern.toUpperCase());
+      }
+
+      const htmlEmail = buildAccessEmail({
+        userName,
+        isDeny,
+        permissions: Array.isArray(permissions) ? permissions.map(p => p.toUpperCase()) : [request.pattern],
+        deniedPattern: request.pattern,
+        existingPerms,
+        message: message || '',
+        adminName
+      });
+
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || '"WorldFlight" <noreply@worldflight.center>',
+        to: request.email,
+        subject: isDeny
+          ? 'WorldFlight — Documentation Access Request Denied'
+          : 'WorldFlight — Documentation Access Granted',
+        html: htmlEmail
+      });
+    } catch (emailErr) {
+      console.error('[EMAIL] Failed to send:', emailErr.message);
+      // Don't fail the whole request over email
+    }
+  }
+
+  res.json({ success: true });
+});
+
+function buildAccessEmail({ userName, isDeny, permissions, deniedPattern, existingPerms, message, adminName }) {
+  function permTable(perms) {
+    return `<table cellpadding="0" cellspacing="0" style="margin:20px auto;border-collapse:collapse;">
+      ${perms.map(p => `
+        <tr>
+          <td style="padding:6px 24px;font-family:monospace;font-size:18px;font-weight:700;color:#38bdf8;background:#0f172a;border:1px solid #1e293b;border-radius:4px;text-align:center;letter-spacing:2px;">
+            ${p}
+          </td>
+        </tr>
+      `).join('')}
+    </table>`;
+  }
+
+  const messageHtml = message
+    ? `<div style="background:#0f172a;border-left:3px solid #38bdf8;padding:12px 16px;margin:20px 0;border-radius:0 6px 6px 0;color:#cbd5e1;font-size:14px;line-height:1.6;">
+        ${message.replace(/\n/g, '<br>')}
+       </div>`
+    : '';
+
+  let bodyText;
+  if (isDeny) {
+    bodyText = `<p style="color:#e5e7eb;font-size:15px;line-height:1.6;">
+        Unfortunately, your request to upload documentation for <strong style="color:#f87171;">${deniedPattern || ''}</strong> has been denied.
+       </p>`;
+
+    if (messageHtml) {
+      bodyText += messageHtml;
+    }
+
+    if (existingPerms && existingPerms.length > 0) {
+      bodyText += `<p style="color:#e5e7eb;font-size:15px;line-height:1.6;margin-top:20px;">
+        As a reminder, you still have permission to upload documentation for the following:
+       </p>
+       ${permTable(existingPerms)}`;
+    }
+  } else {
+    bodyText = `<p style="color:#e5e7eb;font-size:15px;line-height:1.6;">
+        You have been granted permission to upload documentation for the following:
+       </p>
+       ${permTable(permissions)}
+       ${messageHtml}`;
+  }
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8" /></head>
+<body style="margin:0;padding:0;background:#020617;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#020617;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;background:#0b1220;border:1px solid #1e293b;border-radius:16px;overflow:hidden;">
+
+          <!-- HEADER -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#0f172a,#1e293b);padding:32px;text-align:center;">
+              <img src="https://planning.worldflight.center/logo.png" width="64" height="64" style="border-radius:50%;" alt="WorldFlight" />
+              <h1 style="color:#38bdf8;font-size:22px;margin:16px 0 0;">WorldFlight</h1>
+              <p style="color:#94a3b8;font-size:13px;margin:4px 0 0;">Documentation Access</p>
+            </td>
+          </tr>
+
+          <!-- BODY -->
+          <tr>
+            <td style="padding:32px;">
+              <p style="color:#e5e7eb;font-size:15px;line-height:1.6;margin:0 0 16px;">
+                Hello ${userName},
+              </p>
+
+              ${bodyText}
+
+              ${!isDeny ? `<div style="text-align:center;margin:28px 0 8px;">
+                <a href="https://planning.worldflight.center/icao/${permissions[0] && !/\\*/.test(permissions[0]) ? permissions[0] : ''}" style="display:inline-block;padding:12px 32px;background:#38bdf8;color:#020617;font-weight:600;font-size:14px;text-decoration:none;border-radius:8px;">
+                  Open Airport Portal
+                </a>
+              </div>` : ''}
+
+              <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;" />
+
+              <p style="color:#94a3b8;font-size:13px;margin:0;">
+                Kind Regards,
+              </p>
+              <p style="color:#e5e7eb;font-size:14px;font-weight:600;margin:4px 0 0;">
+                WorldFlight Organizers
+              </p>
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td style="background:#080d17;padding:16px 32px;text-align:center;">
+              <p style="color:#475569;font-size:11px;margin:0;">
+                This is an automated message from the WorldFlight CDM system.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
 
 
 app.get('/admin/scenery', requireAdmin, (req, res) => {
@@ -3905,6 +4455,12 @@ app.get('/icao/:icao', requireLogin, async (req, res) => {
 
 <script>
   window.IS_LOGGED_IN = ${req.session?.user?.data ? 'true' : 'false'};
+  window.VATSIM_USER = ${req.session?.user?.data ? JSON.stringify({
+    cid: req.session.user.data.cid,
+    nameFirst: req.session.user.data.personal?.name_first || '',
+    nameLast: req.session.user.data.personal?.name_last || '',
+    email: req.session.user.data.personal?.email || ''
+  }) : 'null'};
 </script>
 
 <section class="card">
@@ -4335,41 +4891,134 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
 
+<div id="docAccessModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog">
+    <h3>Request Documentation Access</h3>
+
+    <form id="docAccessForm">
+      <label>
+        First Name
+        <input type="text" id="docAccessFirst" readonly />
+      </label>
+
+      <label>
+        Last Name
+        <input type="text" id="docAccessLast" readonly />
+      </label>
+
+      <label>
+        Email Address
+        <input type="email" id="docAccessEmail" required />
+      </label>
+
+      <label>
+        Staff Role
+        <select id="docAccessRole" required>
+          <option value="">Select...</option>
+          <option value="staff">Staff Member</option>
+          <option value="director">Director</option>
+          <option value="none">No staff role</option>
+        </select>
+      </label>
+
+      <div id="docAccessRoleError" class="modal-message hidden" style="color:var(--danger);margin-top:8px;font-size:13px;">
+        Only Division/vACC Staff can request access to upload documentation.
+      </div>
+
+      <div id="docAccessFormMessage" class="modal-message hidden"></div>
+
+      <div class="modal-actions">
+        <button type="button" class="modal-btn modal-btn-cancel" id="closeDocAccessModal">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-submit" id="submitDocAccessBtn">Submit Request</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
-document.addEventListener('click', (e) => {
-  const btn = e.target.closest('#requestDocAccess');
-  if (!btn) return;
+(function() {
+  const btn = document.getElementById('requestDocAccess');
+  const modal = document.getElementById('docAccessModal');
+  const form = document.getElementById('docAccessForm');
+  const closeBtn = document.getElementById('closeDocAccessModal');
+  const backdrop = modal?.querySelector('.modal-backdrop');
+  const roleSelect = document.getElementById('docAccessRole');
+  const roleError = document.getElementById('docAccessRoleError');
+  const submitBtn = document.getElementById('submitDocAccessBtn');
+  const msgEl = document.getElementById('docAccessFormMessage');
 
-  const icao = btn.dataset.icao;
+  if (!btn || !modal) return;
 
-  openConfirmModalAsync({
-    title: 'Request documentation access',
-    message: 'Request permission to upload documents for ' + icao + '?',
-    confirmText: 'Confirm',
-    cancelText: 'Cancel',
-    onConfirm: async ({ showOk }) => {
+  function openModal() {
+    const u = window.VATSIM_USER;
+    if (!u) return;
+
+    document.getElementById('docAccessFirst').value = u.nameFirst;
+    document.getElementById('docAccessLast').value = u.nameLast;
+    document.getElementById('docAccessEmail').value = u.email;
+    roleSelect.value = '';
+    roleError.classList.add('hidden');
+    submitBtn.disabled = false;
+    msgEl.classList.add('hidden');
+    modal.classList.remove('hidden');
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+  }
+
+  btn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  if (backdrop) backdrop.addEventListener('click', closeModal);
+
+  roleSelect.addEventListener('change', () => {
+    if (roleSelect.value === 'none') {
+      roleError.classList.remove('hidden');
+      submitBtn.disabled = true;
+    } else {
+      roleError.classList.add('hidden');
+      submitBtn.disabled = false;
+    }
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (roleSelect.value === 'none' || !roleSelect.value) return;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting...';
+
+    const icao = btn.dataset.icao;
+    const email = document.getElementById('docAccessEmail').value.trim();
+    const role = roleSelect.value;
+
+    try {
       const res = await fetch('/api/documentation-access/request', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ icao: icao })
+        body: JSON.stringify({ icao, email, role })
       });
 
-      if (!res.ok) {
-        showOk('Request failed', 'Unable to submit access request. Please try again.');
-        return true;
-      }
+      if (!res.ok) throw new Error('Request failed');
 
-      // Success: update SAME modal content
-      showOk('Request sent', 'Your request has been sent to an administrator for review.');
-
-      // Optional: hide/disable the request button after success
+      msgEl.textContent = 'Your request has been sent to an administrator for review.';
+      msgEl.style.color = 'var(--success)';
+      msgEl.classList.remove('hidden');
+      submitBtn.textContent = 'Sent';
       btn.classList.add('hidden');
 
-      return true;
+      setTimeout(closeModal, 2000);
+    } catch (err) {
+      msgEl.textContent = 'Unable to submit request. Please try again.';
+      msgEl.style.color = 'var(--danger)';
+      msgEl.classList.remove('hidden');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit Request';
     }
   });
-});
+})();
 </script>
 <script>
 (function () {
@@ -4611,7 +5260,7 @@ app.post(
   requireLogin,
   async (req, res) => {
     const cid = Number(req.session.user.data.cid);
-    const { icao } = req.body;
+    const { icao, email, role } = req.body;
 
     if (!icao || !/^[A-Z]{4}$/.test(icao)) {
       return res.status(400).json({ error: 'Invalid ICAO' });
@@ -4630,10 +5279,16 @@ app.post(
       return res.status(409).json({ error: 'Request already pending' });
     }
 
+    const personal = req.session.user.data.personal || {};
+    const fullName = [personal.name_first, personal.name_last].filter(Boolean).join(' ') || null;
+
     await prisma.documentationAccessRequest.create({
       data: {
         cid,
         pattern: icao.toUpperCase(),
+        name: fullName,
+        email: typeof email === 'string' ? email.trim() : (personal.email || null),
+        role: typeof role === 'string' ? role : null,
         status: 'PENDING'
       }
     });
@@ -6246,6 +6901,211 @@ res.send(
 
 });
 
+/* ===== SETTINGS PAGE ===== */
+app.get('/admin/settings', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+
+  const pages = [
+    { key: 'schedule',        label: 'WF Schedule',         icon: '🏠', desc: 'Main event schedule with slot booking' },
+    { key: 'world-map',       label: 'Route Map',           icon: '🗺️', desc: 'Interactive world map with live flights' },
+    { key: 'my-slots',        label: 'My Slots / Bookings', icon: '✈️', desc: 'Personal slot and booking overview' },
+    { key: 'atc',             label: 'WF Slot Management',  icon: '🎧', desc: 'Controller departure management view' },
+    { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' }
+  ];
+
+  const toggleRows = pages.map(p => {
+    const enabled = isPageEnabled(p.key);
+    return `
+      <div class="settings-row" data-page="${p.key}">
+        <div class="settings-row-info">
+          <span class="settings-row-icon">${p.icon}</span>
+          <div>
+            <div class="settings-row-label">${p.label}</div>
+            <div class="settings-row-desc">${p.desc}</div>
+          </div>
+        </div>
+        <div class="settings-row-controls">
+          <span class="vis-pill ${enabled ? 'vis-on' : 'vis-off'}" data-page="${p.key}">
+            ${enabled ? 'Visible' : 'Hidden'}
+          </span>
+          <label class="toggle-switch">
+            <input type="checkbox" data-page="${p.key}" ${enabled ? 'checked' : ''} />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>`;
+  }).join('');
+
+  const content = `
+    <section class="card card-full">
+      <h2>Page Visibility</h2>
+      <p class="settings-subtitle">
+        Control which pages are visible to pilots and controllers.
+        Disabled pages are hidden from navigation and return 403 for non-admin users.
+        Admins always have access.
+      </p>
+
+      <div class="settings-list">
+        ${toggleRows}
+      </div>
+    </section>
+
+    <style>
+      .settings-subtitle {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+        margin-bottom: 24px;
+      }
+
+      .settings-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .settings-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 16px;
+        border-radius: 8px;
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--border);
+        transition: background .15s;
+      }
+      .settings-row:hover {
+        background: rgba(255,255,255,0.04);
+      }
+
+      .settings-row-info {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .settings-row-icon {
+        font-size: 22px;
+        width: 36px;
+        text-align: center;
+      }
+      .settings-row-label {
+        font-weight: 600;
+        font-size: 14px;
+        color: var(--text);
+      }
+      .settings-row-desc {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+
+      .settings-row-controls {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-shrink: 0;
+      }
+
+      .vis-pill {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: .5px;
+        text-transform: uppercase;
+        padding: 3px 10px;
+        border-radius: 12px;
+        min-width: 60px;
+        text-align: center;
+        transition: all .2s;
+      }
+      .vis-pill.vis-on {
+        background: rgba(34,197,94,0.15);
+        color: #4ade80;
+      }
+      .vis-pill.vis-off {
+        background: rgba(239,68,68,0.15);
+        color: #f87171;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 44px;
+        height: 24px;
+        flex-shrink: 0;
+      }
+      .toggle-switch input { opacity: 0; width: 0; height: 0; }
+      .toggle-slider {
+        position: absolute; cursor: pointer; inset: 0;
+        background: rgba(255,255,255,0.1);
+        border-radius: 24px;
+        transition: background .2s;
+      }
+      .toggle-slider::before {
+        content: "";
+        position: absolute;
+        height: 18px; width: 18px;
+        left: 3px; bottom: 3px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform .2s;
+      }
+      .toggle-switch input:checked + .toggle-slider {
+        background: var(--accent, #3b82f6);
+      }
+      .toggle-switch input:checked + .toggle-slider::before {
+        transform: translateX(20px);
+      }
+    </style>
+
+    <script>
+      document.querySelectorAll('.toggle-switch input').forEach(cb => {
+        cb.addEventListener('change', async () => {
+          const key = cb.dataset.page;
+          const enabled = cb.checked;
+          const pill = document.querySelector('.vis-pill[data-page="' + key + '"]');
+
+          const res = await fetch('/api/admin/page-visibility', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, enabled })
+          });
+
+          if (res.ok) {
+            pill.textContent = enabled ? 'Visible' : 'Hidden';
+            pill.className = 'vis-pill ' + (enabled ? 'vis-on' : 'vis-off');
+          } else {
+            cb.checked = !enabled;
+            alert('Failed to update');
+          }
+        });
+      });
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'Settings', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/api/admin/page-visibility', requireAdmin, async (req, res) => {
+  const { key, enabled } = req.body;
+  if (!PAGE_KEYS.includes(key) || typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'Invalid key or value' });
+  }
+
+  await prisma.pageVisibility.upsert({
+    where: { key },
+    update: { enabled },
+    create: { key, enabled }
+  });
+
+  pageVisibility[key] = enabled;
+  res.json({ ok: true });
+});
+
+app.get('/api/page-visibility', (req, res) => {
+  res.json(pageVisibility);
+});
+
 /* ===== DEPARTURES PAGE ===== */
 app.get('/departures', async (req, res) => {
 
@@ -7367,7 +8227,7 @@ app.post('/api/tobt/remove', async (req, res) => {
 
 
 
-app.get('/atc', requireLogin, (req, res) => {
+app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
   if (!req.session.user || !req.session.user.data) {
     return res.redirect('/');
   }
@@ -7761,7 +8621,7 @@ document.addEventListener('DOMContentLoaded', () => {
   );
 });
 
-app.get('/my-slots', requireLogin, (req, res) => {
+app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) => {
   if (!req.session.user || !req.session.user.data) {
     return res.redirect('/auth/login');
   }

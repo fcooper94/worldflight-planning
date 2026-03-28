@@ -3035,7 +3035,8 @@ html[data-map-theme="light"] .runway-label > div {
 
 .modal-dialog {
   position: relative;
-  max-width: 460px;
+  width: 460px;
+  max-width: 90vw;
   margin: 10vh auto;
   background: #0b1220;
   border-radius: 10px;
@@ -3062,6 +3063,12 @@ html[data-map-theme="light"] .runway-label > div {
   border: 1px solid #1e293b;
   border-radius: 6px;
   color: #e5e7eb;
+}
+
+.modal-dialog input[readonly] {
+  color: #4a5568;
+  background: #080d17;
+  cursor: not-allowed;
 }
 
 .modal-actions {

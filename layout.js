@@ -3,8 +3,10 @@ export default function renderLayout({
   user,
   isAdmin,
   content,
-  layoutClass = ''
+  layoutClass = '',
+  pageVisibility = {}
 }) {
+  const pv = (key) => isAdmin || pageVisibility[key] !== false;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -49,34 +51,34 @@ export default function renderLayout({
   <nav class="sidebar-nav">
     <div class="nav-section">
       <div class="nav-title">Pilots</div>
-      <a href="/dashboard" class="nav-item">
+      ${pv('schedule') ? `<a href="/dashboard" class="nav-item">
         <span class="icon">🏠</span>
         <span class="label">WF Schedule</span>
-      </a>
-      
+      </a>` : ''}
+
       <a href="#" class="nav-item" id="openAirportPortal">
   <span class="icon">🛫</span>
   <span class="label">Airport Portal</span>
 </a>
 
-      
-      <a href="/wf/world-map" class="nav-item">
+
+      ${pv('world-map') ? `<a href="/wf/world-map" class="nav-item">
         <span class="icon">🗺️</span>
         <span class="label">Route Map</span>
-      </a>
-      <a href="/my-slots" class="nav-item">
+      </a>` : ''}
+      ${pv('my-slots') ? `<a href="/my-slots" class="nav-item">
         <span class="icon">✈️</span>
         <span class="label">My Slots / Bookings</span>
-      </a>
+      </a>` : ''}
     </div>
 
-    <div class="nav-section">
+    ${pv('atc') ? `<div class="nav-section">
       <div class="nav-title">Controllers</div>
       <a href="/atc" class="nav-item">
         <span class="icon">🎧</span>
         <span class="label">WF Slot Management</span>
       </a>
-    </div>
+    </div>` : ''}
 
     ${isAdmin ? `
     <div class="nav-section nav-admin">
@@ -105,7 +107,10 @@ export default function renderLayout({
   </span>
 </a>
 
-
+<a href="/admin/settings" class="nav-item">
+  <span class="icon">⚙️</span>
+  <span class="label">Settings</span>
+</a>
 
     </div>
     ` : ''}
