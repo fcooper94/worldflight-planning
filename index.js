@@ -1741,6 +1741,13 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     var visitInfo = document.getElementById('icaoVisitInfo');
     var debounceTimer = null;
 
+    function iataToIcao(code) {
+      if (code.length === 3 && /^[A-Z]{3}$/.test(code)) {
+        return code.charAt(0) === 'Y' ? 'C' + code : 'K' + code;
+      }
+      return code;
+    }
+
     icaoInput.addEventListener('input', function() {
       clearTimeout(debounceTimer);
       var val = icaoInput.value.trim().toUpperCase();
@@ -1752,11 +1759,15 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
 
       debounceTimer = setTimeout(async function() {
         try {
-          var res = await fetch('/api/airport-visits/' + val);
+          var lookup = iataToIcao(val);
+          var res = await fetch('/api/airport-visits/' + lookup);
           if (!res.ok) { visitInfo.classList.add('hidden'); return; }
           var data = await res.json();
 
-          if (data.totalVisits > 0) {
+          if (data.icao === 'YSSY') {
+            visitInfo.innerHTML = 'We start and finish at <span class="visit-count">YSSY</span> every year!';
+            visitInfo.className = 'icao-visit-info visited';
+          } else if (data.totalVisits > 0) {
             visitInfo.innerHTML = data.totalVisits === 1
               ? 'We have visited <span class="visit-count">' + data.icao + '</span> once before. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.'
               : 'We have visited <span class="visit-count">' + data.icao + '</span> <span class="visit-count">' + data.totalVisits + '</span> times. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.';
@@ -1778,7 +1789,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     var btn = document.getElementById('suggestSubmitBtn');
     var msg = document.getElementById('suggestMsg');
 
-    var icao = document.getElementById('suggestIcao').value.trim().toUpperCase();
+    var icao = iataToIcao(document.getElementById('suggestIcao').value.trim().toUpperCase());
     if (!/^[A-Z*]{2,4}$/.test(icao) || !/[A-Z]/.test(icao)) {
       msg.textContent = 'Please enter a valid ICAO code or pattern (e.g. EGLL, EG**, K***).';
       msg.style.color = 'var(--danger)';

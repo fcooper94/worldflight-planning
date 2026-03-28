@@ -2,7 +2,31 @@
   "permissions": {
     "allow": [
       "Bash(npx prisma:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(node -e \"require\\(''dotenv''\\)\")",
+      "Bash(node seed-2025-visited.js)",
+      "Bash(node seed-2024-visited.js)",
+      "Bash(node seed-2023-visited.js)",
+      "Bash(node seed-2022-visited.js)",
+      "Bash(rm seed-2022-visited.js)",
+      "Bash(node seed-2021-visited.js)",
+      "Bash(rm seed-2021-visited.js)",
+      "Bash(node seed-2020-visited.js)",
+      "Bash(rm seed-2020-visited.js)",
+      "Bash(node seed-2019-visited.js)",
+      "Bash(rm seed-2019-visited.js)",
+      "Bash(node seed-2018-visited.js)",
+      "Bash(rm seed-2018-visited.js)",
+      "Bash(node seed-2017-visited.js)",
+      "Bash(rm seed-2017-visited.js)",
+      "Bash(node seed-2016-visited.js)",
+      "Bash(rm seed-2016-visited.js)",
+      "Bash(node seed-2015-visited.js)",
+      "Bash(rm seed-2015-visited.js)",
+      "Bash(node seed-2014-visited.js)",
+      "Bash(rm seed-2014-visited.js)",
+      "Bash(node seed-2013-visited.js)",
+      "Bash(rm seed-2013-visited.js)"
     ]
   }
 }
