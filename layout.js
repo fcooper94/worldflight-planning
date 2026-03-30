@@ -4,63 +4,36 @@ export default function renderLayout({
   isAdmin,
   content,
   layoutClass = '',
-  pageVisibility = {}
+  pageVisibility = {},
+  hideSidebar = false,
+  siteBanner = { enabled: false, text: '' }
 }) {
   const pv = (key) => isAdmin || pageVisibility[key] !== false;
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>${title}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
-  <link rel="stylesheet" href="/styles.css" />
-
-  <!-- Leaflet (global, safe) -->
-  <!-- Leaflet (global, safe) -->
-<link
-  rel="stylesheet"
-  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-/>
-<script
-  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-  defer
-></script>
-<!-- Leaflet JS -->
-<script src="/icao-map.js"></script>
-<script src="/wf-world-map.js"></script>
-<script src="/socket.io/socket.io.js"></script>
-<script src="/slot-banners.js" defer></script>
-
-
-</head>
-
-<body>
-
-  <aside class="sidebar" id="sidebar">
+  const sidebarHtml = `<aside class="sidebar" id="sidebar">
   <div class="sidebar-header">
     <img src="/logo.png" class="sidebar-logo" />
     <button id="sidebarToggle" class="sidebar-toggle" aria-label="Toggle sidebar">
   ☰
 </button>
-
-
   </div>
 
   <nav class="sidebar-nav">
     <div class="nav-section">
       <div class="nav-title">Pilots</div>
-      ${pv('schedule') ? `<a href="/dashboard" class="nav-item">
+      <a href="/" class="nav-item">
         <span class="icon">🏠</span>
+        <span class="label">Dashboard</span>
+      </a>
+      ${pv('schedule') ? `<a href="/schedule" class="nav-item">
+        <span class="icon">🗓️</span>
         <span class="label">WF Schedule</span>
       </a>` : ''}
 
-      <a href="#" class="nav-item" id="openAirportPortal">
+      <a href="/airport-portal" class="nav-item">
   <span class="icon">🛫</span>
   <span class="label">Airport Portal</span>
 </a>
-
 
       ${pv('world-map') ? `<a href="/wf/world-map" class="nav-item">
         <span class="icon">🗺️</span>
@@ -95,49 +68,49 @@ export default function renderLayout({
     ${isAdmin ? `
     <div class="nav-section nav-admin">
       <div class="nav-title">Admin</div>
-      <a href="/wf-schedule" class="nav-item">
+      <a href="/admin/control-panel" class="nav-item">
         <span class="icon">🛠️</span>
-        <span class="label">WF Schedule / Flow</span>
+        <span class="label">
+          Admin Panel
+          <span id="adminBadge" class="nav-badge hidden"></span>
+        </span>
       </a>
-      <a href="/official-teams" class="nav-item">
-        <span class="icon">👥</span>
-        <span class="label">Official Teams</span>
-      </a>
-      <a href="/admin/scenery" class="nav-item" id="sceneryNavItem">
-  <span class="icon">🗺️</span>
-  <span class="label">
-    Scenery Submissions
-    <span id="sceneryBadge" class="nav-badge hidden"></span>
-  </span>
-</a>
-
-<a href="/admin/documentation-access" class="nav-item" id="docAccessNavItem">
-  <span class="icon">📄</span>
-  <span class="label">
-    Doc Upload Perms
-    <span id="docAccessBadge" class="nav-badge hidden"></span>
-  </span>
-</a>
-
-<a href="/admin/visited-airports" class="nav-item">
-  <span class="icon">🌍</span>
-  <span class="label">Visited Airports</span>
-</a>
-
-<a href="/admin/suggestions" class="nav-item">
-  <span class="icon">💡</span>
-  <span class="label">Suggestions</span>
-</a>
-
-<a href="/admin/settings" class="nav-item">
-  <span class="icon">⚙️</span>
-  <span class="label">Settings</span>
-</a>
-
     </div>
     ` : ''}
   </nav>
-</aside>
+</aside>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>${title}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <link rel="stylesheet" href="/styles.css" />
+
+  <!-- Leaflet (global, safe) -->
+  <!-- Leaflet (global, safe) -->
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  defer
+></script>
+<!-- Leaflet JS -->
+<script src="/icao-map.js"></script>
+<script src="/wf-world-map.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="/slot-banners.js" defer></script>
+
+
+</head>
+
+<body${hideSidebar ? ' class="no-sidebar"' : ''}>
+
+  ${hideSidebar ? '' : sidebarHtml}
 
 
 
@@ -145,7 +118,15 @@ export default function renderLayout({
   <!-- ===== TOPBAR ===== -->
   <header class="topbar">
 
-  <div class="header-center">${title}</div>
+  ${hideSidebar ? `
+  <a href="/" class="header-brand">
+    <img src="/logo.png" alt="WorldFlight" class="header-brand-logo" />
+    <div class="header-brand-text">
+      <span class="header-brand-name">WorldFlight</span>
+      <span class="header-brand-sub">Planning Portal</span>
+    </div>
+  </a>
+  ` : `<div class="header-center">${title}</div>`}
 
   <div class="header-right">
 
@@ -186,28 +167,35 @@ export default function renderLayout({
 
 </header>
 
+  ${siteBanner.enabled && siteBanner.text ? `
+  <div class="site-banner">
+    <span class="site-banner-text">${siteBanner.text}</span>
+  </div>
+  ` : ''}
 
   <!-- ===== PAGE CONTENT ===== -->
   <main class="dashboard ${layoutClass}">
     ${content}
   </main>
 
-     <!-- ===== CALLSIGN MODAL ===== -->
+     <!-- ===== CID VERIFICATION MODAL ===== -->
   <div id="callsignModal" class="modal hidden">
     <div class="modal-backdrop"></div>
     <div class="modal-card card">
-      <h3 id="modalTitle">Enter Callsign</h3>
+      <h3 id="modalTitle">Confirm Your CID</h3>
 <p id="modalHelp" class="modal-help">
-        This callsign will be used for your TOBT and SimBrief planning.
+        Please re-enter your VATSIM CID to confirm this booking.
       </p>
 
       <input
         id="callsignModalInput"
         type="text"
-        placeholder="e.g. BAW47C"
+        placeholder="Enter CID"
         maxlength="10"
         autocomplete="off"
       />
+      <p class="modal-hint">Your booking will be tied to your CID. You can connect with any callsign.</p>
+      <p id="modalError" class="modal-error hidden"></p>
 
       <div class="modal-actions">
         <button id="callsignCancel" class="action-btn">Cancel</button>
@@ -307,7 +295,7 @@ export default function renderLayout({
         }
 
         function onConfirm() {
-          const value = input.value.trim().toUpperCase();
+          const value = input.value.trim();
           if (!value) return;
           close(value);
         }
@@ -490,28 +478,29 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       const sidebar = document.getElementById('sidebar');
   const toggle = document.getElementById('sidebarToggle');
 
-  function setCollapsed(collapsed) {
-    sidebar.classList.toggle('collapsed', collapsed);
-    document.body.classList.toggle('sidebar-collapsed', collapsed);
-    localStorage.setItem('sidebarCollapsed', collapsed);
+  if (sidebar && toggle) {
+    function setCollapsed(collapsed) {
+      sidebar.classList.toggle('collapsed', collapsed);
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      localStorage.setItem('sidebarCollapsed', collapsed);
+    }
+
+    const saved = localStorage.getItem('sidebarCollapsed') === 'true';
+    if (saved !== null) {
+      setCollapsed(saved === 'true');
+    } else {
+      setCollapsed(window.innerWidth < 900);
+    }
+
+    toggle.addEventListener('click', () => {
+      setCollapsed(!sidebar.classList.contains('collapsed'));
+    });
+
+    window.addEventListener('resize', () => {
+      setCollapsed(window.innerWidth < 900);
+    });
   }
 
-  // Restore previous state
-  const saved = localStorage.getItem('sidebarCollapsed') === 'true';
-  if (saved !== null) {
-  setCollapsed(saved === 'true');
-} else {
-  setCollapsed(window.innerWidth < 900);
-}
-
-
-  toggle.addEventListener('click', () => {
-    setCollapsed(!sidebar.classList.contains('collapsed'));
-  });
-
-  window.addEventListener('resize', () => {
-    setCollapsed(window.innerWidth < 900);
-  });
   // ===== USER MENU DROPDOWN =====
 const userToggle = document.getElementById('userMenuToggle');
 const userMenu = document.getElementById('userMenu');
@@ -886,49 +875,37 @@ document.addEventListener('click', (e) => {
 });
 </script>
 <script>
-(async function updateSceneryBadge() {
+(async function updateAdminBadge() {
   try {
-    const res = await fetch('/api/admin/scenery/pending-count');
-    if (!res.ok) return;
-
-    const { count } = await res.json();
-    const badge = document.getElementById('sceneryBadge');
-
+    const badge = document.getElementById('adminBadge');
     if (!badge) return;
 
-    if (count > 0) {
-      badge.textContent = count;
+    let total = 0;
+
+    const [sceneryRes, docRes] = await Promise.all([
+      fetch('/api/admin/scenery/pending-count').catch(() => null),
+      fetch('/admin/api/documentation-access-requests/pending-count').catch(() => null)
+    ]);
+
+    if (sceneryRes && sceneryRes.ok) {
+      const { count } = await sceneryRes.json();
+      total += count;
+    }
+    if (docRes && docRes.ok) {
+      const { count } = await docRes.json();
+      total += count;
+    }
+
+    if (total > 0) {
+      badge.textContent = total;
       badge.classList.remove('hidden');
     } else {
       badge.classList.add('hidden');
     }
   } catch (err) {
-    console.error('Failed to load scenery badge', err);
+    console.error('Failed to load admin badge', err);
   }
 })();
-</script>
-<script>
-(async function updateDocAccessBadge() {
-  try {
-    const res = await fetch('/admin/api/documentation-access-requests/pending-count');
-    if (!res.ok) return;
-
-    const { count } = await res.json();
-    const badge = document.getElementById('docAccessBadge');
-
-    if (!badge) return;
-
-    if (count > 0) {
-      badge.textContent = count;
-      badge.classList.remove('hidden');
-    } else {
-      badge.classList.add('hidden');
-    }
-  } catch (err) {
-    console.error('Failed to load documentation access badge', err);
-  }
-})();
-
 </script>
 <script>
 document.addEventListener('click', async (e) => {

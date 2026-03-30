@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -47,9 +47,8 @@ model TobtBooking {
   tobtTimeUtc  String?
   createdAt    DateTime @default(now())
 
-  @@unique([cid, slotKey])   // ✅ THIS
+  @@unique([cid, slotKey])
 }
-
 
 model User {
   cid  Int    @id
@@ -73,21 +72,21 @@ model Runway {
   lon1        Float
   lat2        Float
   lon2        Float
-  airport     Airport @relation(fields: [airportIcao], references: [icao], onDelete: Cascade, onUpdate: NoAction, map: "runway_airport_fk")
+  airport     Airport @relation(fields: [airportIcao], references: [icao], onDelete: Cascade)
 }
 
 model AirportScenery {
-  id          Int         @id @default(autoincrement())
+  id          Int      @id @default(autoincrement())
   icao        String
-  sim         Simulator
+  sim         String
   name        String
   developer   String?
   store       String?
   url         String
-  type        SceneryType
+  type        String
   submittedBy String
-  submittedAt DateTime    @default(now())
-  approved    Boolean     @default(false)
+  submittedAt DateTime @default(now())
+  approved    Boolean  @default(false)
   approvedBy  String?
   approvedAt  DateTime?
 
@@ -106,10 +105,10 @@ model DocumentationPermission {
 
 model AirportDocument {
   id         Int      @id @default(autoincrement())
-  icao       String   @db.VarChar(4)
+  icao       String
   filename   String
   uploadedBy Int
-  uploadedAt DateTime @default(now()) @db.Timestamp(6)
+  uploadedAt DateTime @default(now())
 
   @@unique([icao, filename])
   @@index([icao])
@@ -118,15 +117,15 @@ model AirportDocument {
 model DocumentationAccessRequest {
   id          Int       @id @default(autoincrement())
   cid         Int
-  pattern     String    @db.VarChar(4)
+  pattern     String
   name        String?
   email       String?
-  role        String?   @db.VarChar(20)
-  requestedAt DateTime  @default(now()) @db.Timestamp(6)
-  status      String    @default("PENDING") @db.VarChar(20)
+  role        String?
+  requestedAt DateTime  @default(now())
+  status      String    @default("PENDING")
   reviewedBy  Int?
-  reviewedAt  DateTime? @db.Timestamp(6)
-  createdAt   DateTime  @default(now()) @db.Timestamp(6)
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
 
   @@index([cid])
   @@index([status])
@@ -134,7 +133,7 @@ model DocumentationAccessRequest {
 
 model WfVisitedAirport {
   id        Int      @id @default(autoincrement())
-  icao      String   @db.VarChar(4)
+  icao      String
   year      Int
   eventName String?
 
@@ -146,8 +145,8 @@ model AirportSuggestion {
   id          Int      @id @default(autoincrement())
   firstName   String
   lastName    String
-  icao        String   @db.VarChar(4)
-  type        String   @default("visit") @db.VarChar(10)
+  icao        String
+  type        String   @default("visit")
   association String
   reason      String
   contact     String
@@ -166,15 +165,4 @@ model PageVisibility {
 model SiteSetting {
   key   String @id
   value String
-}
-
-enum Simulator {
-  MSFS
-  XPLANE
-  P3D
-}
-
-enum SceneryType {
-  Freeware
-  Payware
 }

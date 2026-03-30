@@ -144,7 +144,7 @@ import cron from 'node-cron';
 import nodemailer from 'nodemailer';
 import _renderLayout from './layout.js';
 function renderLayout(opts) {
-  return _renderLayout({ ...opts, pageVisibility });
+  return _renderLayout({ ...opts, pageVisibility, siteBanner });
 }
 
 import { createServer } from 'http';
@@ -240,7 +240,7 @@ io.use((socket, next) => {
 
 
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot'];
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
 async function loadPageVisibility() {
@@ -259,6 +259,17 @@ async function loadPageVisibility() {
 
 function isPageEnabled(key) {
   return pageVisibility[key] !== false;
+}
+
+// ===== SITE BANNER =====
+const siteBanner = { enabled: false, text: '' };
+
+async function loadSiteBanner() {
+  const enabledRow = await prisma.siteSetting.findUnique({ where: { key: 'banner-enabled' } });
+  const textRow = await prisma.siteSetting.findUnique({ where: { key: 'banner-text' } });
+  siteBanner.enabled = enabledRow?.value === 'true';
+  siteBanner.text = textRow?.value || '';
+  console.log('[BANNER] Loaded:', siteBanner);
 }
 
 function requirePageEnabled(pageKey) {
@@ -1162,6 +1173,7 @@ async function bootstrap() {
   await loadDepFlowsFromDb();
   await loadTobtBookingsFromDb();
   await loadPageVisibility();
+  await loadSiteBanner();
 
   await refreshAdminSheet();   // 🔑 REQUIRED
 wfWorldMapCache.clear();
@@ -2434,12 +2446,18 @@ socket.on('updateDepFlowType', async ({ sector, flowtype }) => {
   io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized });
 });
 
-socket.on('createBookingOnly', async ({ sector, callsign }) => {
+socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
 
-  console.log('[BOOKING ONLY]', sector, callsign);
+  console.log('[BOOKING ONLY]', sector, enteredCid);
 
-  if (!sector || !callsign) return;
-  if (!user || !user.cid) return;   // ✅ pilot-based permission
+  if (!sector || !enteredCid) return;
+  if (!user || !user.cid) return;
+
+  // Verify CID matches logged-in user
+  if (String(enteredCid).trim() !== String(user.cid)) {
+    socket.emit('bookingError', { error: 'CID does not match your logged-in account.' });
+    return;
+  }
 
   const [leg, dateUtc, depTimeUtc] = sector.split('|');
   if (!leg || !dateUtc || !depTimeUtc) return;
@@ -2464,8 +2482,8 @@ socket.on('createBookingOnly', async ({ sector, callsign }) => {
   await prisma.tobtBooking.create({
     data: {
       slotKey,
-      cid: Number(user.cid),              // ✅ ALWAYS STORE CID
-      callsign: callsign.trim().toUpperCase(),
+      cid: Number(user.cid),
+      callsign: String(user.cid),
       from,
       to,
       dateUtc: row.date_utc,
@@ -2477,7 +2495,7 @@ socket.on('createBookingOnly', async ({ sector, callsign }) => {
   tobtBookingsByKey[slotKey] = {
     slotKey,
     cid: Number(user.cid),
-    callsign: callsign.trim().toUpperCase(),
+    callsign: String(user.cid),
     from,
     to,
     dateUtc: row.date_utc,
@@ -3022,7 +3040,7 @@ const aircraft = cachedPilots
 
 
 
-app.use(express.static('public'));
+app.use(express.static('public', { index: false }));
 function parseUtcDateTime(dateUtc, timeUtc) {
   let year = new Date().getUTCFullYear();
 
@@ -3151,11 +3169,182 @@ function makeTobtSlotKey({ from, to, dateUtc, depTimeUtc, tobtTimeUtc }) {
   return `${from}-${to}|${dateUtc}|${depTimeUtc}|${tobtTimeUtc}`;
 }
 app.get('/', (req, res) => {
-  if (req.session?.user?.data) {
-    return res.redirect('/schedule');
-  }
+  const user = req.session?.user?.data || null;
+  const cid = user ? Number(user.cid) : null;
+  const isAdmin = cid ? ADMIN_CIDS.includes(cid) : false;
 
-  return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  const allPages = [
+    { title: '2026 Schedule',      desc: 'View the full WorldFlight 2026 event schedule with departure flows and times.', icon: '🗓️', href: '/schedule',           public: true,  visKey: 'schedule' },
+    { title: 'Suggest Airport',    desc: 'Submit your airport suggestions for upcoming WorldFlight events.',              icon: '💡', href: '/suggest-airport',     public: true,  visKey: 'suggest-airport' },
+    { title: 'View Suggestions',   desc: 'Browse and vote on community airport suggestions.',                             icon: '📊', href: '/view-suggestions',    public: true,  visKey: 'suggest-airport' },
+    { title: 'Airport Portal',     desc: 'Look up airport information, charts, scenery, and documentation.',              icon: '🛫', href: '/airport-portal',      public: true },
+    { title: 'Route Map',          desc: 'Interactive map showing all WorldFlight routes and airports.',                   icon: '🗺️', href: '/wf/world-map',        public: false, visKey: 'world-map' },
+    { title: 'My Slots / Bookings',desc: 'Manage your booked departure and arrival slots.',                               icon: '✈️', href: '/my-slots',            public: false, visKey: 'my-slots' },
+    { title: 'WF Slot Management', desc: 'Controller tools for managing WorldFlight ATC slots.',                          icon: '🎧', href: '/atc',                 public: false, visKey: 'atc' },
+    { title: 'Admin Panel',        desc: 'Manage settings, page visibility, and site configuration.',                    icon: '🛠️', href: '/admin/control-panel', public: false, adminOnly: true },
+  ];
+
+  const pages = allPages.filter(p => {
+    if (p.adminOnly) return isAdmin;
+    return !p.visKey || isAdmin || isPageEnabled(p.visKey);
+  });
+
+  const cards = pages.map(p => {
+    const needsLogin = !p.public && !user;
+    const href = needsLogin ? '/auth/login' : p.href;
+    const lockClass = needsLogin ? ' dash-card--locked' : '';
+
+    return `
+      <a href="${href}" class="dash-card${lockClass}">
+        <div class="dash-card-icon">${p.icon}</div>
+        <div class="dash-card-title">${p.title}</div>
+        <div class="dash-card-desc">${p.desc}</div>
+        ${needsLogin
+          ? `<div class="dash-card-badge">Login →</div>`
+          : ''}
+      </a>`;
+  }).join('');
+
+  const content = `
+    <section class="dash-wrapper">
+      <section class="dash-grid">
+        ${cards}
+      </section>
+    </section>
+
+    <style>
+      .dashboard.dashboard-home {
+        display: block;
+        max-width: none;
+        padding: 0;
+      }
+      .dash-wrapper {
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding: 32px 40px;
+      }
+
+      .header-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding-left: 20px;
+        position: absolute;
+        left: 0;
+        text-decoration: none;
+        color: inherit;
+      }
+      .header-brand-logo {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+      }
+      .header-brand-text {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.2;
+      }
+      .header-brand-name {
+        font-size: 16px;
+        font-weight: 700;
+        color: var(--text, #e2e8f0);
+      }
+      .header-brand-sub {
+        font-size: 11px;
+        color: var(--muted, #94a3b8);
+      }
+
+      .dash-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        max-width: 1400px;
+        width: 100%;
+      }
+
+      .dash-card {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        gap: 12px;
+        padding: 28px 24px;
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.07);
+        background: rgba(255,255,255,0.03);
+        text-decoration: none;
+        color: inherit;
+        transition: background .15s, border-color .15s, transform .15s;
+        cursor: pointer;
+      }
+      .dash-card:hover {
+        background: rgba(255,255,255,0.06);
+        border-color: var(--accent, #3b82f6);
+        transform: translateY(-2px);
+      }
+
+      .dash-card--locked {
+        opacity: 0.45;
+      }
+      .dash-card--locked:hover {
+        opacity: 0.8;
+        border-color: var(--accent, #3b82f6);
+      }
+
+      .dash-card-icon {
+        font-size: 30px;
+        width: 52px;
+        height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 14px;
+        background: rgba(255,255,255,0.05);
+      }
+      .dash-card-title {
+        font-weight: 700;
+        font-size: 16px;
+        color: var(--text, #e2e8f0);
+      }
+      .dash-card-desc {
+        font-size: 13px;
+        color: var(--muted, #94a3b8);
+        line-height: 1.5;
+        max-width: 260px;
+      }
+      .dash-card-badge {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--accent, #3b82f6);
+        margin-top: 4px;
+      }
+
+      @media (max-width: 1000px) {
+        .dash-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+      @media (max-width: 600px) {
+        .dash-grid {
+          grid-template-columns: 1fr;
+        }
+        .dash-card {
+          aspect-ratio: auto;
+          padding: 24px 20px;
+        }
+      }
+    </style>`;
+
+  return res.send(renderLayout({
+    title: 'WorldFlight CDM',
+    user,
+    isAdmin,
+    content,
+    hideSidebar: true,
+    layoutClass: 'dashboard-home'
+  }));
 });
 
 
@@ -3596,12 +3785,57 @@ app.get('/wf/world-map', requireLogin, requirePageEnabled('world-map'), (req, re
 
 
 
-app.get('/auth/login', vatsimLogin);
+// ===== DEV LOGIN (only when DEV_MODE=true) =====
+if (process.env.DEV_MODE === 'true') {
+  app.get('/dev-login', (req, res) => {
+    req.session.user = {
+      data: {
+        cid: 1303570,
+        personal: {
+          name_first: 'Dev',
+          name_last: 'Admin',
+          name_full: 'Dev Admin'
+        },
+        vatsim: {
+          rating: { id: 1, short: 'OBS', long: 'Observer' },
+          pilotrating: { id: 0, short: 'NEW', long: 'Basic Member' },
+          division: { id: 'GBR', name: 'United Kingdom' },
+          region: { id: 'EMEA', name: 'Europe, Middle East and Africa' }
+        },
+        oauth: { token_valid: true }
+      }
+    };
+    req.session.save(() => {
+      res.redirect(req.query.next || '/');
+    });
+  });
+  console.log('[DEV] Dev login available at /dev-login');
+}
+
+app.get('/auth/login', (req, res, next) => {
+  // In dev mode, skip VATSIM and use dev login
+  if (process.env.DEV_MODE === 'true') {
+    return res.redirect('/dev-login');
+  }
+
+  if (!req.session.returnTo) {
+    const referer = req.headers.referer || '';
+    try {
+      const url = new URL(referer);
+      if (url.pathname && url.pathname !== '/' && url.pathname !== '/auth/login') {
+        req.session.returnTo = url.pathname;
+      }
+    } catch (e) {}
+  }
+  next();
+}, vatsimLogin);
 app.get('/auth/callback', vatsimCallback);
 app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
   const isAdmin = ADMIN_CIDS.includes(cid);
+  const isLoggedIn = !!cid;
   const myBookings = cid ? tobtBookingsByCid[cid] : null;
+  const showBookSlot = isAdmin || isPageEnabled('book-slot');
 
   const content = `
   <section class="card card-full">
@@ -3616,11 +3850,9 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
             <th class="col-to">Arr</th>
             <th class="col-date">Date</th>
             <th class="col-window">Dep Window</th>
-            <th class="col-window">Arr Window</th>
-            <th class="col-time">Block Time</th>
+            <th class="col-block">Block</th>
             <th class="col-route">ATC Route</th>
-            <th class="col-flowtype">Booking Type</th>
-            <th class="col-book">Book Slot</th>
+            ${showBookSlot ? '<th class="col-book">Book</th>' : ''}
             <th class="col-plan">Plan</th>
           </tr>
         </thead>
@@ -3650,8 +3882,7 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
 
               <td class="col-date">${r.date_utc}</td>
               <td class="col-window">${buildTimeWindow(r.dep_time_utc)}</td>
-              <td class="col-window">${buildTimeWindow(r.arr_time_utc)}</td>
-              <td class="col-time">${r.block_time}</td>
+              <td class="col-block">${r.block_time}</td>
 
               <td class="col-route">
                 <div class="route-collapsible">
@@ -3664,98 +3895,62 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
                 </div>
               </td>
 
-              <!-- ✅ FLOW TYPE COLUMN -->
-              <td class="col-flowtype">
-  <span class="flowtype-pill flowtype-${flowtype.toLowerCase()}">
-    ${
-      flowtype === 'SLOTTED'
-        ? 'Slot Required'
-        : flowtype === 'BOOKING_ONLY'
-        ? 'Booking Required'
-        : 'No Restrictions'
-    }
-  </span>
-</td>
+              <!-- ✅ BOOK (combined booking type + action) -->
+              ${showBookSlot ? (() => {
+                const sk = r.from + '-' + r.to + '|' + r.date_utc + '|' + r.dep_time_utc;
 
+                if (flowtype === 'NONE') {
+                  return '<td class="col-book"><span class="flowtype-pill flowtype-none">No Restrictions</span></td>';
+                }
 
+                /* Already booked — show CID pill, hover to cancel */
+                if (isLoggedIn && myBookings) {
+                  const prefixWithCid = cid + ':' + sk + '|';
+                  const prefixNoCid = sk + '|';
+                  const mySlotKey = [...myBookings].find(k =>
+                    (k.startsWith(prefixWithCid) || k.startsWith(prefixNoCid)) && tobtBookingsByKey[k]
+                  );
+                  if (mySlotKey) {
+                    const booking = tobtBookingsByKey[mySlotKey];
+                    const bookedCid = booking?.cid || 'Booked';
+                    const tobt = booking?.tobtTimeUtc || '';
+                    const pillLabel = tobt ? bookedCid + ' (' + tobt.slice(0, 5) + ')' : String(bookedCid);
+                    const rawSlotKey = booking?.slotKey || mySlotKey;
+                    return '<td class="col-book">'
+                      + '<button class="book-pill book-pill-booked" data-slot-key="' + rawSlotKey + '">'
+                      + '<span class="book-pill-label">' + escapeHtml(pillLabel) + '</span>'
+                      + '<span class="book-pill-hover">Cancel Booking</span>'
+                      + '</button></td>';
+                  }
+                }
 
-              <!-- ✅ BOOK SLOT -->
-              <td class="col-book">
-  ${
-    (() => {
+                /* Bookable — hover pill */
+                const pillClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
+                const label = flowtype === 'BOOKING_ONLY' ? 'Booking Required' : 'Time Slot Required';
+                const hoverLabel = isLoggedIn ? 'Click to Book' : 'Login to Book';
 
-      /* ===== FLOW TYPE: NONE ===== */
-      if (flowtype === 'NONE') {
-        return `
-          <span class="tobt-not-required">
-            -
-          </span>
-        `;
-      }
+                if (!isLoggedIn) {
+                  return '<td class="col-book">'
+                    + '<a class="book-pill ' + pillClass + '" href="/auth/login">'
+                    + '<span class="book-pill-label">' + label + '</span>'
+                    + '<span class="book-pill-hover">' + hoverLabel + '</span>'
+                    + '</a></td>';
+                }
 
-      if (flowtype === 'BOOKING_ONLY') {
-  const sectorInstanceKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
+                if (flowtype === 'BOOKING_ONLY') {
+                  return '<td class="col-book">'
+                    + '<button class="book-pill booking-only ' + pillClass + '" data-sector="' + sk + '">'
+                    + '<span class="book-pill-label">' + label + '</span>'
+                    + '<span class="book-pill-hover">' + hoverLabel + '</span>'
+                    + '</button></td>';
+                }
 
-  return `
-    <button
-  class="tobt-btn book booking-only"
-  data-sector="${sectorInstanceKey}">
-  Book
-</button>
-
-  `;
-}
-
-
-
-      /* ===== NO USER BOOKINGS ===== */
-      if (!myBookings) {
-        const label =
-          flowtype === 'BOOKING_ONLY'
-            ? 'Book'
-            : 'Book Slot';
-
-        return `
-          <a class="tobt-btn book"
-             href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
-            ${label}
-          </a>
-        `;
-      }
-
-      /* ===== CHECK EXISTING BOOKING ===== */
-      const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
-
-      const mySlotKey = [...myBookings].find(k =>
-        k.startsWith(sectorKey + '|') &&
-        tobtBookingsByKey[k]
-      );
-
-      if (!mySlotKey) {
-        const label =
-          flowtype === 'BOOKING_ONLY'
-            ? 'Book'
-            : 'Book Slot';
-
-        return `
-          <a class="tobt-btn book"
-             href="/book?from=${r.from}&to=${r.to}&dateUtc=${encodeURIComponent(r.date_utc)}&depTimeUtc=${r.dep_time_utc}">
-            ${label}
-          </a>
-        `;
-      }
-
-      /* ===== EXISTING BOOKING ===== */
-      return `
-        <button
-          class="tobt-btn cancel"
-          data-slot-key="${mySlotKey}">
-          Cancel
-        </button>
-      `;
-    })()
-  }
-</td>
+                return '<td class="col-book">'
+                  + '<a class="book-pill ' + pillClass + '" href="/book?from=' + r.from + '&to=' + r.to + '&dateUtc=' + encodeURIComponent(r.date_utc) + '&depTimeUtc=' + r.dep_time_utc + '">'
+                  + '<span class="book-pill-label">' + label + '</span>'
+                  + '<span class="book-pill-hover">' + hoverLabel + '</span>'
+                  + '</a></td>';
+              })() : ''}
 
 
               <!-- ✅ SIMBRIEF PLAN -->
@@ -3824,20 +4019,87 @@ document.addEventListener('click', async (e) => {
   const sector = btn.dataset.sector;
   if (!sector) return;
 
-  const callsign = await openCallsignModal();
-  if (!callsign) return;
-
-  console.log('[CLIENT] booking-only submit', sector, callsign);
-
-  socket.emit('createBookingOnly', {
-    sector,
-    callsign
+  openCidModal(function(enteredCid) {
+    socket.emit('createBookingOnly', {
+      sector,
+      callsign: enteredCid
+    });
   });
 });
+
+function openCidModal(onSubmit) {
+  const modal = document.getElementById('callsignModal');
+  const input = document.getElementById('callsignModalInput');
+  const confirmBtn = document.getElementById('callsignConfirm');
+  const cancelBtn = document.getElementById('callsignCancel');
+  const errorEl = document.getElementById('modalError');
+
+  modal.classList.remove('hidden');
+  input.value = '';
+  input.focus();
+  errorEl.classList.add('hidden');
+  errorEl.textContent = '';
+
+  // Store reference so socket errors can reach it
+  window._cidModalErrorEl = errorEl;
+  window._cidModalOpen = true;
+
+  function cleanup() {
+    confirmBtn.removeEventListener('click', onConfirm);
+    cancelBtn.removeEventListener('click', onCancel);
+    input.removeEventListener('keydown', onKey);
+    window._cidModalOpen = false;
+    window._cidModalErrorEl = null;
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+    errorEl.classList.add('hidden');
+    cleanup();
+  }
+
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.classList.remove('hidden');
+    input.focus();
+  }
+
+  function onConfirm() {
+    const value = input.value.trim();
+    if (!value) return;
+    if (!/^[0-9]+$/.test(value)) {
+      showError('Please enter a valid numeric CID.');
+      return;
+    }
+    // Don't close — wait for server response
+    onSubmit(value);
+  }
+
+  function onCancel() { closeModal(); }
+
+  function onKey(e) {
+    if (e.key === 'Enter') onConfirm();
+    if (e.key === 'Escape') onCancel();
+  }
+
+  confirmBtn.addEventListener('click', onConfirm);
+  cancelBtn.addEventListener('click', onCancel);
+  input.addEventListener('keydown', onKey);
+}
+
 </script>
 <script>
 let bookingOnlySector = null;
-const socket = io(); // 🔑 THIS WAS MISSING
+const socket = io();
+socket.on('bookingError', ({ error }) => {
+  if (window._cidModalOpen && window._cidModalErrorEl) {
+    window._cidModalErrorEl.textContent = error;
+    window._cidModalErrorEl.classList.remove('hidden');
+  } else {
+    alert(error);
+  }
+});
+socket.on('bookingCreated', () => { location.reload(); });
 
 function showCallsignModal(sector) {
   bookingOnlySector = sector;
@@ -3901,10 +4163,23 @@ document.addEventListener('click', (e) => {
 
   text.classList.toggle('collapsed', expanded);
 });
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.route-collapsible').forEach(wrapper => {
+    const text = wrapper.querySelector('.route-text');
+    const btn = wrapper.querySelector('.route-toggle');
+    if (!text || !btn) return;
+    // Hide button first so it doesn't affect text width, then check overflow
+    btn.style.display = 'none';
+    if (text.scrollWidth > text.clientWidth) {
+      btn.style.display = '';
+    }
+  });
+});
 </script>
 <script>
 document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('.tobt-btn.cancel');
+  const btn = e.target.closest('.tobt-btn.cancel, .book-pill-booked');
   if (!btn) return;
 
   const slotKey = btn.dataset.slotKey;
@@ -5182,7 +5457,7 @@ function getWorldFlightLegForAirport(icao) {
 
 app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
-app.get('/icao/:icao', requireLogin, async (req, res) => {
+app.get('/icao/:icao', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
   const isWorldFlight = hasOutboundFlow(icao);
   const wfLeg = getWorldFlightLegForAirport(icao); // whatever function you already use
@@ -6310,8 +6585,13 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
 
   /* ================= RESPONSE ================= */
 
+  const cid = req.session?.user?.data?.cid;
+  const isAdminUser = cid && ADMIN_CIDS.includes(Number(cid));
+  const showArrival = isAdminUser || isPageEnabled('arrival-info');
+  const showDeparture = isAdminUser || isPageEnabled('departure-info');
+
   res.json({
-    arrival: arrivalLeg ? {
+    arrival: (showArrival && arrivalLeg) ? {
       from: arrivalLeg.from,
       to: arrivalLeg.to,
       dateUtc: arrivalLeg.date_utc,
@@ -6325,7 +6605,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
       iHaveSlot: arrivalIHaveSlot
     } : null,
 
-    departure: departureLeg ? {
+    departure: (showDeparture && departureLeg) ? {
       from: departureLeg.from,
       to: departureLeg.to,
       dateUtc: departureLeg.date_utc,
@@ -6701,15 +6981,19 @@ app.post('/api/docs/request-access', requireLogin, async (req, res) => {
 app.post('/api/tobt/book', requireLogin, async (req, res) => {
   try {
     // 1️⃣ Validate input
-    const { slotKey, callsign, manual } = req.body;
-    if (!slotKey || !callsign) {
+    const { slotKey, callsign: enteredCid, manual } = req.body;
+    if (!slotKey || !enteredCid) {
       return res.status(400).json({ error: 'Missing parameters' });
     }
-
 
     // 2️⃣ Extract user basics
     const userData = req.session.user.data;
     const cid = Number(userData.cid);
+
+    // Verify CID matches logged-in user
+    if (String(enteredCid).trim() !== String(cid)) {
+      return res.status(403).json({ error: 'CID does not match your logged-in account.' });
+    }
 
     // 3️⃣ Parse slotKey: FROM-TO|Date|DepTime|TOBT
     // 3️⃣ Parse slotKey
@@ -6766,16 +7050,8 @@ const wantsManual = !isBookingOnly && manual === true;
       return res.status(409).json({ error: 'Slot already booked' });
     }
 
-    // 6️⃣ Normalize callsign
-    const normalizedCallsign = callsign.trim().toUpperCase();
-
-    // 7️⃣ Reserved team callsign enforcement (applies to both modes)
-    const teamCheck = await isReservedTeamCallsign(normalizedCallsign, cid);
-    if (teamCheck.reserved && !teamCheck.allowed) {
-      return res.status(403).json({
-        error: `Callsign ${normalizedCallsign} is reserved for an official team.`
-      });
-    }
+    // 6️⃣ Use CID as identifier
+    const normalizedCallsign = String(cid);
 
     // 8️⃣ Prevent duplicate sector + callsign
     const sectorKey = parts.slice(0, 3).join('|');
@@ -6920,7 +7196,175 @@ app.post('/api/tobt/update-callsign', requireLogin, async (req, res) => {
 
 
 app.get('/admin', (req, res) => {
-  res.redirect(301, '/wf-schedule');
+  res.redirect(301, '/admin/control-panel');
+});
+
+app.get('/admin/control-panel', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+
+  let sceneryCount = 0;
+  let docAccessCount = 0;
+  try {
+    sceneryCount = await prisma.airportScenery.count({ where: { approved: false } });
+  } catch (e) {}
+  try {
+    docAccessCount = await prisma.documentationAccessRequest.count({ where: { status: 'PENDING' } });
+  } catch (e) {}
+
+  const sections = [
+    {
+      title: 'WF Schedule / Flow',
+      desc: 'Manage the WorldFlight schedule, departure flows, flow types, dates, and ATC routes.',
+      icon: '🛠️',
+      href: '/wf-schedule',
+      badge: null
+    },
+    {
+      title: 'Official Teams',
+      desc: 'Manage official teams and WF affiliates with WF26 participation toggles.',
+      icon: '👥',
+      href: '/official-teams',
+      badge: null
+    },
+    {
+      title: 'Scenery Submissions',
+      desc: 'Review and approve or reject pending scenery submissions from the community.',
+      icon: '🗺️',
+      href: '/admin/scenery',
+      badge: sceneryCount > 0 ? sceneryCount : null
+    },
+    {
+      title: 'Doc Upload Permissions',
+      desc: 'Manage user access permissions for uploading airport documentation.',
+      icon: '📄',
+      href: '/admin/documentation-access',
+      badge: docAccessCount > 0 ? docAccessCount : null
+    },
+    {
+      title: 'Visited Airports',
+      desc: 'Manage which airports have been visited by year and ICAO code.',
+      icon: '🌍',
+      href: '/admin/visited-airports',
+      badge: null
+    },
+    {
+      title: 'Suggestions',
+      desc: 'View and manage community airport suggestions.',
+      icon: '💡',
+      href: '/admin/suggestions',
+      badge: null
+    },
+    {
+      title: 'Page Visibility',
+      desc: 'Control page visibility for pilots and controllers.',
+      icon: '⚙️',
+      href: '/admin/settings',
+      badge: null
+    }
+  ];
+
+  const sectionCards = sections.map(s => `
+    <a href="${s.href}" class="cp-card">
+      <div class="cp-card-icon">${s.icon}</div>
+      <div class="cp-card-body">
+        <div class="cp-card-title">
+          ${s.title}
+          ${s.badge ? `<span class="cp-badge">${s.badge}</span>` : ''}
+        </div>
+        <div class="cp-card-desc">${s.desc}</div>
+      </div>
+      <div class="cp-card-arrow">→</div>
+    </a>
+  `).join('');
+
+  const content = `
+    <section class="card card-full">
+      <h2>Admin Panel</h2>
+      <p class="cp-subtitle">Admin tools and management pages.</p>
+      <div class="cp-grid">
+        ${sectionCards}
+      </div>
+    </section>
+
+    <style>
+      .cp-subtitle {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 24px;
+      }
+      .cp-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .cp-card {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 20px 24px;
+        border-radius: 10px;
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--border);
+        text-decoration: none;
+        color: inherit;
+        transition: background .15s, border-color .15s;
+        cursor: pointer;
+      }
+      .cp-card:hover {
+        background: rgba(255,255,255,0.06);
+        border-color: var(--accent, #3b82f6);
+      }
+      .cp-card-icon {
+        font-size: 28px;
+        width: 48px;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        background: rgba(255,255,255,0.04);
+        flex-shrink: 0;
+      }
+      .cp-card-body {
+        flex: 1;
+        min-width: 0;
+      }
+      .cp-card-title {
+        font-weight: 600;
+        font-size: 15px;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .cp-card-desc {
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .cp-badge {
+        background: #ef4444;
+        color: #fff;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 2px 7px;
+        border-radius: 10px;
+        line-height: 1.4;
+      }
+      .cp-card-arrow {
+        font-size: 18px;
+        color: var(--muted);
+        flex-shrink: 0;
+        transition: color .15s;
+      }
+      .cp-card:hover .cp-card-arrow {
+        color: var(--accent, #3b82f6);
+      }
+    </style>
+  `;
+
+  res.send(renderLayout({ title: 'Admin Panel', user, isAdmin, content, layoutClass: 'dashboard-full' }));
 });
 
 /* ===========================
@@ -7813,7 +8257,10 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
     { key: 'world-map',       label: 'Route Map',           icon: '🗺️', desc: 'Interactive world map with live flights' },
     { key: 'my-slots',        label: 'My Slots / Bookings', icon: '✈️', desc: 'Personal slot and booking overview' },
     { key: 'atc',             label: 'WF Slot Management',  icon: '🎧', desc: 'Controller departure management view' },
-    { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' }
+    { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' },
+    { key: 'arrival-info',    label: 'Arrival Info',         icon: '🛬', desc: 'Arrival banner on airport portal pages' },
+    { key: 'departure-info',  label: 'Departure Info',       icon: '🛫', desc: 'Departure banner on airport portal pages' },
+    { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
   ];
 
   const toggleRows = pages.map(p => {
@@ -7840,6 +8287,40 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
   }).join('');
 
   const content = `
+    <section class="card card-full">
+      <h2>Site Banner</h2>
+      <p class="settings-subtitle">
+        Display an announcement banner at the top of every page.
+      </p>
+
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <span class="settings-row-icon">📢</span>
+          <div>
+            <div class="settings-row-label">Banner Enabled</div>
+            <div class="settings-row-desc">Toggle the site-wide announcement banner</div>
+          </div>
+        </div>
+        <div class="settings-row-controls">
+          <span class="vis-pill ${siteBanner.enabled ? 'vis-on' : 'vis-off'}" id="bannerPill">
+            ${siteBanner.enabled ? 'Visible' : 'Hidden'}
+          </span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="bannerToggle" ${siteBanner.enabled ? 'checked' : ''} />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div style="margin-top:16px;">
+        <label style="display:block;font-size:13px;color:var(--muted);margin-bottom:6px;">Banner Text</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="bannerTextInput" value="${(siteBanner.text || '').replace(/"/g, '&quot;')}" placeholder="Enter banner message..." style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,0.04);color:var(--text);font-size:14px;" />
+          <button id="bannerTextSave" class="action-btn primary" style="white-space:nowrap;">Save Text</button>
+        </div>
+      </div>
+    </section>
+
     <section class="card card-full">
       <h2>Page Visibility</h2>
       <p class="settings-subtitle">
@@ -7961,7 +8442,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
     </style>
 
     <script>
-      document.querySelectorAll('.toggle-switch input').forEach(cb => {
+      document.querySelectorAll('.toggle-switch input[data-page]').forEach(cb => {
         cb.addEventListener('change', async () => {
           const key = cb.dataset.page;
           const enabled = cb.checked;
@@ -7982,10 +8463,62 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
           }
         });
       });
+
+      // Banner toggle
+      document.getElementById('bannerToggle').addEventListener('change', async function() {
+        const enabled = this.checked;
+        const pill = document.getElementById('bannerPill');
+        const res = await fetch('/api/admin/banner', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: 'banner-enabled', value: String(enabled) })
+        });
+        if (res.ok) {
+          pill.textContent = enabled ? 'Visible' : 'Hidden';
+          pill.className = 'vis-pill ' + (enabled ? 'vis-on' : 'vis-off');
+        } else {
+          this.checked = !enabled;
+          alert('Failed to update');
+        }
+      });
+
+      // Banner text save
+      document.getElementById('bannerTextSave').addEventListener('click', async function() {
+        const text = document.getElementById('bannerTextInput').value.trim();
+        const res = await fetch('/api/admin/banner', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: 'banner-text', value: text })
+        });
+        if (res.ok) {
+          this.textContent = 'Saved!';
+          setTimeout(() => { this.textContent = 'Save Text'; }, 1500);
+        } else {
+          alert('Failed to save');
+        }
+      });
     </script>
   `;
 
-  res.send(renderLayout({ title: 'Settings', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+  res.send(renderLayout({ title: 'Page Visibility', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/api/admin/banner', requireAdmin, async (req, res) => {
+  const { key, value } = req.body;
+  if (!['banner-enabled', 'banner-text'].includes(key) || typeof value !== 'string') {
+    return res.status(400).json({ error: 'Invalid key or value' });
+  }
+
+  await prisma.siteSetting.upsert({
+    where: { key },
+    update: { value },
+    create: { key, value }
+  });
+
+  if (key === 'banner-enabled') siteBanner.enabled = value === 'true';
+  if (key === 'banner-text') siteBanner.text = value;
+
+  res.json({ success: true });
 });
 
 app.post('/api/admin/page-visibility', requireAdmin, async (req, res) => {
@@ -9129,6 +9662,50 @@ app.post('/api/tobt/remove', async (req, res) => {
 
 
 
+app.get('/airport-portal', (req, res) => {
+  const user = req.session?.user?.data || null;
+  const isAdmin = user ? ADMIN_CIDS.includes(Number(user.cid)) : false;
+
+  const content = `
+    <section class="card card-full">
+      <h2>Airport Portal</h2>
+      <p style="color:var(--muted);margin-bottom:24px;">Enter an ICAO code to view airport information, charts, scenery, and documentation.</p>
+
+      <form id="portalForm" class="icao-search">
+        <input
+          type="text"
+          id="portalIcao"
+          placeholder="Enter ICAO (e.g. EGLL)"
+          maxlength="4"
+          required
+          autocomplete="off"
+        />
+        <button type="submit">Open Portal</button>
+      </form>
+    </section>
+
+    <script>
+    document.getElementById('portalForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var raw = document.getElementById('portalIcao').value.trim().toUpperCase();
+      var icao = null;
+      if (/^[A-Z]{3}$/.test(raw)) { icao = 'K' + raw; }
+      else if (/^[A-Z]{4}$/.test(raw)) { icao = raw; }
+      else { alert('Please enter a valid ICAO (e.g. LAX or KLAX)'); return; }
+      window.location.href = '/icao/' + icao;
+    });
+    </script>
+  `;
+
+  res.send(renderLayout({
+    title: 'Airport Portal',
+    user,
+    isAdmin,
+    content,
+    layoutClass: 'dashboard-full'
+  }));
+});
+
 app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
   if (!req.session.user || !req.session.user.data) {
     return res.redirect('/');
@@ -9393,24 +9970,68 @@ if (slot.byMe) {
 
     let callsign;
     if (action === 'book') {
-      callsign = await openCallsignModal();
+      callsign = await new Promise(resolve => {
+        const modal = document.getElementById('callsignModal');
+        const input = document.getElementById('callsignModalInput');
+        const confirmBtn = document.getElementById('callsignConfirm');
+        const cancelBtn = document.getElementById('callsignCancel');
+        const errorEl = document.getElementById('modalError');
+
+        modal.classList.remove('hidden');
+        input.value = '';
+        input.focus();
+        if (errorEl) { errorEl.classList.add('hidden'); errorEl.textContent = ''; }
+
+        function cleanup() {
+          confirmBtn.removeEventListener('click', onConfirm);
+          cancelBtn.removeEventListener('click', onCancel);
+          input.removeEventListener('keydown', onKey);
+        }
+        function closeModal() { modal.classList.add('hidden'); if (errorEl) errorEl.classList.add('hidden'); cleanup(); }
+        function showErr(msg) { if (errorEl) { errorEl.textContent = msg; errorEl.classList.remove('hidden'); } input.focus(); }
+
+        async function onConfirm() {
+          const value = input.value.trim();
+          if (!value) return;
+          if (!/^[0-9]+$/.test(value)) { showErr('Please enter a valid numeric CID.'); return; }
+
+          const r = await fetch('/api/tobt/book', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slotKey, callsign: value })
+          });
+
+          if (!r.ok) {
+            const err = await r.json();
+            showErr(err.error || 'Booking failed. Please try again.');
+            return;
+          }
+
+          closeModal();
+          resolve(value);
+        }
+
+        function onCancel() { closeModal(); resolve(null); }
+        function onKey(e) { if (e.key === 'Enter') onConfirm(); if (e.key === 'Escape') onCancel(); }
+
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+        input.addEventListener('keydown', onKey);
+      });
       if (!callsign) return;
-      callsign = callsign.trim().toUpperCase();
+    } else {
+      const res = await fetch('/api/tobt/' + action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotKey, callsign })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        showBookingError(err.error || 'Action failed. Please try again.');
+        return;
+      }
     }
-
-    const res = await fetch('/api/tobt/' + action, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slotKey, callsign })
-    });
-
-    if (!res.ok) {
-  const err = await res.json();
-  showBookingError(
-    err.error || 'Booking failed. Please try again.'
-  );
-  return;
-}
 
 
     if (action === 'book') {
@@ -9627,7 +10248,7 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
            <thead>
               <tr>
                 <th class="col-wf-sector">WF Sector</th>
-                <th class="col-callsign">Callsign</th>
+                <th class="col-callsign">CID</th>
                 <th class="col-departure">Departure</th>
                 <th class="col-destination">Destination</th>
                 <th class="col-tobt">TOBT</th>
@@ -9643,23 +10264,7 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
     <tr>
   <td class="col-wf-sector">${r.wfSector}</td>
 
-  <td class="col-callsign">
-  <span class="callsign-text">${r.callsign}</span>
-  <button
-    class="callsign-edit-btn"
-    title="Edit callsign"
-    data-slotkey="${r.slotKey}"
-    data-callsign="${r.callsign}"
-    aria-label="Edit callsign">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-     stroke="currentColor" stroke-width="2"
-     stroke-linecap="round" stroke-linejoin="round">
-  <path d="M12 20h9"/>
-  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>
-</svg>
-
-  </button>
-</td>
+  <td class="col-callsign">${r.cid || cid}</td>
 
   <td class="col-departure"><a href="/icao/${r.from}">${r.from}</a></td>
   <td class="col-destination"><a href="/icao/${r.to}">${r.to}</a></td>
@@ -9794,9 +10399,10 @@ app.get('/logout', (req, res) => {
       return res.status(500).send('Logout failed');
     }
 
-    // IMPORTANT: must match session name
     res.clearCookie('worldflight.sid', {
-      path: '/'
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax'
     });
 
     return res.redirect('/');

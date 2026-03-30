@@ -26,7 +26,10 @@
       "Bash(node seed-2014-visited.js)",
       "Bash(rm seed-2014-visited.js)",
       "Bash(node seed-2013-visited.js)",
-      "Bash(rm seed-2013-visited.js)"
+      "Bash(rm seed-2013-visited.js)",
+      "Bash(node -c index.js)",
+      "Bash(node -c layout.js)",
+      "Bash(node -c auth/callback.js)"
     ]
   }
 }

@@ -56,9 +56,64 @@ export default async function vatsimCallback(req, res) {
 
     req.session.user = userResponse.data;
 
-    const redirectTo = req.session.returnTo || '/schedule';
+    const redirectTo = req.session.returnTo || '/';
 delete req.session.returnTo;
-return res.redirect(redirectTo);
+
+return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Logging In...</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    .login-overlay-screen {
+      position: fixed;
+      inset: 0;
+      background: var(--bg, #0b1220);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .login-overlay-screen img {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      margin-bottom: 20px;
+    }
+    .login-overlay-screen h2 {
+      color: var(--text, #e2e8f0);
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0 0 8px;
+    }
+    .login-overlay-screen p {
+      color: var(--muted, #94a3b8);
+      font-size: 14px;
+    }
+    .login-spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: var(--accent, #3b82f6);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-top: 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="login-overlay-screen">
+    <img src="/logo.png" alt="WorldFlight" />
+    <h2>Logging In...</h2>
+    <p>Welcome back, ${req.session.user?.data?.personal?.name_full || 'pilot'}.</p>
+    <div class="login-spinner"></div>
+  </div>
+  <script>setTimeout(function(){ window.location.href = ${JSON.stringify(redirectTo)}; }, 800);</script>
+</body>
+</html>`);
 
 
   } catch (err) {
