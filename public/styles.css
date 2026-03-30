@@ -186,6 +186,7 @@ button:disabled, input:disabled, select:disabled{
   color: #cbd5f5;
   text-decoration:none;
   transition: background .2s ease, color .2s ease, transform .15s ease;
+  position: relative;
 }
 .nav-item:hover{
   background: rgba(255,255,255,0.06);
@@ -217,6 +218,27 @@ button:disabled, input:disabled, select:disabled{
 .sidebar.collapsed .label,
 .sidebar.collapsed .nav-label{
   display:none;
+}
+
+/* Sidebar tooltip (JS-driven, fixed position) */
+.sidebar-tooltip {
+  position: fixed;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 9999;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.sidebar-tooltip.visible {
+  opacity: 1;
 }
 
 /* Body offset (your JS toggles body.sidebar-collapsed) */
@@ -2797,6 +2819,29 @@ html[data-map-theme="light"] .runway-label > div {
   align-items: stretch;
 }
 
+.icao-top-row.two-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  align-items: stretch;
+}
+.icao-top-row.two-cols > div {
+  min-width: 0;
+}
+.controllers-heading {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #e2e8f0);
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+}
+.controllers-src {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted, #94a3b8);
+}
+
 
 /* Critical: allow grid children to shrink */
 .icao-top-row.three-cols > div {
@@ -2922,7 +2967,8 @@ html[data-map-theme="light"] .runway-label > div {
 }
 
 /* ICAO – Online Controllers panel */
-.icao-top-row.three-cols .atc-list {
+.icao-top-row.three-cols .atc-list,
+.icao-top-row.two-cols .atc-list {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -2932,7 +2978,8 @@ html[data-map-theme="light"] .runway-label > div {
 }
 
 /* Individual controller row */
-.icao-top-row.three-cols .atc-item {
+.icao-top-row.three-cols .atc-item,
+.icao-top-row.two-cols .atc-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2947,7 +2994,8 @@ html[data-map-theme="light"] .runway-label > div {
 }
 
 /* Callsign */
-.icao-top-row.three-cols .atc-callsign {
+.icao-top-row.three-cols .atc-callsign,
+.icao-top-row.two-cols .atc-callsign {
   font-weight: 700;
   font-size: 14px;
   letter-spacing: 0.4px;
@@ -2955,7 +3003,8 @@ html[data-map-theme="light"] .runway-label > div {
 }
 
 /* Frequency */
-.icao-top-row.three-cols .atc-freq {
+.icao-top-row.three-cols .atc-freq,
+.icao-top-row.two-cols .atc-freq {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   color: var(--accent);
@@ -2963,7 +3012,8 @@ html[data-map-theme="light"] .runway-label > div {
 }
 
 /* Empty state */
-.icao-top-row.three-cols .atc-empty {
+.icao-top-row.three-cols .atc-empty,
+.icao-top-row.two-cols .atc-empty {
   color: var(--muted);
   font-style: italic;
   padding: 8px 4px;

@@ -21,25 +21,25 @@ export default function renderLayout({
   <nav class="sidebar-nav">
     <div class="nav-section">
       <div class="nav-title">Pilots</div>
-      <a href="/" class="nav-item">
+      <a href="/" class="nav-item" data-tooltip="Dashboard">
         <span class="icon">🏠</span>
         <span class="label">Dashboard</span>
       </a>
-      ${pv('schedule') ? `<a href="/schedule" class="nav-item">
+      ${pv('schedule') ? `<a href="/schedule" class="nav-item" data-tooltip="WF Schedule">
         <span class="icon">🗓️</span>
         <span class="label">WF Schedule</span>
       </a>` : ''}
 
-      <a href="/airport-portal" class="nav-item">
-  <span class="icon">🛫</span>
-  <span class="label">Airport Portal</span>
-</a>
+      <a href="/airport-portal" class="nav-item" data-tooltip="Airport Portal">
+        <span class="icon">🛫</span>
+        <span class="label">Airport Portal</span>
+      </a>
 
-      ${pv('world-map') ? `<a href="/wf/world-map" class="nav-item">
+      ${pv('world-map') ? `<a href="/wf/world-map" class="nav-item" data-tooltip="Route Map">
         <span class="icon">🗺️</span>
         <span class="label">Route Map</span>
       </a>` : ''}
-      ${pv('my-slots') ? `<a href="/my-slots" class="nav-item">
+      ${pv('my-slots') ? `<a href="/my-slots" class="nav-item" data-tooltip="My Slots / Bookings">
         <span class="icon">✈️</span>
         <span class="label">My Slots / Bookings</span>
       </a>` : ''}
@@ -47,11 +47,11 @@ export default function renderLayout({
 
     ${pv('suggest-airport') ? `<div class="nav-section">
       <div class="nav-title">Suggestions</div>
-      <a href="/suggest-airport" class="nav-item">
+      <a href="/suggest-airport" class="nav-item" data-tooltip="Suggest Airport">
         <span class="icon">💡</span>
         <span class="label">Suggest Airport</span>
       </a>
-      <a href="/view-suggestions" class="nav-item">
+      <a href="/view-suggestions" class="nav-item" data-tooltip="View Suggestions">
         <span class="icon">📊</span>
         <span class="label">View Suggestions</span>
       </a>
@@ -59,7 +59,7 @@ export default function renderLayout({
 
     ${pv('atc') ? `<div class="nav-section">
       <div class="nav-title">Controllers</div>
-      <a href="/atc" class="nav-item">
+      <a href="/atc" class="nav-item" data-tooltip="WF Slot Management">
         <span class="icon">🎧</span>
         <span class="label">WF Slot Management</span>
       </a>
@@ -68,7 +68,7 @@ export default function renderLayout({
     ${isAdmin ? `
     <div class="nav-section nav-admin">
       <div class="nav-title">Admin</div>
-      <a href="/admin/control-panel" class="nav-item">
+      <a href="/admin/control-panel" class="nav-item" data-tooltip="Admin Panel">
         <span class="icon">🛠️</span>
         <span class="label">
           Admin Panel
@@ -485,12 +485,7 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       localStorage.setItem('sidebarCollapsed', collapsed);
     }
 
-    const saved = localStorage.getItem('sidebarCollapsed') === 'true';
-    if (saved !== null) {
-      setCollapsed(saved === 'true');
-    } else {
-      setCollapsed(window.innerWidth < 900);
-    }
+    setCollapsed(true);
 
     toggle.addEventListener('click', () => {
       setCollapsed(!sidebar.classList.contains('collapsed'));
@@ -515,6 +510,26 @@ if (userToggle && userMenu) {
     userMenu.classList.remove('open');
   });
 }
+
+  // ===== SIDEBAR TOOLTIPS =====
+  const tip = document.createElement('div');
+  tip.className = 'sidebar-tooltip';
+  document.body.appendChild(tip);
+
+  document.querySelectorAll('.nav-item[data-tooltip]').forEach(item => {
+    item.addEventListener('mouseenter', () => {
+      if (!sidebar || !sidebar.classList.contains('collapsed')) return;
+      const rect = item.getBoundingClientRect();
+      tip.textContent = item.dataset.tooltip;
+      tip.style.left = (rect.right + 12) + 'px';
+      tip.style.top = (rect.top + rect.height / 2) + 'px';
+      tip.style.transform = 'translateY(-50%)';
+      tip.classList.add('visible');
+    });
+    item.addEventListener('mouseleave', () => {
+      tip.classList.remove('visible');
+    });
+  });
 
 })();
 </script>

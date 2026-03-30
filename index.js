@@ -5477,9 +5477,9 @@ app.get('/icao/:icao', async (req, res) => {
 
   <section class="card">
 
-  <div class="icao-top-row three-cols">
+  <div class="icao-top-row two-cols">
 
-    <!-- LEFT: Upcoming Departures -->
+    <!-- DEPARTURES TABLE (commented out)
     <div class="icao-deps">
   <div class="deps-scroll">
     <table class="departures-table departures-table--compact">
@@ -5496,10 +5496,11 @@ app.get('/icao/:icao', async (req, res) => {
     </table>
   </div>
 </div>
+    -->
 
-
-    <!-- MIDDLE: Online Controllers -->
+    <!-- LEFT: Online Controllers -->
     <div class="controllers-card">
+    <h3 class="controllers-heading">Online Controllers <span class="controllers-src">(VATSIM)</span></h3>
     <div class="controllers-scroll">
     <ul id="onlineControllers" class="atc-list">
   <li class="atc-empty">Loading ATC...</li>
