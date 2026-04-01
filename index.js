@@ -1574,6 +1574,11 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
 
   const firstName = user?.personal?.name_first || '';
   const lastName = user?.personal?.name_last || '';
+  const userEmail = user?.personal?.email || '';
+
+  const a = Math.floor(Math.random() * 9) + 1;
+  const b = Math.floor(Math.random() * 9) + 1;
+  const captchaAnswer = a + b;
 
   const content = `
   <div class="suggest-layout">
@@ -1627,12 +1632,22 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       <form id="suggestForm">
         <label>
           First Name
-          <input type="text" id="suggestFirst" value="${firstName}" required />
+          <input type="text" id="suggestFirst" value="${firstName}" required ${firstName ? 'readonly' : ''} />
         </label>
 
         <label>
           Last Name
-          <input type="text" id="suggestLast" value="${lastName}" required />
+          <input type="text" id="suggestLast" value="${lastName}" required ${lastName ? 'readonly' : ''} />
+        </label>
+
+        <label>
+          Email Address${userEmail ? '' : ' (optional)'}
+          <input type="email" id="suggestEmail" value="${userEmail}" placeholder="${userEmail ? 'you@example.com' : 'Optional — you@example.com'}" />
+        </label>
+
+        <label class="suggest-checkbox">
+          <input type="checkbox" id="suggestNotify" />
+          <span>Notify me when the WorldFlight route is announced</span>
         </label>
 
         <label>
@@ -1669,9 +1684,10 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
         </label>
 
         <label>
-          Email or Discord ID
-          <input type="text" id="suggestContact" required placeholder="you@example.com or User#1234" />
+          Anti-bot check: What is ${a} + ${b}?
+          <input type="text" id="suggestCaptcha" inputmode="numeric" required placeholder="Your answer" autocomplete="off" />
         </label>
+        <input type="hidden" id="captchaAnswer" value="${captchaAnswer}" />
 
         <div id="suggestMsg" class="modal-message hidden" style="margin-top:8px;"></div>
 
@@ -1718,6 +1734,25 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     }
     .suggest-form-card textarea { resize: vertical; }
 
+    .suggest-checkbox {
+      display: flex !important;
+      flex-direction: row !important;
+      align-items: center;
+      gap: 8px;
+      margin-top: 16px !important;
+      cursor: pointer;
+    }
+    .suggest-checkbox input[type="checkbox"] {
+      width: auto;
+      margin: 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .suggest-checkbox span {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
     .icao-visit-info {
       margin-top: 6px;
       padding: 10px 14px;
@@ -1749,6 +1784,21 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
 
   <script>
   (function() {
+    var emailInput = document.getElementById('suggestEmail');
+    var notifyBox = document.getElementById('suggestNotify');
+
+    function updateNotifyState() {
+      var hasEmail = emailInput.value.trim().length > 0;
+      if (!hasEmail) {
+        notifyBox.checked = false;
+        notifyBox.disabled = true;
+      } else {
+        notifyBox.disabled = false;
+      }
+    }
+    emailInput.addEventListener('input', updateNotifyState);
+    updateNotifyState();
+
     var icaoInput = document.getElementById('suggestIcao');
     var visitInfo = document.getElementById('icaoVisitInfo');
     var debounceTimer = null;
@@ -1794,14 +1844,29 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
         }
       }, 300);
     });
-  })();
 
-  document.getElementById('suggestForm').addEventListener('submit', async function(e) {
-    e.preventDefault();
-    var btn = document.getElementById('suggestSubmitBtn');
-    var msg = document.getElementById('suggestMsg');
+    function iataToIcaoSubmit(code) {
+      if (code.length === 3 && /^[A-Z]{3}$/.test(code)) {
+        return code.charAt(0) === 'Y' ? 'C' + code : 'K' + code;
+      }
+      return code;
+    }
 
-    var icao = iataToIcao(document.getElementById('suggestIcao').value.trim().toUpperCase());
+    document.getElementById('suggestForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      var btn = document.getElementById('suggestSubmitBtn');
+      var msg = document.getElementById('suggestMsg');
+
+      var captchaVal = Number(document.getElementById('suggestCaptcha').value.trim());
+      var captchaExpected = Number(document.getElementById('captchaAnswer').value);
+      if (captchaVal !== captchaExpected) {
+        msg.textContent = 'Incorrect answer. Please try again.';
+        msg.style.color = 'var(--danger)';
+        msg.classList.remove('hidden');
+        return;
+      }
+
+      var icao = iataToIcaoSubmit(document.getElementById('suggestIcao').value.trim().toUpperCase());
     if (!/^[A-Z*]{2,4}$/.test(icao) || !/[A-Z]/.test(icao)) {
       msg.textContent = 'Please enter a valid ICAO code or pattern (e.g. EGLL, EG**, K***).';
       msg.style.color = 'var(--danger)';
@@ -1824,7 +1889,9 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
           type: document.getElementById('suggestType').value,
           association: document.getElementById('suggestAssociation').value,
           reason: document.getElementById('suggestReason').value.trim(),
-          contact: document.getElementById('suggestContact').value.trim()
+          contact: document.getElementById('suggestEmail').value.trim(),
+          email: document.getElementById('suggestEmail').value.trim(),
+          notifyRoute: document.getElementById('suggestNotify').checked
         })
       });
 
@@ -1843,7 +1910,6 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       document.getElementById('suggestType').value = 'visit';
       document.getElementById('suggestAssociation').value = '';
       document.getElementById('suggestReason').value = '';
-      document.getElementById('suggestContact').value = '';
 
       setTimeout(function() { btn.disabled = false; btn.textContent = 'Submit Suggestion'; }, 3000);
     } catch(err) {
@@ -1854,6 +1920,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       btn.textContent = 'Submit Suggestion';
     }
   });
+  })();
   </script>
   `;
 
@@ -1864,6 +1931,44 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     content,
     layoutClass: 'dashboard-full'
   }));
+});
+
+app.get('/api/previous-destinations', async (req, res) => {
+  try {
+    const visited = await prisma.wfVisitedAirport.findMany({
+      orderBy: [{ icao: 'asc' }, { year: 'desc' }]
+    });
+
+    // Group visits by ICAO
+    const byIcao = {};
+    for (const v of visited) {
+      if (!byIcao[v.icao]) byIcao[v.icao] = [];
+      byIcao[v.icao].push({ year: v.year, eventName: v.eventName });
+    }
+
+    // Look up airport coordinates and names
+    const icaos = Object.keys(byIcao);
+    const airports = await prisma.airport.findMany({
+      where: { icao: { in: icaos } },
+      select: { icao: true, name: true, lat: true, lon: true }
+    });
+
+    const result = {};
+    for (const ap of airports) {
+      result[ap.icao] = {
+        icao: ap.icao,
+        name: ap.name || null,
+        lat: ap.lat,
+        lon: ap.lon,
+        visits: byIcao[ap.icao] || []
+      };
+    }
+
+    res.json({ airports: result });
+  } catch (err) {
+    console.error('previous-destinations API error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 app.get('/api/airport-visits/:icao', async (req, res) => {
@@ -1886,9 +1991,9 @@ app.get('/api/airport-visits/:icao', async (req, res) => {
 });
 
 app.post('/api/suggest-airport', async (req, res) => {
-  const { firstName, lastName, icao, type, association, reason, contact } = req.body;
+  const { firstName, lastName, icao, type, association, reason, contact, email, notifyRoute } = req.body;
 
-  if (!firstName || !lastName || !icao || !association || !reason || !contact) {
+  if (!firstName || !lastName || !icao || !association || !reason) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
@@ -1907,42 +2012,63 @@ app.post('/api/suggest-airport', async (req, res) => {
       type: suggestionType,
       association,
       reason: reason.trim(),
-      contact: contact.trim(),
+      contact: (contact || '').trim(),
       cid
     }
   });
+
+  // Subscribe to mailing list if opted in
+  if (notifyRoute && email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    try {
+      await prisma.mailingListSubscriber.upsert({
+        where: { email: email.trim().toLowerCase() },
+        update: { firstName: firstName.trim(), lastName: lastName.trim(), cid },
+        create: {
+          email: email.trim().toLowerCase(),
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          cid
+        }
+      });
+    } catch (err) {
+      console.error('Mailing list subscribe error:', err.message);
+    }
+  }
 
   res.json({ success: true });
 });
 
 /* ===== VIEW SUGGESTIONS PAGE ===== */
 app.get('/api/suggestion-stats', async (req, res) => {
-  const all = await prisma.airportSuggestion.findMany({
-    select: { icao: true, type: true }
+  const [recentVisit, recentAvoid] = await Promise.all([
+    prisma.airportSuggestion.findMany({
+      where: { type: { not: 'avoid' } },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: { icao: true, createdAt: true }
+    }),
+    prisma.airportSuggestion.findMany({
+      where: { type: 'avoid' },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: { icao: true, createdAt: true }
+    })
+  ]);
+
+  // Look up airport names
+  const allIcaos = [...new Set([...recentVisit, ...recentAvoid].map(s => s.icao))];
+  const airports = await prisma.airport.findMany({
+    where: { icao: { in: allIcaos } },
+    select: { icao: true, name: true }
   });
+  const nameMap = Object.fromEntries(airports.map(a => [a.icao, a.name]));
 
-  const visitCounts = {};
-  const avoidCounts = {};
+  const addName = s => ({ ...s, name: nameMap[s.icao] || null });
 
-  for (const s of all) {
-    if (s.type === 'avoid') {
-      avoidCounts[s.icao] = (avoidCounts[s.icao] || 0) + 1;
-    } else {
-      visitCounts[s.icao] = (visitCounts[s.icao] || 0) + 1;
-    }
-  }
-
-  const topVisit = Object.entries(visitCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([icao, count]) => ({ icao, count }));
-
-  const topAvoid = Object.entries(avoidCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([icao, count]) => ({ icao, count }));
-
-  res.json({ topVisit, topAvoid, totalVisit: Object.values(visitCounts).reduce((a, b) => a + b, 0), totalAvoid: Object.values(avoidCounts).reduce((a, b) => a + b, 0) });
+  res.json({
+    recentVisit: recentVisit.map(addName),
+    recentAvoid: recentAvoid.map(addName)
+  });
 });
 
 app.get('/view-suggestions', requirePageEnabled('suggest-airport'), (req, res) => {
@@ -1954,17 +2080,17 @@ app.get('/view-suggestions', requirePageEnabled('suggest-airport'), (req, res) =
   <div class="suggestions-view">
 
     <section class="card">
-      <h2>Top 10 Suggested Airports</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Airports the community wants WorldFlight to visit</p>
-      <div id="topVisitList" class="suggestion-list">
+      <h2>Recent Suggestions</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Latest airports the community wants WorldFlight to visit</p>
+      <div id="recentVisitList" class="suggestion-list">
         <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
       </div>
     </section>
 
     <section class="card">
-      <h2>Top 10 Airports to Avoid</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Airports the community has suggested we avoid</p>
-      <div id="topAvoidList" class="suggestion-list">
+      <h2>Recent Avoids</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Latest airports the community has suggested we avoid</p>
+      <div id="recentAvoidList" class="suggestion-list">
         <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
       </div>
     </section>
@@ -1995,47 +2121,31 @@ app.get('/view-suggestions', requirePageEnabled('suggest-airport'), (req, res) =
     }
     .suggestion-rank:hover { background: rgba(255,255,255,0.04); }
 
-    .rank-pos {
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--muted2);
-      min-width: 36px;
-      text-align: center;
-    }
-    .rank-pos.gold { color: #fbbf24; }
-    .rank-pos.silver { color: #94a3b8; }
-    .rank-pos.bronze { color: #cd7f32; }
-
     .rank-icao {
       font-family: monospace;
-      font-size: 18px;
+      font-size: 15px;
       font-weight: 700;
       color: var(--accent);
-      min-width: 70px;
+      min-width: 56px;
     }
 
-    .rank-bar-wrap {
+    .rank-name {
       flex: 1;
-      margin: 0 16px;
-      height: 8px;
-      background: rgba(255,255,255,0.05);
-      border-radius: 4px;
-      overflow: hidden;
-    }
-    .rank-bar {
-      height: 100%;
-      border-radius: 4px;
-      transition: width .5s ease;
-    }
-    .rank-bar.visit { background: var(--accent); }
-    .rank-bar.avoid { background: var(--danger); }
-
-    .rank-count {
-      font-weight: 600;
-      font-size: 14px;
+      font-size: 13px;
       color: var(--text);
-      min-width: 50px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-left: 8px;
+    }
+
+    .rank-time {
       text-align: right;
+      flex-shrink: 0;
+      margin-left: 12px;
+      font-size: 12px;
+      color: var(--muted2);
+      white-space: nowrap;
     }
 
     .suggestion-empty {
@@ -2051,31 +2161,37 @@ app.get('/view-suggestions', requirePageEnabled('suggest-airport'), (req, res) =
     var res = await fetch('/api/suggestion-stats');
     var data = await res.json();
 
-    function renderList(containerId, items, barClass) {
+    function timeAgo(dateStr) {
+      var diff = Date.now() - new Date(dateStr).getTime();
+      var mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      var hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      var days = Math.floor(hrs / 24);
+      if (days < 30) return days + 'd ago';
+      var months = Math.floor(days / 30);
+      return months + 'mo ago';
+    }
+
+    function renderList(containerId, items, dotClass) {
       var el = document.getElementById(containerId);
       if (!items.length) {
         el.innerHTML = '<div class="suggestion-empty">No suggestions yet. Be the first to <a href="/suggest-airport" style="color:var(--accent);">suggest an airport</a>!</div>';
         return;
       }
 
-      var max = items[0].count;
-
-      el.innerHTML = items.map(function(item, i) {
-        var posClass = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
-        var pct = Math.round((item.count / max) * 100);
-        var voteWord = item.count === 1 ? 'vote' : 'votes';
-
+      el.innerHTML = items.map(function(item) {
         return '<div class="suggestion-rank">' +
-          '<span class="rank-pos ' + posClass + '">#' + (i + 1) + '</span>' +
           '<span class="rank-icao">' + item.icao + '</span>' +
-          '<div class="rank-bar-wrap"><div class="rank-bar ' + barClass + '" style="width:' + pct + '%"></div></div>' +
-          '<span class="rank-count">' + item.count + ' ' + voteWord + '</span>' +
+          (item.name ? '<span class="rank-name">' + item.name + '</span>' : '') +
+          '<span class="rank-time">' + timeAgo(item.createdAt) + '</span>' +
         '</div>';
       }).join('');
     }
 
-    renderList('topVisitList', data.topVisit, 'visit');
-    renderList('topAvoidList', data.topAvoid, 'avoid');
+    renderList('recentVisitList', data.recentVisit, 'visit');
+    renderList('recentAvoidList', data.recentAvoid, 'avoid');
   })();
   </script>
   `;
@@ -3175,10 +3291,11 @@ app.get('/', (req, res) => {
 
   const allPages = [
     { title: '2026 Schedule',      desc: 'View the full WorldFlight 2026 event schedule with departure flows and times.', icon: '🗓️', href: '/schedule',           public: true,  visKey: 'schedule' },
+    { title: 'Route Map',          desc: 'Interactive map showing all WorldFlight routes and airports.',                   icon: '🗺️', href: '/wf/world-map',        public: false, visKey: 'world-map' },
+    { title: 'Airport Portal',     desc: 'Look up airport information, charts, scenery, and documentation.',              icon: '🛫', href: '/airport-portal',      public: true },
     { title: 'Suggest Airport',    desc: 'Submit your airport suggestions for upcoming WorldFlight events.',              icon: '💡', href: '/suggest-airport',     public: true,  visKey: 'suggest-airport' },
     { title: 'View Suggestions',   desc: 'Browse and vote on community airport suggestions.',                             icon: '📊', href: '/view-suggestions',    public: true,  visKey: 'suggest-airport' },
-    { title: 'Airport Portal',     desc: 'Look up airport information, charts, scenery, and documentation.',              icon: '🛫', href: '/airport-portal',      public: true },
-    { title: 'Route Map',          desc: 'Interactive map showing all WorldFlight routes and airports.',                   icon: '🗺️', href: '/wf/world-map',        public: false, visKey: 'world-map' },
+    { title: 'Previous Destinations', desc: 'Explore every airport WorldFlight has visited over the years.',                icon: '📍', href: '/previous-destinations', public: true },
     { title: 'My Slots / Bookings',desc: 'Manage your booked departure and arrival slots.',                               icon: '✈️', href: '/my-slots',            public: false, visKey: 'my-slots' },
     { title: 'WF Slot Management', desc: 'Controller tools for managing WorldFlight ATC slots.',                          icon: '🎧', href: '/atc',                 public: false, visKey: 'atc' },
     { title: 'Admin Panel',        desc: 'Manage settings, page visibility, and site configuration.',                    icon: '🛠️', href: '/admin/control-panel', public: false, adminOnly: true },
@@ -3760,7 +3877,7 @@ app.get('/wf/world-map', requireLogin, requirePageEnabled('world-map'), (req, re
       <div id="wfWorldMap"></div>
 
       <!-- Optional overlay title -->
-      
+
     </div>
 
     <script>
@@ -3780,6 +3897,27 @@ app.get('/wf/world-map', requireLogin, requirePageEnabled('world-map'), (req, re
     isAdmin,
     content,
     layoutClass: 'dashboard-full map-layout' // important
+  }));
+});
+
+app.get('/previous-destinations', (req, res) => {
+  const user = req.session.user?.data || null;
+  const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
+
+  const content = `
+    <div class="wf-map-page">
+      <div id="prevDestMap"></div>
+    </div>
+
+    <script src="/previous-destinations.js"></script>
+  `;
+
+  res.send(renderLayout({
+    title: 'Previous Destinations',
+    user,
+    isAdmin,
+    content,
+    layoutClass: 'dashboard-full map-layout'
   }));
 });
 
@@ -7257,6 +7395,13 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
       badge: null
     },
     {
+      title: 'Mailing List',
+      desc: 'Send route announcement emails to subscribers.',
+      icon: '📧',
+      href: '/admin/mailing-list',
+      badge: null
+    },
+    {
       title: 'Page Visibility',
       desc: 'Control page visibility for pilots and controllers.',
       icon: '⚙️',
@@ -8540,6 +8685,278 @@ app.post('/api/admin/page-visibility', requireAdmin, async (req, res) => {
 
 app.get('/api/page-visibility', (req, res) => {
   res.json(pageVisibility);
+});
+
+/* ===== ADMIN: MAILING LIST ===== */
+app.get('/admin/mailing-list', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+
+  const subscribers = await prisma.mailingListSubscriber.findMany({
+    orderBy: { createdAt: 'desc' }
+  });
+
+  const rows = subscribers.map(s => `
+    <tr>
+      <td>${s.email}</td>
+      <td>${[s.firstName, s.lastName].filter(Boolean).join(' ') || '—'}</td>
+      <td>${s.cid || '—'}</td>
+      <td>${new Date(s.createdAt).toLocaleDateString()}</td>
+      <td><button class="ml-remove-btn" data-id="${s.id}">Remove</button></td>
+    </tr>
+  `).join('');
+
+  const content = `
+    <section class="card card-full">
+      <h2>Mailing List</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:8px;">
+        ${subscribers.length} subscriber${subscribers.length !== 1 ? 's' : ''} opted in to route announcements.
+      </p>
+
+      <div class="ml-send-section">
+        <h3>Send Route Announcement</h3>
+        <label>
+          Subject
+          <input type="text" id="mlSubject" value="WorldFlight 2026 — Route Announced!" style="width:100%;" />
+        </label>
+        <label>
+          Message (HTML supported)
+          <textarea id="mlBody" rows="10" placeholder="Write your announcement email here..."></textarea>
+        </label>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:12px;">
+          <button id="mlSendBtn" class="modal-btn modal-btn-submit">Send to All Subscribers</button>
+          <button id="mlTestBtn" class="modal-btn" style="background:var(--border);color:var(--text);">Send Test to Me</button>
+          <span id="mlStatus" style="font-size:13px;color:var(--muted);"></span>
+        </div>
+      </div>
+
+      <h3 style="margin-top:32px;">Subscribers</h3>
+      <div style="overflow-x:auto;">
+        <table class="ml-table">
+          <thead>
+            <tr><th>Email</th><th>Name</th><th>CID</th><th>Subscribed</th><th></th></tr>
+          </thead>
+          <tbody>
+            ${rows || '<tr><td colspan="5" class="empty">No subscribers yet</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <style>
+      .ml-send-section {
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 20px;
+        margin-top: 16px;
+      }
+      .ml-send-section h3 { font-size: 15px; margin-bottom: 12px; }
+      .ml-send-section label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        margin-top: 10px;
+      }
+      .ml-send-section input,
+      .ml-send-section textarea {
+        width: 100%;
+        margin-top: 4px;
+        padding: 8px;
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 6px;
+        color: #e5e7eb;
+        font-family: inherit;
+        font-size: 13px;
+      }
+      .ml-send-section textarea { resize: vertical; }
+
+      .ml-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        margin-top: 8px;
+      }
+      .ml-table th {
+        text-align: left;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .ml-table td {
+        padding: 8px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.04);
+        color: var(--text);
+      }
+      .ml-remove-btn {
+        background: none;
+        border: 1px solid var(--danger, #ef4444);
+        color: var(--danger, #ef4444);
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .ml-remove-btn:hover {
+        background: var(--danger, #ef4444);
+        color: #fff;
+      }
+    </style>
+
+    <script>
+    (function() {
+      // Remove subscriber
+      document.querySelectorAll('.ml-remove-btn').forEach(function(btn) {
+        btn.addEventListener('click', async function() {
+          if (!confirm('Remove this subscriber?')) return;
+          var id = btn.dataset.id;
+          var res = await fetch('/admin/api/mailing-list/' + id, { method: 'DELETE' });
+          if (res.ok) btn.closest('tr').remove();
+        });
+      });
+
+      // Send email
+      document.getElementById('mlSendBtn').addEventListener('click', async function() {
+        if (!confirm('Send this email to ALL ${subscribers.length} subscribers?')) return;
+        await sendMail(false);
+      });
+
+      document.getElementById('mlTestBtn').addEventListener('click', async function() {
+        await sendMail(true);
+      });
+
+      async function sendMail(testOnly) {
+        var btn = testOnly ? document.getElementById('mlTestBtn') : document.getElementById('mlSendBtn');
+        var status = document.getElementById('mlStatus');
+        var subject = document.getElementById('mlSubject').value.trim();
+        var body = document.getElementById('mlBody').value.trim();
+
+        if (!subject || !body) {
+          status.textContent = 'Subject and message are required.';
+          status.style.color = 'var(--danger)';
+          return;
+        }
+
+        btn.disabled = true;
+        status.textContent = 'Sending...';
+        status.style.color = 'var(--muted)';
+
+        try {
+          var res = await fetch('/admin/api/mailing-list/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subject: subject, body: body, testOnly: testOnly })
+          });
+          var data = await res.json();
+          if (data.success) {
+            status.textContent = testOnly ? 'Test email sent!' : 'Sent to ' + data.sent + ' subscribers!';
+            status.style.color = 'var(--success)';
+          } else {
+            throw new Error(data.error || 'Failed');
+          }
+        } catch(err) {
+          status.textContent = err.message;
+          status.style.color = 'var(--danger)';
+        }
+        btn.disabled = false;
+      }
+    })();
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'Mailing List', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.delete('/admin/api/mailing-list/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await prisma.mailingListSubscriber.delete({ where: { id } });
+    res.json({ success: true });
+  } catch {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+app.post('/admin/api/mailing-list/send', requireAdmin, async (req, res) => {
+  const { subject, body, testOnly } = req.body;
+
+  if (!subject || !body) {
+    return res.status(400).json({ error: 'Subject and body are required' });
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+
+  const from = process.env.SMTP_FROM || '"WorldFlight" <noreply@worldflight.center>';
+
+  const htmlEmail = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8" /></head>
+<body style="margin:0;padding:0;background:#020617;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#020617;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;background:#0b1220;border:1px solid #1e293b;border-radius:16px;overflow:hidden;">
+          <tr>
+            <td style="background:linear-gradient(135deg,#0f172a,#1e293b);padding:32px;text-align:center;">
+              <img src="https://planning.worldflight.center/logo.png" width="64" height="64" style="border-radius:50%;" alt="WorldFlight" />
+              <h1 style="color:#38bdf8;font-size:22px;margin:16px 0 0;">WorldFlight</h1>
+              <p style="color:#94a3b8;font-size:13px;margin:4px 0 0;">Route Announcement</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px;">
+              <div style="color:#e5e7eb;font-size:15px;line-height:1.7;">
+                ${body}
+              </div>
+              <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;" />
+              <p style="color:#94a3b8;font-size:12px;margin:0;text-align:center;">
+                You received this because you opted in to WorldFlight route announcements.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  if (testOnly) {
+    const adminEmail = req.session.user.data.personal?.email;
+    if (!adminEmail) return res.status(400).json({ error: 'No email on your VATSIM account' });
+
+    try {
+      await transporter.sendMail({ from, to: adminEmail, subject, html: htmlEmail });
+      return res.json({ success: true, sent: 1 });
+    } catch (err) {
+      return res.status(500).json({ error: 'Failed to send: ' + err.message });
+    }
+  }
+
+  // Send to all subscribers
+  const subscribers = await prisma.mailingListSubscriber.findMany({ select: { email: true } });
+  let sent = 0;
+
+  for (const sub of subscribers) {
+    try {
+      await transporter.sendMail({ from, to: sub.email, subject, html: htmlEmail });
+      sent++;
+    } catch (err) {
+      console.error(`[MAILING] Failed to send to ${sub.email}:`, err.message);
+    }
+  }
+
+  res.json({ success: true, sent });
 });
 
 /* ===== DEPARTURES PAGE ===== */

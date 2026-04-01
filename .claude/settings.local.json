@@ -29,7 +29,10 @@
       "Bash(rm seed-2013-visited.js)",
       "Bash(node -c index.js)",
       "Bash(node -c layout.js)",
-      "Bash(node -c auth/callback.js)"
+      "Bash(node -c auth/callback.js)",
+      "Bash(node scripts/backfill-airport-names.js)",
+      "Bash(tasklist)",
+      "Bash(taskkill //F //PID 2256)"
     ]
   }
 }

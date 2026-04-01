@@ -58,6 +58,7 @@ model User {
 
 model Airport {
   icao    String   @id
+  name    String?
   lat     Float
   lon     Float
   elev    Int?
@@ -156,6 +157,17 @@ model AirportSuggestion {
 
   @@index([icao])
   @@index([type])
+}
+
+model MailingListSubscriber {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  firstName String?
+  lastName  String?
+  cid       Int?
+  createdAt DateTime @default(now())
+
+  @@index([email])
 }
 
 model PageVisibility {

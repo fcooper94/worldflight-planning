@@ -18,6 +18,7 @@ async function run() {
       ) {
         airports.push({
   icao: row.ident.toUpperCase(),
+  name: row.name || null,
   lat: parseFloat(row.latitude_deg),
   lon: parseFloat(row.longitude_deg),
   elev: parseInt(row.elevation_ft || '0', 10)

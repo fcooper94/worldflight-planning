@@ -4993,7 +4993,8 @@ main.dashboard.map-layout .wf-map-page {
 }
 
 /* 4) Leaflet map fills map page */
-main.dashboard.map-layout #wfWorldMap {
+main.dashboard.map-layout #wfWorldMap,
+main.dashboard.map-layout #prevDestMap {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -5047,7 +5048,8 @@ main.dashboard.map-layout {
   overflow: hidden;
   background: #0b0f1a;
 }
-#wfWorldMap {
+#wfWorldMap,
+#prevDestMap {
   position: absolute;
   inset: 0;
   width: 100%;

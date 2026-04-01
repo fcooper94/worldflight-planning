@@ -39,6 +39,10 @@ export default function renderLayout({
         <span class="icon">🗺️</span>
         <span class="label">Route Map</span>
       </a>` : ''}
+      <a href="/previous-destinations" class="nav-item" data-tooltip="Previous Destinations">
+        <span class="icon">📍</span>
+        <span class="label">Past Destinations</span>
+      </a>
       ${pv('my-slots') ? `<a href="/my-slots" class="nav-item" data-tooltip="My Slots / Bookings">
         <span class="icon">✈️</span>
         <span class="label">My Slots / Bookings</span>

@@ -39,6 +39,7 @@ async function main() {
       update: {},
       create: {
         icao: a.ident.toUpperCase(),
+        name: a.name || null,
         lat: toFloat(a.latitude_deg),
         lon: toFloat(a.longitude_deg),
         elev: toInt(a.elevation_ft),
