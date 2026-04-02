@@ -124,6 +124,7 @@ export default function renderLayout({
 
   <button type="button" class="topbar-mobile-logo" id="mobileMenuBtn" aria-label="Menu">
     <img src="/logo.png" alt="WorldFlight" />
+    <span class="mobile-menu-icon">☰</span>
   </button>
 
   ${hideSidebar ? `
