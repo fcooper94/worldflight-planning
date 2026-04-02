@@ -309,10 +309,12 @@ body.no-sidebar .topbar{ padding-left: 0; }
 
 @media (max-width: 900px) {
 
+  header.topbar,
   .topbar {
-    height: auto;
-    padding: 20px 16px 12px;
-    display: grid;
+    height: auto !important;
+    padding: 16px 16px 14px !important;
+    margin-top: 12px;
+    display: grid !important;
     grid-template-columns: 40px 1fr auto;
     grid-template-rows: auto;
     align-items: center;
