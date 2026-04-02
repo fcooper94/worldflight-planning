@@ -122,6 +122,10 @@ export default function renderLayout({
   <!-- ===== TOPBAR ===== -->
   <header class="topbar">
 
+  <button type="button" class="topbar-mobile-logo" id="mobileMenuBtn" aria-label="Menu">
+    <img src="/logo.png" alt="WorldFlight" />
+  </button>
+
   ${hideSidebar ? `
   <a href="/" class="header-brand">
     <img src="/logo.png" alt="WorldFlight" class="header-brand-logo" />
@@ -130,6 +134,7 @@ export default function renderLayout({
       <span class="header-brand-sub">Planning Portal</span>
     </div>
   </a>
+  <div class="header-center header-center-mobile-only">Planning Portal</div>
   ` : `<div class="header-center">${title}</div>`}
 
   <div class="header-right">
@@ -164,7 +169,8 @@ export default function renderLayout({
     </div>
   ` : `
     <a href="/auth/login" class="login-btn">
-      Login with VATSIM
+      <span class="login-full">Login with VATSIM</span>
+      <span class="login-short">Login</span>
     </a>
   `}
 </div>
@@ -482,11 +488,31 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       const sidebar = document.getElementById('sidebar');
   const toggle = document.getElementById('sidebarToggle');
 
+  // Create mobile backdrop
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sidebar-backdrop';
+  document.body.appendChild(backdrop);
+
+  function isMobile() {
+    return window.innerWidth <= 900;
+  }
+
   if (sidebar && toggle) {
     function setCollapsed(collapsed) {
       sidebar.classList.toggle('collapsed', collapsed);
       document.body.classList.toggle('sidebar-collapsed', collapsed);
       localStorage.setItem('sidebarCollapsed', collapsed);
+
+      // Mobile: toggle slide-in class and backdrop
+      if (isMobile()) {
+        sidebar.classList.toggle('mobile-open', !collapsed);
+        backdrop.classList.toggle('visible', !collapsed);
+      } else {
+        sidebar.classList.remove('mobile-open');
+        backdrop.classList.remove('visible');
+      }
+
+      window.dispatchEvent(new Event('sidebar:toggle'));
     }
 
     setCollapsed(true);
@@ -495,8 +521,26 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       setCollapsed(!sidebar.classList.contains('collapsed'));
     });
 
+    backdrop.addEventListener('click', () => {
+      setCollapsed(true);
+    });
+
+    // Mobile logo = menu toggle
+    const mobileBtn = document.getElementById('mobileMenuBtn');
+    if (mobileBtn) {
+      mobileBtn.addEventListener('click', () => {
+        setCollapsed(!sidebar.classList.contains('collapsed'));
+      });
+    }
+
     window.addEventListener('resize', () => {
-      setCollapsed(window.innerWidth < 900);
+      if (isMobile()) {
+        sidebar.classList.remove('mobile-open');
+        backdrop.classList.remove('visible');
+        setCollapsed(true);
+      } else {
+        setCollapsed(window.innerWidth < 900);
+      }
     });
   }
 

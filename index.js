@@ -1589,40 +1589,35 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       <p class="suggest-dates">October 31st &mdash; November 7th</p>
 
       <div class="suggest-body">
-        <p>Please use the form to suggest a WorldFlight 2026 airport.</p>
-        <p>You can request we visit or avoid a specific airport/region/division.</p>
+        <p>
+          We invite you to submit an airport suggestion for WorldFlight 2026.
+          Whether you'd like us to visit or avoid a specific airport, region, or division,
+          your input plays a vital role in shaping the route.
+        </p>
 
         <p class="suggest-contact">
           <a href="mailto:contact@worldflight.center">contact@worldflight.center</a>
         </p>
 
         <p>
-          WorldFlight is a group flight that flies around the world in 7 days.
-          Our main purpose is to raise money for dozens of charities all around the world,
-          with millions of dollars raised since the event started.
+          WorldFlight is an annual circumnavigation of the globe completed over seven days on the
+          VATSIM network. Since its inception, the event has raised millions of dollars for charities
+          worldwide, and regularly sees upwards of 70 aircraft participating in each leg.
         </p>
 
         <p>
-          The event has become one of the most popular events on VATSIM, with it not uncommon
-          to have upwards of 70 aircraft flying each leg.
+          An event of this scale requires careful coordination. If you would like to support
+          WorldFlight, please submit your suggestion using the form and our planning team will
+          be in touch during the route development phase.
         </p>
 
         <p>
-          Naturally, this makes WorldFlight an extremely busy event, and careful planning is required.
+          While it is not always possible to schedule every arrival at a convenient local time,
+          we make every effort to accommodate all regions. Should your airport fall outside peak hours
+          this year, we will endeavour to revisit it at a more suitable time in a future event.
         </p>
 
-        <p>
-          If you would like to support WorldFlight please send us a suggestion and we will be in
-          touch to work with you during our planning phase.
-        </p>
-
-        <p>
-          Obviously, it is impossible to arrive at every airport at a sociable time, however,
-          we do make every effort to make it work. If we arrive at your airport during unsociable
-          hours, we will endeavor to visit it again in future events at a better time.
-        </p>
-
-        <p class="suggest-signoff">Happy Flyings &amp; Thank you for your continued support.</p>
+        <p class="suggest-signoff">Happy flying &mdash; and thank you for your continued support.</p>
       </div>
     </section>
 
@@ -3441,6 +3436,14 @@ app.get('/', (req, res) => {
       @media (max-width: 1000px) {
         .dash-grid {
           grid-template-columns: repeat(2, 1fr);
+        }
+      }
+      @media (max-width: 900px) {
+        .header-brand {
+          display: none;
+        }
+        .dash-wrapper {
+          padding: 16px;
         }
       }
       @media (max-width: 600px) {
