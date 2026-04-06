@@ -5725,7 +5725,7 @@ app.get('/icao/:icao', async (req, res) => {
       <tr>
         <th>File Name</th>
         <th>Type</th>
-        <th>Last Updated</th>
+        <th class="hide-mobile">Last Updated</th>
         <th>Submitted By</th>
       </tr>
     </thead>
@@ -6034,6 +6034,7 @@ vatsimList.forEach(function (atis) {
               '<div class="atis-text">' +
                 escapeHtml(atis.text) +
               '</div>' +
+              '<button class="atis-expand-btn" onclick="this.previousElementSibling.classList.toggle(&quot;atis-expanded&quot;);this.textContent=this.previousElementSibling.classList.contains(&quot;atis-expanded&quot;)?&quot;Hide ATIS ▲&quot;:&quot;Show full ATIS ▼&quot;">Show full ATIS ▼</button>' +
             '</div>' +
           '</div>';
 
@@ -6066,6 +6067,7 @@ vatsimList.forEach(function (atis) {
               '<div class="atis-text">' +
                 escapeHtml(faa.text) +
               '</div>' +
+              '<button class="atis-expand-btn" onclick="this.previousElementSibling.classList.toggle(&quot;atis-expanded&quot;);this.textContent=this.previousElementSibling.classList.contains(&quot;atis-expanded&quot;)?&quot;Hide ATIS ▲&quot;:&quot;Show full ATIS ▼&quot;">Show full ATIS ▼</button>' +
             '</div>' +
           '</div>';
 
@@ -6163,7 +6165,7 @@ function loadAirportDocs(icao) {
             '<tr>' +
               '<td><a href="' + d.url + '" target="_blank">' + d.filename + '</a></td>' +
               '<td>' + d.type + '</td>' +
-              '<td>' + new Date(d.updated).toLocaleDateString('en-GB') + '</td>' +
+              '<td class="hide-mobile">' + new Date(d.updated).toLocaleDateString('en-GB') + '</td>' +
               '<td>' + d.submittedBy + '</td>' +
             '</tr>'
           ).join('')
@@ -6477,8 +6479,8 @@ if (!window.IS_LOGGED_IN && hint) {
             '<tr>' +
               '<th>Sim</th>' +
               '<th>Name</th>' +
-              '<th>Developer</th>' +
-              '<th>Store</th>' +
+              '<th class="hide-mobile">Developer</th>' +
+              '<th class="hide-mobile">Store</th>' +
               '<th>Type</th>' +
             '</tr>' +
           '</thead>' +
@@ -6489,8 +6491,8 @@ if (!window.IS_LOGGED_IN && hint) {
     '<td><a href="' + r.url + '" target="_blank" rel="noopener">' +
       r.name +
     '</a></td>' +
-    '<td>' + (r.developer || '-') + '</td>' +
-    '<td>' + (r.store || '-') + '</td>' +
+    '<td class="hide-mobile">' + (r.developer || '-') + '</td>' +
+    '<td class="hide-mobile">' + (r.store || '-') + '</td>' +
     '<td>' +
       '<span class="type-pill ' + r.type.toLowerCase() + '">' +
         r.type +
@@ -6526,7 +6528,7 @@ if (!window.IS_LOGGED_IN && hint) {
 
 
   res.send(renderLayout({
-    title: `${icao} Airport Portal`,
+    title: `${icao} <span class="hide-mobile">Airport </span>Portal`,
     user: req.session?.user?.data,
     isAdmin: ADMIN_CIDS.includes(Number(req.session?.user?.data?.cid)),
     content,

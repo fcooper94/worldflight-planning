@@ -112,7 +112,7 @@ export default function renderLayout({
 
 </head>
 
-<body${hideSidebar ? ' class="no-sidebar"' : ''}>
+<body class="${[hideSidebar ? 'no-sidebar' : '', layoutClass.includes('map-layout') ? 'map-layout-page' : ''].filter(Boolean).join(' ')}">
 
   ${hideSidebar ? '' : sidebarHtml}
 
@@ -145,7 +145,7 @@ export default function renderLayout({
   ${user ? `
     <div class="user-menu">
       <button id="userMenuToggle" class="user-trigger">
-        Welcome, ${user.personal?.name_full}
+        <span class="hide-mobile">Welcome, </span>${user.personal?.name_full}
         <span class="chevron">▾</span>
       </button>
 

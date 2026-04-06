@@ -108,12 +108,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const bounds = L.latLngBounds([[airport.lat, airport.lon]]);
 
-      L.circleMarker([airport.lat, airport.lon], {
-        radius: 6,
-        color: '#38bdf8',
-        fillOpacity: 0.12
-      }).addTo(map);
-
       aircraft.forEach(ac => {
         if (!ac.lat || !ac.lon) return;
         bounds.extend([ac.lat, ac.lon]);
