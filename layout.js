@@ -80,6 +80,7 @@ export default function renderLayout({
         </span>
       </a>
     </div>
+
     ` : ''}
   </nav>
 </aside>`;
@@ -189,8 +190,15 @@ export default function renderLayout({
     ${content}
   </main>
 
+  ${isAdmin ? `
+  <footer class="admin-connected-footer">
+    <span class="admin-footer-label">Connected Users</span>
+    <span id="connectedUsersList" class="admin-footer-users">Loading...</span>
+  </footer>
+  ` : ''}
+
      <!-- ===== CID VERIFICATION MODAL ===== -->
-  <div id="callsignModal" class="modal hidden">
+  <div id="callsignModal" class="modal hidden" style="z-index:20000;">
     <div class="modal-backdrop"></div>
     <div class="modal-card card">
       <h3 id="modalTitle">Confirm Your CID</h3>
@@ -344,15 +352,20 @@ export default function renderLayout({
       if (h3) h3.textContent = title || 'Confirm';
       if (help) help.textContent = message || '';
 
-      // Hide input for confirmations
+      // Hide input and hint for confirmations
       input.style.display = 'none';
+      const hint = card.querySelector('.modal-hint');
+      if (hint) hint.style.display = 'none';
+      const error = card.querySelector('.modal-error');
+      if (error) error.classList.add('hidden');
 
       modal.classList.remove('hidden');
       cancel.focus();
 
       function close(result) {
         modal.classList.add('hidden');
-        input.style.display = ''; // restore
+        input.style.display = '';
+        if (hint) hint.style.display = '';
         confirm.removeEventListener('click', onConfirm);
         cancel.removeEventListener('click', onCancel);
         document.removeEventListener('keydown', onKey);
@@ -516,7 +529,13 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       window.dispatchEvent(new Event('sidebar:toggle'));
     }
 
-    setCollapsed(true);
+    // Wide screens: expand by default, narrow/mobile: collapse
+    const saved = localStorage.getItem('sidebarCollapsed');
+    if (saved !== null) {
+      setCollapsed(saved === 'true');
+    } else {
+      setCollapsed(window.innerWidth <= 2000);
+    }
 
     toggle.addEventListener('click', () => {
       setCollapsed(!sidebar.classList.contains('collapsed'));
@@ -988,6 +1007,75 @@ document.addEventListener('click', async (e) => {
 });
 </script>
 
+
+${isAdmin ? `
+<style>
+  .admin-connected-footer {
+    position: fixed;
+    bottom: 0;
+    left: var(--sidebar-expanded);
+    right: 0;
+    height: 32px;
+    padding: 0 24px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12px;
+    z-index: 50;
+    transition: left .25s ease;
+  }
+  body.sidebar-collapsed .admin-connected-footer {
+    left: var(--sidebar-collapsed);
+  }
+  .admin-connected-footer * {
+    font-size: 12px;
+    line-height: 1;
+    margin: 0; padding: 0;
+  }
+  .admin-footer-label {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .admin-footer-users {
+    color: var(--text);
+  }
+  .cu-dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+    vertical-align: middle;
+    margin-right: 4px;
+  }
+  .cu-entry { margin-left: 12px; }
+</style>
+<script>
+(function() {
+  var container = document.getElementById('connectedUsersList');
+  if (!container) return;
+
+  var sock = typeof io !== 'undefined' ? io({ query: { icao: '' } }) : null;
+  if (!sock) return;
+
+  sock.emit('registerUser', {
+    cid: '${user?.cid || ''}',
+    name: '${user?.personal?.name_full || 'Unknown'}'
+  });
+
+  sock.on('connectedUsersUpdate', function(users) {
+    if (!users.length) {
+      container.innerHTML = '<span class="label" style="color:var(--muted);font-size:11px;">No users online</span>';
+      return;
+    }
+    container.innerHTML = users.map(function(u) {
+      return '<span class="cu-entry"><span class="cu-dot"></span>' + u.cid + ' — ' + (u.name || 'Unknown') + '</span>';
+    }).join('');
+  });
+})();
+</script>
+` : ''}
 
 </body>
 </html>`;

@@ -772,9 +772,12 @@ select{ cursor:pointer; }
   color:#cbd5f5;
 }
 #connectedUsersList{
-  margin-top:8px;
   color:#60a5fa;
   line-height:1.6;
+}
+.admin-connected-footer #connectedUsersList{
+  margin:0;
+  line-height:1;
 }
 
 /* =========================
@@ -1827,7 +1830,7 @@ select{ cursor:pointer; }
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 200;
+  z-index: 10001;
   display: flex;
   align-items: center;
   justify-content: center;

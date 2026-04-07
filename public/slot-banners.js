@@ -142,11 +142,13 @@ window.loadSlotBanners = function (data) {
 ================================ */
 
 document.addEventListener('DOMContentLoaded', function () {
+  if (!/\/icao\/[A-Z]{4}$/i.test(window.location.pathname)) return;
+
   const parts = window.location.pathname.split('/');
   const icao = parts[parts.length - 1].toUpperCase();
 
   fetch('/api/icao/' + icao + '/wf-slots')
-    .then(res => res.json())
-    .then(data => window.loadSlotBanners(data))
-    .catch(err => console.error('Failed to load slot banners', err));
+    .then(function (res) { if (!res.ok) throw new Error(res.status); return res.json(); })
+    .then(function (data) { if (window.loadSlotBanners) window.loadSlotBanners(data); })
+    .catch(function () { /* not an ICAO page */ });
 });

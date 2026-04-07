@@ -308,13 +308,25 @@ const connectedUsers = {};     // { socketId: { cid, position } }
 
 /* ===== DEP FLOW PERSISTENCE ===== */
 async function loadDepFlowsFromDb() {
-  const flows = await prisma.depFlow.findMany();
+  // Migrate orphan rows (eventId=0) to the active event
+  if (activeEventId) {
+    await prisma.depFlow.updateMany({
+      where: { eventId: 0 },
+      data: { eventId: activeEventId }
+    });
+  }
+
+  const flows = await prisma.depFlow.findMany({
+    where: { eventId: activeEventId || 0 }
+  });
+
+  // Clear existing
+  Object.keys(sharedDepFlows).forEach(k => delete sharedDepFlows[k]);
+  Object.keys(sharedFlowTypes).forEach(k => delete sharedFlowTypes[k]);
 
   flows.forEach(f => {
-    // rate
     sharedDepFlows[f.sector] = Number(f.rate) || 0;
 
-    // flow type (default NONE)
     const ft = (f.flowtype || 'NONE').toString().toUpperCase();
     sharedFlowTypes[f.sector] =
       ft === 'SLOTTED' || ft === 'BOOKING_ONLY' || ft === 'NONE'
@@ -322,7 +334,7 @@ async function loadDepFlowsFromDb() {
         : 'NONE';
   });
 
-  console.log(`[DEP FLOW] Loaded ${flows.length} flow rates/types from DB`);
+  console.log(`[DEP FLOW] Loaded ${flows.length} flow rates/types for event ${activeEventId}`);
 }
 
 
@@ -1014,11 +1026,14 @@ function hasOutboundFlow(icao) {
 /* ===== ADMIN CID WHITELIST ===== */
 const ADMIN_CIDS = [10000010, 1303570, 10000005];
 
-/* ===== GOOGLE SHEET ===== */
-const GOOGLE_SHEET_CSV_URL =
+/* ===== GOOGLE SHEET (MULTI-EVENT) ===== */
+const DEFAULT_SHEET_URL =
   'https://docs.google.com/spreadsheets/d/e/2PACX-1vRG6DbmhAQpFmOophiGjjSh_UUGdTo-LA_sNNexrMpkkH2ECHl8eDsdxM24iY8Itw06pUZZXWtvmUNg/pub?output=csv';
 
-let adminSheetCache = [];
+let adminSheetCache = [];          // active event's rows (backward compat)
+const eventSheetCaches = {};       // eventId -> rows[]
+let wfEvents = [];                 // all events from DB
+let activeEventId = null;          // currently active event ID
 let lastDepartureSnapshot = new Set();
 
 const port = process.env.PORT || 8080;
@@ -1328,21 +1343,62 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
   const isAdmin = true;
 
-  const [suggestions, visitedAirports] = await Promise.all([
+  const [suggestions, allVisited] = await Promise.all([
     prisma.airportSuggestion.findMany({ orderBy: { createdAt: 'desc' } }),
-    prisma.wfVisitedAirport.findMany({ select: { icao: true } })
+    prisma.wfVisitedAirport.findMany({ orderBy: { year: 'desc' } })
   ]);
 
-  const visitedSet = new Set(visitedAirports.map(v => v.icao));
+  // Build visit history per ICAO
+  const visitHistory = {}; // icao -> [year, year, ...]
+  for (const v of allVisited) {
+    if (!visitHistory[v.icao]) visitHistory[v.icao] = [];
+    visitHistory[v.icao].push(v.year);
+  }
+
+  const currentYear = new Date().getFullYear();
+  const fiveYearsAgo = currentYear - 5;
+
+  // Color coding: red = >2 in last 5yr, amber = 1 in last 5yr, green = 0 in last 5yr
+  function getVisitColor(icao) {
+    if (/\*/.test(icao)) return 'neutral';
+    const years = visitHistory[icao] || [];
+    const recent = years.filter(y => y >= fiveYearsAgo).length;
+    if (recent > 2) return 'red';
+    if (recent >= 1) return 'amber';
+    return 'green';
+  }
 
   const visits = suggestions.filter(s => s.type !== 'avoid');
   const avoids = suggestions.filter(s => s.type === 'avoid');
+
+  // Top 20 suggested (aggregated by ICAO)
+  const visitCounts = {};
+  for (const s of visits) { visitCounts[s.icao] = (visitCounts[s.icao] || 0) + 1; }
+  const top20Visit = Object.entries(visitCounts).sort((a, b) => b[1] - a[1]).slice(0, 20);
+
+  const avoidCounts = {};
+  for (const s of avoids) { avoidCounts[s.icao] = (avoidCounts[s.icao] || 0) + 1; }
+  const top20Avoid = Object.entries(avoidCounts).sort((a, b) => b[1] - a[1]).slice(0, 20);
+
+  // Top 20 green only (not visited in past 5 years)
+  const top20Green = Object.entries(visitCounts)
+    .filter(([icao]) => getVisitColor(icao) === 'green')
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20);
+
+  // Top 20 suggested by staff (Director or Staff roles)
+  const staffVisits = visits.filter(s =>
+    /director/i.test(s.association) || /staff/i.test(s.association)
+  );
+  const staffCounts = {};
+  for (const s of staffVisits) { staffCounts[s.icao] = (staffCounts[s.icao] || 0) + 1; }
+  const top20Staff = Object.entries(staffCounts).sort((a, b) => b[1] - a[1]).slice(0, 20);
 
   // Unique ICAOs from visit suggestions that we've never been to (exclude wildcards)
   const neverVisitedMap = {};
   for (const s of visits) {
     if (/\*/.test(s.icao)) continue;
-    if (visitedSet.has(s.icao)) continue;
+    if (visitHistory[s.icao]?.length) continue;
     if (!neverVisitedMap[s.icao]) neverVisitedMap[s.icao] = 0;
     neverVisitedMap[s.icao]++;
   }
@@ -1350,13 +1406,24 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
     .sort((a, b) => b[1] - a[1])
     .map(([icao, count]) => ({ icao, count }));
 
+  function getTooltip(icao) {
+    if (/\*/.test(icao)) return 'Wildcard pattern';
+    const years = visitHistory[icao] || [];
+    const recent = years.filter(y => y >= fiveYearsAgo);
+    if (years.length === 0) return 'Never visited';
+    if (recent.length === 0) return 'Not visited in past 5 years. Last: ' + years[0];
+    return 'Visited ' + recent.length + 'x in past 5 years (' + recent.join(', ') + ')';
+  }
+
   function buildRows(list) {
-    if (!list.length) return '<tr><td colspan="7" class="empty">None yet</td></tr>';
+    if (!list.length) return '<tr><td colspan="8" class="empty">None yet</td></tr>';
     return list.map(s => {
       const date = new Date(s.createdAt).toISOString().replace('T', ' ').slice(0, 16);
+      const color = getVisitColor(s.icao);
+      const tooltipText = getTooltip(s.icao);
       return `
         <tr data-icao="${s.icao}" data-name="${s.firstName} ${s.lastName}" data-assoc="${s.association}" data-date="${s.createdAt}">
-          <td><strong>${s.icao}</strong></td>
+          <td><span class="icao-tag icao-${color}" data-tooltip="${tooltipText}"><strong>${s.icao}</strong></span></td>
           <td>${s.firstName} ${s.lastName}</td>
           <td>${s.association}</td>
           <td style="max-width:300px;font-size:12px;">
@@ -1364,6 +1431,7 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
             ${s.reason.length > 100 ? '<button class="reason-expand">Show more</button>' : ''}
           </td>
           <td style="font-size:12px;">${s.contact}</td>
+          <td style="text-align:center;"><input type="checkbox" ${s.notify ? 'checked' : ''} disabled style="accent-color:var(--accent);" /></td>
           <td style="font-size:12px;">${date}</td>
           <td>
             <button class="action-btn btn-delete-suggestion" data-id="${s.id}" style="font-size:12px;">Delete</button>
@@ -1383,6 +1451,7 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
               <th class="sortable" data-sort="assoc">Association <span class="sort-arrow"></span></th>
               <th>Reason</th>
               <th>Contact</th>
+              <th>Notify</th>
               <th class="sortable" data-sort="date">Date <span class="sort-arrow"></span></th>
               <th>Actions</th>
             </tr>
@@ -1397,6 +1466,81 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
   const content = `
     <div style="margin-bottom:24px;">
       <button id="deleteAllSuggestionsBtn" class="action-btn" style="background:var(--danger);color:#fff;">Delete All Suggestions</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px;">
+      <section class="card">
+        <h2 style="color:#4ade80;">Top 20 Suggested to Visit</h2>
+        <div class="top-list">
+          ${top20Visit.length ? top20Visit.map(([icao, count], i) => {
+            const color = getVisitColor(icao);
+            const tooltip = getTooltip(icao);
+            const max = top20Visit[0][1];
+            const pct = Math.round((count / max) * 100);
+            return `<div class="top-row">
+              <span class="top-pos">#${i + 1}</span>
+              <span class="icao-tag icao-${color}" data-tooltip="${tooltip}"><strong>${icao}</strong></span>
+              <div class="top-bar-wrap"><div class="top-bar visit" style="width:${pct}%"></div></div>
+              <span class="top-count">${count}</span>
+            </div>`;
+          }).join('') : '<p style="color:var(--muted);font-size:13px;">No suggestions yet</p>'}
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 style="color:#fbbf24;">Top 20 — Staff Suggestions</h2>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px;">Suggested by Division/vACC Directors &amp; Staff</p>
+        <div class="top-list">
+          ${top20Staff.length ? top20Staff.map(([icao, count], i) => {
+            const color = getVisitColor(icao);
+            const tooltip = getTooltip(icao);
+            const max = top20Staff[0][1];
+            const pct = Math.round((count / max) * 100);
+            return `<div class="top-row">
+              <span class="top-pos">#${i + 1}</span>
+              <span class="icao-tag icao-${color}" data-tooltip="${tooltip}"><strong>${icao}</strong></span>
+              <div class="top-bar-wrap"><div class="top-bar" style="width:${pct}%;background:#fbbf24;"></div></div>
+              <span class="top-count">${count}</span>
+            </div>`;
+          }).join('') : '<p style="color:var(--muted);font-size:13px;">No staff suggestions yet</p>'}
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 style="color:#4ade80;">Top 20 — Not Visited Recently</h2>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px;">Suggested airports not visited in the past 5 years</p>
+        <div class="top-list">
+          ${top20Green.length ? top20Green.map(([icao, count], i) => {
+            const tooltip = getTooltip(icao);
+            const max = top20Green[0][1];
+            const pct = Math.round((count / max) * 100);
+            return `<div class="top-row">
+              <span class="top-pos">#${i + 1}</span>
+              <span class="icao-tag icao-green" data-tooltip="${tooltip}"><strong>${icao}</strong></span>
+              <div class="top-bar-wrap"><div class="top-bar visit" style="width:${pct}%"></div></div>
+              <span class="top-count">${count}</span>
+            </div>`;
+          }).join('') : '<p style="color:var(--muted);font-size:13px;">No green suggestions yet</p>'}
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 style="color:#f87171;">Top 20 Suggested to Avoid</h2>
+        <div class="top-list">
+          ${top20Avoid.length ? top20Avoid.map(([icao, count], i) => {
+            const color = getVisitColor(icao);
+            const tooltip = getTooltip(icao);
+            const max = top20Avoid[0][1];
+            const pct = Math.round((count / max) * 100);
+            return `<div class="top-row">
+              <span class="top-pos">#${i + 1}</span>
+              <span class="icao-tag icao-${color}" data-tooltip="${tooltip}"><strong>${icao}</strong></span>
+              <div class="top-bar-wrap"><div class="top-bar avoid" style="width:${pct}%"></div></div>
+              <span class="top-count">${count}</span>
+            </div>`;
+          }).join('') : '<p style="color:var(--muted);font-size:13px;">No suggestions yet</p>'}
+        </div>
+      </section>
     </div>
 
     <section class="card card-full">
@@ -1416,16 +1560,16 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
     </section>
 
     <section class="card card-full" style="margin-top:24px;">
-      <h2 style="color:#4ade80;">Suggested Airports to Visit</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">${visits.length} suggestion${visits.length !== 1 ? 's' : ''}</p>
+      <h2 style="color:#4ade80;">All Suggestions</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">${visits.length} suggestion${visits.length !== 1 ? 's' : ''} to visit</p>
       <div class="admin-table-scroll">
         ${buildTable('visitTable', buildRows(visits))}
       </div>
     </section>
 
     <section class="card card-full" style="margin-top:24px;">
-      <h2 style="color:#f87171;">Suggested Airports to Avoid</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">${avoids.length} suggestion${avoids.length !== 1 ? 's' : ''}</p>
+      <h2 style="color:#f87171;">All Avoids</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">${avoids.length} suggestion${avoids.length !== 1 ? 's' : ''} to avoid</p>
       <div class="admin-table-scroll">
         ${buildTable('avoidTable', buildRows(avoids))}
       </div>
@@ -1472,6 +1616,61 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
       }
       .reason-expand:hover { text-decoration: underline; }
 
+      /* Color coded ICAO tags */
+      .icao-tag {
+        position: relative;
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 13px;
+        cursor: default;
+      }
+      .icao-green { background: rgba(34,197,94,0.15); color: #4ade80; }
+      .icao-amber { background: rgba(245,158,11,0.15); color: #fbbf24; }
+      .icao-red { background: rgba(239,68,68,0.15); color: #f87171; }
+      .icao-neutral { background: rgba(148,163,184,0.1); color: var(--muted); }
+
+      /* Tooltip on hover */
+      .icao-tooltip {
+        display: none;
+        position: fixed;
+        padding: 5px 10px;
+        background: #1e293b;
+        color: #e5e7eb;
+        font-size: 11px;
+        font-family: monospace;
+        white-space: nowrap;
+        border-radius: 6px;
+        border: 1px solid #334155;
+        pointer-events: none;
+        z-index: 9999;
+      }
+
+      /* Top 20 lists */
+      .top-list { display: flex; flex-direction: column; gap: 4px; max-height: 380px; overflow-y: auto;
+        scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.08) transparent; }
+      .top-list::-webkit-scrollbar { width: 4px; }
+      .top-list::-webkit-scrollbar-track { background: transparent; }
+      .top-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+      .top-row {
+        display: flex; align-items: center; gap: 10px;
+        padding: 6px 10px; border-radius: 6px;
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--border);
+      }
+      .top-row:hover { background: rgba(255,255,255,0.04); }
+      .top-pos { font-size: 13px; font-weight: 700; color: var(--muted2); min-width: 30px; }
+      .top-bar-wrap { flex: 1; height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden; }
+      .top-bar { height: 100%; border-radius: 3px; }
+      .top-bar.visit { background: #4ade80; }
+      .top-bar.avoid { background: #f87171; }
+      .top-count { font-size: 13px; font-weight: 600; color: var(--text); min-width: 30px; text-align: right; }
+
+      @media (max-width: 1000px) {
+        div[style*="grid-template-columns:1fr 1fr"] { grid-template-columns: 1fr !important; }
+      }
+
       .sortable { cursor: pointer; user-select: none; }
       .sortable:hover { color: var(--accent); }
       .sort-arrow { font-size: 10px; margin-left: 4px; }
@@ -1479,8 +1678,28 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
       .sort-arrow.desc::after { content: '▼'; }
     </style>
 
+    <div class="icao-tooltip" id="icaoTooltip"></div>
+
     <script>
     (function() {
+      var tooltip = document.getElementById('icaoTooltip');
+
+      document.addEventListener('mouseover', function(e) {
+        var tag = e.target.closest('.icao-tag[data-tooltip]');
+        if (!tag) { tooltip.style.display = 'none'; return; }
+        var rect = tag.getBoundingClientRect();
+        tooltip.textContent = tag.dataset.tooltip;
+        tooltip.style.display = 'block';
+        tooltip.style.left = rect.left + 'px';
+        tooltip.style.top = (rect.bottom + 6) + 'px';
+      });
+
+      document.addEventListener('mouseout', function(e) {
+        if (e.target.closest('.icao-tag[data-tooltip]')) {
+          tooltip.style.display = 'none';
+        }
+      });
+
       document.querySelectorAll('.sortable-table').forEach(function(table) {
         var currentSort = { key: null, dir: 'asc' };
 
@@ -1655,7 +1874,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
 
         <label>
           Airport ICAO
-          <input type="text" id="suggestIcao" placeholder="e.g. EGLL, EG**, K***" maxlength="4" required autocomplete="off" style="text-transform:uppercase;font-family:monospace;" />
+          <input type="text" id="suggestIcao" placeholder="e.g. EGLL, LAX, EG**, K***" maxlength="4" required autocomplete="off" style="text-transform:uppercase;font-family:monospace;" />
         </label>
         <div id="icaoVisitInfo" class="icao-visit-info hidden"></div>
 
@@ -1728,6 +1947,13 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       color: #4a5568; background: #080d17; cursor: not-allowed;
     }
     .suggest-form-card textarea { resize: vertical; }
+    .suggest-checkbox {
+      display: flex; align-items: center; gap: 8px;
+      margin-top: 14px; font-size: 13px; font-weight: 400; cursor: pointer;
+    }
+    .suggest-checkbox input[type="checkbox"] {
+      width: auto; margin: 0; accent-color: var(--accent);
+    }
 
     .suggest-checkbox {
       display: flex !important;
@@ -1766,6 +1992,11 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       border-color: rgba(34,197,94,0.25);
       color: var(--success);
     }
+    .icao-visit-info.icao-invalid {
+      background: rgba(239,68,68,0.08);
+      border-color: rgba(239,68,68,0.25);
+      color: #f87171;
+    }
     .icao-visit-info .visit-count {
       font-weight: 700;
       color: var(--accent);
@@ -1783,6 +2014,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     var notifyBox = document.getElementById('suggestNotify');
 
     function updateNotifyState() {
+      if (!emailInput || !notifyBox) return;
       var hasEmail = emailInput.value.trim().length > 0;
       if (!hasEmail) {
         notifyBox.checked = false;
@@ -1791,12 +2023,23 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
         notifyBox.disabled = false;
       }
     }
-    emailInput.addEventListener('input', updateNotifyState);
-    updateNotifyState();
+    if (emailInput) {
+      emailInput.addEventListener('input', updateNotifyState);
+      updateNotifyState();
+    }
 
+  })();
+  </script>
+
+  <script>
+  (function() {
     var icaoInput = document.getElementById('suggestIcao');
     var visitInfo = document.getElementById('icaoVisitInfo');
     var debounceTimer = null;
+
+    var submitBtn = document.getElementById('suggestSubmitBtn');
+
+    if (!icaoInput || !visitInfo) return;
 
     function iataToIcao(code) {
       if (code.length === 3 && /^[A-Z]{3}$/.test(code)) {
@@ -1805,34 +2048,77 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       return code;
     }
 
+    window._icaoValid = false;
+    var icaoValid = false;
+
     icaoInput.addEventListener('input', function() {
       clearTimeout(debounceTimer);
+      icaoValid = false; window._icaoValid = false;
+      if (submitBtn) submitBtn.disabled = true;
       var val = icaoInput.value.trim().toUpperCase();
 
-      if (!/^[A-Z*]{2,4}$/.test(val) || !/[A-Z]/.test(val)) {
-        visitInfo.classList.add('hidden');
+      // Wildcards skip airport check
+      if (/[*]/.test(val) && /^[A-Z*]{2,4}$/.test(val) && /[A-Z]/.test(val)) {
+        icaoValid = true; window._icaoValid = true;
+        if (submitBtn) submitBtn.disabled = false;
+        visitInfo.innerHTML = 'Wildcard pattern — applies to a region.';
+        visitInfo.className = 'icao-visit-info visited';
+        return;
+      }
+
+      if (!/^[A-Z]{3,4}$/.test(val)) {
+        if (val.length >= 3) {
+          icaoValid = false; window._icaoValid = false;
+          visitInfo.innerHTML = '<strong>' + val + '</strong> is not a valid ICAO code. ICAO codes are 4 letters (e.g. EGLL, KLAX).';
+          visitInfo.className = 'icao-visit-info icao-invalid';
+        } else {
+          visitInfo.classList.add('hidden');
+        }
         return;
       }
 
       debounceTimer = setTimeout(async function() {
         try {
           var lookup = iataToIcao(val);
-          var res = await fetch('/api/airport-visits/' + lookup);
+          var sugType = document.getElementById('suggestType')?.value || 'visit';
+          var res = await fetch('/api/airport-visits/' + lookup + '?type=' + sugType);
           if (!res.ok) { visitInfo.classList.add('hidden'); return; }
           var data = await res.json();
 
+          if (!data.exists) {
+            icaoValid = false;
+            var name = data.airportName ? ' (' + data.airportName + ')' : '';
+            visitInfo.innerHTML = '<strong>' + data.icao + '</strong> is not a recognised airport in our database. Please check the ICAO code.';
+            visitInfo.className = 'icao-visit-info icao-invalid';
+            return;
+          }
+
+          icaoValid = true; window._icaoValid = true;
+          var nameLabel = data.airportName ? ' — ' + data.airportName : '';
+          var visitText;
+
           if (data.icao === 'YSSY') {
-            visitInfo.innerHTML = 'We start and finish at <span class="visit-count">YSSY</span> every year!';
+            visitText = 'We start and finish at <span class="visit-count">YSSY</span>' + nameLabel + ' every year!';
             visitInfo.className = 'icao-visit-info visited';
           } else if (data.totalVisits > 0) {
-            visitInfo.innerHTML = data.totalVisits === 1
-              ? 'We have visited <span class="visit-count">' + data.icao + '</span> once before. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.'
-              : 'We have visited <span class="visit-count">' + data.icao + '</span> <span class="visit-count">' + data.totalVisits + '</span> times. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.';
+            visitText = data.totalVisits === 1
+              ? '<span class="visit-count">' + data.icao + '</span>' + nameLabel + ' — visited once before. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.'
+              : '<span class="visit-count">' + data.icao + '</span>' + nameLabel + ' — visited <span class="visit-count">' + data.totalVisits + '</span> times. Last visit was <span class="visit-count">' + data.lastVisit + '</span>.';
             visitInfo.className = 'icao-visit-info visited';
           } else {
-            visitInfo.innerHTML =
-              'We have never visited <strong>' + data.icao + '</strong> before — great suggestion!';
+            visitText = '<span class="visit-count">' + data.icao + '</span>' + nameLabel + ' — never visited before. Great suggestion!';
             visitInfo.className = 'icao-visit-info not-visited';
+          }
+
+          // Check for duplicate suggestion (logged-in users only)
+          if (data.alreadySuggested) {
+            icaoValid = false; window._icaoValid = false;
+            if (submitBtn) submitBtn.disabled = true;
+            visitInfo.innerHTML = visitText + '<div style="margin-top:8px;color:#f87171;font-weight:600;">You have already submitted a suggestion for ' + data.icao + '.</div>';
+            visitInfo.className = 'icao-visit-info icao-invalid';
+          } else {
+            if (submitBtn) submitBtn.disabled = false;
+            visitInfo.innerHTML = visitText;
           }
         } catch(err) {
           visitInfo.classList.add('hidden');
@@ -1840,6 +2126,18 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       }, 300);
     });
 
+    // Re-check when type changes (visit/avoid)
+    var typeSelect = document.getElementById('suggestType');
+    if (typeSelect) {
+      typeSelect.addEventListener('change', function() {
+        icaoInput.dispatchEvent(new Event('input'));
+      });
+    }
+  })();
+  </script>
+
+  <script>
+  (function() {
     function iataToIcaoSubmit(code) {
       if (code.length === 3 && /^[A-Z]{3}$/.test(code)) {
         return code.charAt(0) === 'Y' ? 'C' + code : 'K' + code;
@@ -1864,6 +2162,13 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       var icao = iataToIcaoSubmit(document.getElementById('suggestIcao').value.trim().toUpperCase());
     if (!/^[A-Z*]{2,4}$/.test(icao) || !/[A-Z]/.test(icao)) {
       msg.textContent = 'Please enter a valid ICAO code or pattern (e.g. EGLL, EG**, K***).';
+      msg.style.color = 'var(--danger)';
+      msg.classList.remove('hidden');
+      return;
+    }
+
+    if (!window._icaoValid) {
+      msg.textContent = 'This airport is not recognised. Please check the ICAO code.';
       msg.style.color = 'var(--danger)';
       msg.classList.remove('hidden');
       return;
@@ -1980,16 +2285,31 @@ app.get('/api/airport-visits/:icao', async (req, res) => {
     return res.status(400).json({ error: 'Invalid ICAO' });
   }
 
-  const visits = await prisma.wfVisitedAirport.findMany({
-    where: { icao },
-    orderBy: { year: 'desc' }
-  });
+  const cid = Number(req.session?.user?.data?.cid) || null;
+  const sugType = req.query.type === 'avoid' ? 'avoid' : 'visit';
+
+  const queries = [
+    prisma.airport.findUnique({ where: { icao }, select: { icao: true, name: true } }),
+    prisma.wfVisitedAirport.findMany({ where: { icao }, orderBy: { year: 'desc' } })
+  ];
+
+  // Check for existing suggestion if logged in
+  if (cid) {
+    queries.push(prisma.airportSuggestion.findFirst({
+      where: { cid, icao, type: sugType }
+    }));
+  }
+
+  const [airport, visits, existingSuggestion] = await Promise.all(queries);
 
   res.json({
     icao,
+    exists: !!airport,
+    airportName: airport?.name || null,
     totalVisits: visits.length,
     lastVisit: visits.length > 0 ? visits[0].year : null,
-    visits: visits.map(v => ({ year: v.year, eventName: v.eventName }))
+    visits: visits.map(v => ({ year: v.year, eventName: v.eventName })),
+    alreadySuggested: !!existingSuggestion
   });
 });
 
@@ -2000,12 +2320,31 @@ app.post('/api/suggest-airport', async (req, res) => {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
-  if (!/^[A-Z*]{2,4}$/.test(icao.toUpperCase()) || !/[A-Z]/.test(icao.toUpperCase())) {
+  const upperIcao = icao.toUpperCase().trim();
+  if (!/^[A-Z*]{2,4}$/.test(upperIcao) || !/[A-Z]/.test(upperIcao)) {
     return res.status(400).json({ error: 'Invalid ICAO code' });
+  }
+
+  // Validate non-wildcard ICAOs exist in our database
+  if (!/\*/.test(upperIcao) && upperIcao.length === 4) {
+    const airport = await prisma.airport.findUnique({ where: { icao: upperIcao }, select: { icao: true } });
+    if (!airport) {
+      return res.status(400).json({ error: upperIcao + ' is not a recognised airport' });
+    }
   }
 
   const suggestionType = type === 'avoid' ? 'avoid' : 'visit';
   const cid = Number(req.session?.user?.data?.cid) || null;
+
+  // Prevent duplicate suggestions per airport for logged-in users
+  if (cid) {
+    const existing = await prisma.airportSuggestion.findFirst({
+      where: { cid, icao: upperIcao, type: suggestionType }
+    });
+    if (existing) {
+      return res.status(409).json({ error: 'You have already submitted a suggestion for ' + upperIcao });
+    }
+  }
 
   await prisma.airportSuggestion.create({
     data: {
@@ -2016,6 +2355,7 @@ app.post('/api/suggest-airport', async (req, res) => {
       association,
       reason: reason.trim(),
       contact: (contact || '').trim(),
+      notify: !!notifyRoute,
       cid
     }
   });
@@ -2503,53 +2843,74 @@ if (icaoFromQuery) {
      DEP FLOWS
      ========================================================= */
 
-socket.on('updateDepFlow', async ({ sector, value }) => {
+// Request flows for a specific event (admin schedule page)
+socket.on('requestEventFlows', async ({ eventId: reqEventId }) => {
+  if (!reqEventId) return;
+  const flows = await prisma.depFlow.findMany({ where: { eventId: reqEventId } });
+  const rates = {};
+  const types = {};
+  for (const f of flows) {
+    rates[f.sector] = Number(f.rate) || 0;
+    const ft = (f.flowtype || 'NONE').toString().toUpperCase();
+    types[f.sector] = (ft === 'SLOTTED' || ft === 'BOOKING_ONLY' || ft === 'NONE') ? ft : 'NONE';
+  }
+  socket.emit('syncDepFlows', rates);
+  socket.emit('syncFlowTypes', types);
+});
+
+socket.on('updateDepFlow', async ({ sector, value, eventId: clientEventId }) => {
   const key = normalizeSectorKey(sector);
   const rate = Number(value);
+  const evtId = clientEventId || activeEventId || 0;
+  const isActiveEvent = evtId === activeEventId;
 
   // treat blank / 0 / invalid as "remove rate"
   if (!Number.isFinite(rate) || rate <= 0) {
-    delete sharedDepFlows[key];
+    if (isActiveEvent) delete sharedDepFlows[key];
 
-    await prisma.depFlow.deleteMany({ where: { sector: key } });
+    await prisma.depFlow.deleteMany({ where: { eventId: evtId, sector: key } });
 
-    io.emit('depFlowUpdated', { sector: key, value: 0 });
+    io.emit('depFlowUpdated', { sector: key, value: 0, eventId: evtId });
+    if (isActiveEvent) {
+      rebuildAllTobtSlots();
+      const fromIcao = key.split('-')[0];
+      io.to(`icao:${fromIcao}`).emit(
+        'unassignedTobtUpdate',
+        buildUnassignedTobtsForICAO(fromIcao)
+      );
+    }
+
+    return;
+  }
+
+  if (isActiveEvent) sharedDepFlows[key] = rate;
+
+  await prisma.depFlow.upsert({
+    where: { eventId_sector: { eventId: evtId, sector: key } },
+    update: { rate },
+    create: {
+      eventId: evtId,
+      sector: key,
+      rate,
+      flowtype: (isActiveEvent ? sharedFlowTypes[key] : null) || 'NONE'
+    }
+  });
+
+  io.emit('depFlowUpdated', { sector: key, value: rate, eventId: evtId });
+  if (isActiveEvent) {
     rebuildAllTobtSlots();
-
     const fromIcao = key.split('-')[0];
     io.to(`icao:${fromIcao}`).emit(
       'unassignedTobtUpdate',
       buildUnassignedTobtsForICAO(fromIcao)
     );
-
-    return;
   }
-
-  sharedDepFlows[key] = rate;
-
-  // preserve existing flowtype if row already exists
-  await prisma.depFlow.upsert({
-    where: { sector: key },
-    update: { rate },
-    create: {
-      sector: key,
-      rate,
-      flowtype: sharedFlowTypes[key] || 'NONE'
-    }
-  });
-
-  io.emit('depFlowUpdated', { sector: key, value: rate });
-  rebuildAllTobtSlots();
-
-  const fromIcao = key.split('-')[0];
-  io.to(`icao:${fromIcao}`).emit(
-    'unassignedTobtUpdate',
-    buildUnassignedTobtsForICAO(fromIcao)
-  );
 });
 
-socket.on('updateDepFlowType', async ({ sector, flowtype }) => {
+socket.on('updateDepFlowType', async ({ sector, flowtype, eventId: clientEventId }) => {
   const key = normalizeSectorKey(sector);
+  const evtId = clientEventId || activeEventId || 0;
+  const isActiveEvent = evtId === activeEventId;
 
   const ft = (flowtype || 'NONE').toString().toUpperCase();
   const normalized =
@@ -2557,20 +2918,20 @@ socket.on('updateDepFlowType', async ({ sector, flowtype }) => {
       ? ft
       : 'NONE';
 
-  sharedFlowTypes[key] = normalized;
+  if (isActiveEvent) sharedFlowTypes[key] = normalized;
 
-  // ensure there is a row to store it
   await prisma.depFlow.upsert({
-    where: { sector: key },
+    where: { eventId_sector: { eventId: evtId, sector: key } },
     update: { flowtype: normalized },
     create: {
+      eventId: evtId,
       sector: key,
-      rate: sharedDepFlows[key] || 0,
+      rate: (isActiveEvent ? sharedDepFlows[key] : null) || 0,
       flowtype: normalized
     }
   });
 
-  io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized });
+  io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized, eventId: evtId });
 });
 
 socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
@@ -2645,8 +3006,8 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
      CONNECTED USERS
      ========================================================= */
 
-  socket.on('registerUser', ({ cid, position }) => {
-    connectedUsers[socket.id] = { cid, position };
+  socket.on('registerUser', ({ cid, name }) => {
+    connectedUsers[socket.id] = { cid, name };
     io.emit('connectedUsersUpdate', Object.values(connectedUsers));
   });
 
@@ -2661,45 +3022,144 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
 
 
 /* ===== ADMIN SHEET REFRESH ===== */
-async function refreshAdminSheet() {
-  try {
-    const res = await axios.get(GOOGLE_SHEET_CSV_URL);
+function parseSheetCsv(csvText) {
+  const lines = csvText.split('\n').map(l => l.trim()).filter(Boolean);
+  const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
 
-    const lines = res.data.split('\n').map(l => l.trim()).filter(Boolean);
-    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+  const idx = {
+    number: headers.indexOf('Number'),
+    from: headers.indexOf('From'),
+    to: headers.indexOf('To'),
+    date_utc: headers.indexOf('Date_UTC'),
+    dep_time_utc: headers.indexOf('Dep_Time_UTC'),
+    arr_time_utc: headers.indexOf('Arr_Time_UTC'),
+    block_time: headers.indexOf('Block_Time'),
+    atc_route: headers.indexOf('ATC_Route')
+  };
 
-    const idx = {
-      number: headers.indexOf('Number'),
-  from: headers.indexOf('From'),
-  to: headers.indexOf('To'),
-  date_utc: headers.indexOf('Date_UTC'),
-  dep_time_utc: headers.indexOf('Dep_Time_UTC'),
-  arr_time_utc: headers.indexOf('Arr_Time_UTC'),
-  block_time: headers.indexOf('Block_Time'),
-  atc_route: headers.indexOf('ATC_Route')
+  return lines.slice(1).map(line => {
+    const cols = line.split(',').map(c => c.replace(/"/g, '').trim());
+    return {
+      number: cols[idx.number] || '',
+      from: cols[idx.from] || '',
+      to: cols[idx.to] || '',
+      date_utc: cols[idx.date_utc] || '',
+      dep_time_utc: cols[idx.dep_time_utc] || '',
+      arr_time_utc: cols[idx.arr_time_utc] || '',
+      block_time: cols[idx.block_time] || '',
+      atc_route: cols[idx.atc_route] || ''
     };
+  });
+}
 
-    adminSheetCache = lines.slice(1).map(line => {
-      const cols = line.split(',').map(c => c.replace(/"/g, '').trim());
-      return {
-        number: cols[idx.number] || '',
-    from: cols[idx.from] || '',
-    to: cols[idx.to] || '',
-    date_utc: cols[idx.date_utc] || '',
-    dep_time_utc: cols[idx.dep_time_utc] || '',
-    arr_time_utc: cols[idx.arr_time_utc] || '',
-    block_time: cols[idx.block_time] || '',
-    atc_route: cols[idx.atc_route] || ''
-      };
-    });
+async function refreshSheetForEvent(event) {
+  // Scratch events don't have a sheet — just load from DB
+  if (event.mode === 'scratch' || !event.sheetUrl) {
+    return await loadScheduleFromDb(event.id);
+  }
 
-    console.log('✅ Admin Sheet refreshed:', adminSheetCache.length, 'rows');
+  try {
+    const res = await axios.get(event.sheetUrl);
+    const rows = parseSheetCsv(res.data);
+
+    // Sync rows to DB
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r.number) continue;
+      await prisma.wfScheduleRow.upsert({
+        where: { eventId_number: { eventId: event.id, number: r.number } },
+        update: {
+          sortOrder: i,
+          from: r.from,
+          to: r.to,
+          dateUtc: r.date_utc,
+          depTimeUtc: r.dep_time_utc,
+          arrTimeUtc: r.arr_time_utc,
+          blockTime: r.block_time,
+          atcRoute: r.atc_route
+        },
+        create: {
+          eventId: event.id,
+          sortOrder: i,
+          number: r.number,
+          from: r.from,
+          to: r.to,
+          dateUtc: r.date_utc,
+          depTimeUtc: r.dep_time_utc,
+          arrTimeUtc: r.arr_time_utc,
+          blockTime: r.block_time,
+          atcRoute: r.atc_route
+        }
+      });
+    }
+
+    console.log(`✅ Sheet synced to DB for ${event.name}: ${rows.length} rows`);
   } catch (err) {
-    console.error('❌ Failed to refresh Admin Sheet:', err.message);
+    console.error(`❌ Failed to refresh sheet for ${event.name}:`, err.message);
+  }
+
+  // Always load from DB (includes any manual edits)
+  return await loadScheduleFromDb(event.id);
+}
+
+async function loadScheduleFromDb(eventId) {
+  const dbRows = await prisma.wfScheduleRow.findMany({
+    where: { eventId },
+    orderBy: { sortOrder: 'asc' }
+  });
+
+  const rows = dbRows.map(r => ({
+    number: r.number,
+    from: r.from,
+    to: r.to,
+    date_utc: r.dateUtc,
+    dep_time_utc: r.depTimeUtc,
+    arr_time_utc: r.arrTimeUtc,
+    block_time: r.blockTime,
+    atc_route: r.atcRoute
+  }));
+
+  eventSheetCaches[eventId] = rows;
+  if (eventId === activeEventId) {
+    adminSheetCache = rows;
+  }
+  return rows;
+}
+
+async function loadWfEvents() {
+  wfEvents = await prisma.wfEvent.findMany({ orderBy: { year: 'desc' } });
+  const active = wfEvents.find(e => e.isActive);
+
+  // If no events exist, create a default one from the hardcoded URL
+  if (wfEvents.length === 0) {
+    const defaultEvent = await prisma.wfEvent.create({
+      data: {
+        name: 'WorldFlight 2025',
+        year: 2025,
+        sheetUrl: DEFAULT_SHEET_URL,
+        isActive: true
+      }
+    });
+    wfEvents = [defaultEvent];
+    activeEventId = defaultEvent.id;
+  } else {
+    activeEventId = active?.id || wfEvents[0].id;
   }
 }
 
-refreshAdminSheet();
+async function refreshAdminSheet() {
+  await loadWfEvents();
+
+  // Refresh all event sheets
+  for (const event of wfEvents) {
+    await refreshSheetForEvent(event);
+  }
+
+  // Set adminSheetCache to the active event for backward compatibility
+  adminSheetCache = eventSheetCaches[activeEventId] || [];
+  console.log(`✅ Active schedule: ${wfEvents.find(e => e.id === activeEventId)?.name || 'none'} (${adminSheetCache.length} rows)`);
+}
+
 cron.schedule('0 0 * * *', refreshAdminSheet);
 
 
@@ -6209,6 +6669,8 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 <script>
 document.addEventListener('DOMContentLoaded', async () => {
+  if (!/\\/icao\\/[A-Z]{4}$/i.test(window.location.pathname)) return;
+
   const pathParts = window.location.pathname.split('/');
   const icao = pathParts[pathParts.length - 1].toUpperCase();
 
@@ -7382,7 +7844,7 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
     },
     {
       title: 'Official Teams',
-      desc: 'Manage official teams and WF affiliates with WF26 participation toggles.',
+      desc: 'Manage official teams and WF affiliates with active participation toggles.',
       icon: '👥',
       href: '/official-teams',
       badge: null
@@ -7575,7 +8037,7 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
             <th>Main CID</th>
             <th>A/C Type</th>
             <th>Country</th>
-            <th class="col-wf26 col-center">WF26</th>
+            <th class="col-wf26 col-center">Active</th>
             <th></th>
           </tr>
         </thead>
@@ -7614,7 +8076,7 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
       <th class="col-callsign">Callsign</th>
       <th class="col-simtype">Full Sim / Home Cockpit</th>
       <th class="col-cid col-right">CID</th>
-      <th class="col-wf26 col-center">WF26</th>
+      <th class="col-wf26 col-center">Active</th>
       <th class="col-actions"></th>
     </tr>
   </thead>
@@ -7719,7 +8181,7 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
   <!-- ================= WF26 ================= -->
   <label style="display:flex; align-items:center; gap:10px; margin:14px 0 0; user-select:none;">
     <input type="checkbox" name="participatingWf26" />
-    Participating in WF26
+    Participating in Active Event
   </label>
 
   <div class="modal-actions" style="margin-top:16px;">
@@ -7949,7 +8411,7 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
 
         if (!res.ok) {
           cb.checked = !participatingWf26;
-          alert('Failed to update WF26 flag');
+          alert('Failed to update active flag');
         }
       });
     });
@@ -8091,7 +8553,245 @@ app.get('/departures/check-changes', async (req, res) => {
 });
 
 /* ===== ADMIN PAGE ===== */
-app.get('/wf-schedule', requireAdmin, (req, res) => {
+/* ===== WF EVENT MANAGEMENT (SUBMENU) ===== */
+app.get('/wf-schedule', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+
+  const events = await prisma.wfEvent.findMany({ orderBy: { year: 'asc' } });
+
+  const eventCards = events.map(e => {
+    const rowCount = eventSheetCaches[e.id]?.length || 0;
+    return `
+      <div class="event-card ${e.isActive ? 'event-active' : ''}">
+        <div class="event-card-header">
+          <h3>${e.name}</h3>
+          ${e.isActive ? '<span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;font-size:11px;padding:2px 8px;border-radius:8px;">Active</span>' : ''}
+        </div>
+        <p class="event-card-meta">${rowCount} legs &middot; ${e.mode === 'scratch' ? 'Editable' : 'CSV'}</p>
+        <div class="event-card-actions">
+          <a href="/wf-schedule/${e.id}" class="action-btn primary" style="text-decoration:none;">Open Schedule</a>
+          ${!e.isActive ? '<button class="action-btn btn-set-active" data-id="' + e.id + '">Set as Active</button>' : ''}
+          ${!e.isActive ? '<button class="action-btn btn-delete-event" data-id="' + e.id + '" style="color:var(--danger);">Delete</button>' : ''}
+        </div>
+      </div>`;
+  }).join('');
+
+  const content = `
+    <section class="card card-full">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+        <div>
+          <h2>WorldFlight Schedules</h2>
+          <p style="color:var(--muted);font-size:13px;">Manage event schedules. The active schedule is shown to the public.</p>
+        </div>
+        <button id="createEventBtn" class="action-btn primary">+ Create New Event</button>
+      </div>
+
+      <div class="event-grid">
+        ${eventCards || '<p style="color:var(--muted);">No events yet. Create one to get started.</p>'}
+      </div>
+    </section>
+
+    <!-- CREATE EVENT MODAL -->
+    <div id="createEventModal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog">
+        <h3>Create New Event</h3>
+        <form id="createEventForm">
+          <label>
+            Schedule Mode
+            <select id="eventMode">
+              <option value="scratch">From Scratch — fully editable</option>
+              <option value="csv">From CSV — linked to Google Sheet</option>
+            </select>
+          </label>
+          <label>
+            Event Name
+            <input type="text" id="eventName" placeholder="e.g. WorldFlight 2026" required />
+          </label>
+          <label>
+            Year
+            <input type="number" id="eventYear" placeholder="2026" min="2020" max="2099" required />
+          </label>
+          <div id="csvFields">
+            <label>
+              Google Sheet CSV URL
+              <input type="url" id="eventSheetUrl" placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv" />
+            </label>
+          </div>
+          <label>
+            Import Dep Flow rates from
+            <select id="eventImportFrom">
+              <option value="">None — start fresh</option>
+              ${events.map(e => `<option value="${e.id}">${e.name} (${(eventSheetCaches[e.id] || []).length} legs)</option>`).join('')}
+            </select>
+          </label>
+          <p style="color:var(--muted);font-size:11px;margin-top:4px;">Flow rates will be imported but Flow Types will be reset to NONE.</p>
+          <div id="createEventMsg" class="modal-message hidden" style="margin-top:8px;"></div>
+          <div class="modal-actions">
+            <button type="button" class="modal-btn modal-btn-cancel" id="closeCreateEvent">Cancel</button>
+            <button type="submit" class="modal-btn modal-btn-submit">Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <style>
+      .event-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+      .event-card {
+        padding: 20px; border-radius: 12px;
+        background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+        transition: background .15s;
+      }
+      .event-card:hover { background: rgba(255,255,255,0.04); }
+      .event-card.event-active { border-color: rgba(34,197,94,0.3); }
+      .event-card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+      .event-card-header h3 { margin: 0; font-size: 16px; color: var(--text); }
+      .event-card-meta { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+      .event-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    </style>
+
+    <script>
+    (function() {
+      var modal = document.getElementById('createEventModal');
+      var form = document.getElementById('createEventForm');
+      var msg = document.getElementById('createEventMsg');
+      var modeSelect = document.getElementById('eventMode');
+      var csvFields = document.getElementById('csvFields');
+
+      // Toggle CSV fields based on mode
+      function updateModeFields() {
+        if (modeSelect.value === 'csv') {
+          csvFields.style.display = '';
+        } else {
+          csvFields.style.display = 'none';
+        }
+      }
+      modeSelect.addEventListener('change', updateModeFields);
+      updateModeFields();
+
+      document.getElementById('createEventBtn').addEventListener('click', function() {
+        modal.classList.remove('hidden');
+      });
+      document.getElementById('closeCreateEvent').addEventListener('click', function() {
+        modal.classList.add('hidden');
+      });
+      modal.querySelector('.modal-backdrop').addEventListener('click', function() {
+        modal.classList.add('hidden');
+      });
+
+      form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        msg.classList.add('hidden');
+
+        var mode = modeSelect.value;
+        var sheetUrl = mode === 'csv' ? document.getElementById('eventSheetUrl').value.trim() : '';
+
+        if (mode === 'csv' && !sheetUrl) {
+          msg.textContent = 'Google Sheet URL is required for CSV mode.';
+          msg.style.color = 'var(--danger)';
+          msg.classList.remove('hidden');
+          return;
+        }
+
+        var res = await fetch('/admin/api/wf-events', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: document.getElementById('eventName').value.trim(),
+            year: Number(document.getElementById('eventYear').value),
+            mode: mode,
+            sheetUrl: sheetUrl,
+            importFromEventId: Number(document.getElementById('eventImportFrom').value) || null
+          })
+        });
+
+        if (res.ok) {
+          window.location.reload();
+        } else {
+          var data = await res.json().catch(function() { return {}; });
+          msg.textContent = data.error || 'Failed to create event';
+          msg.style.color = 'var(--danger)';
+          msg.classList.remove('hidden');
+        }
+      });
+
+      // Set active
+      document.addEventListener('click', async function(e) {
+        var setBtn = e.target.closest('.btn-set-active');
+        if (setBtn) {
+          var evtId = setBtn.dataset.id;
+          var evtName = setBtn.closest('.event-card').querySelector('h3').textContent;
+
+          // Check current bookings and target backups
+          var backupRes = await fetch('/admin/api/wf-events/' + evtId + '/backup-count');
+          var backupData = await backupRes.json();
+          var hasBackups = backupData.count > 0;
+
+          // Step 1: Confirm switching (warns about current bookings being backed up)
+          var proceed = await openConfirmModal({
+            title: 'Switch to ' + evtName + '?',
+            message: 'All current bookings and slots will be backed up and cancelled. You can restore them later if you switch back.'
+          });
+          if (!proceed) return;
+
+          // Step 2: If the target event has backups, ask about restoring
+          var restoreBookings = false;
+          if (hasBackups) {
+            restoreBookings = await openConfirmModal({
+              title: 'Restore Previous Bookings?',
+              message: evtName + ' has ' + backupData.count + ' booking(s) from a previous session. Would you like to restore them?'
+            });
+          }
+
+          // Show switching overlay
+          var overlay = document.createElement('div');
+          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,0.9);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;';
+          overlay.innerHTML = '<div style="text-align:center;">' +
+            '<div style="width:36px;height:36px;border:3px solid rgba(255,255,255,0.1);border-top-color:var(--accent,#38bdf8);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px;"></div>' +
+            '<h2 style="color:var(--text,#e5e7eb);font-size:18px;margin:0 0 6px;">Switching Schedule...</h2>' +
+            '<p style="color:var(--muted,#94a3b8);font-size:13px;">Backing up bookings and loading ' + evtName + '</p>' +
+            '</div>' +
+            '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+          document.body.appendChild(overlay);
+
+          var res = await fetch('/admin/api/wf-events/' + evtId + '/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ restoreBookings: restoreBookings })
+          });
+          if (res.ok) window.location.reload();
+          else { overlay.remove(); alert('Failed to switch schedule'); }
+          return;
+        }
+
+        var delBtn = e.target.closest('.btn-delete-event');
+        if (delBtn) {
+          openConfirmModal({
+            title: 'Delete Event',
+            message: 'This will permanently delete this event and its schedule data. This cannot be undone.'
+          }).then(async function(ok) {
+            if (!ok) return;
+            var res = await fetch('/admin/api/wf-events/' + delBtn.dataset.id, { method: 'DELETE' });
+            if (res.ok) window.location.reload();
+          });
+        }
+      });
+    })();
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'WF Schedules', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+/* ===== WF EVENT SCHEDULE (PER-EVENT) ===== */
+app.get('/wf-schedule/:eventId', requireAdmin, async (req, res) => {
+const eventId = Number(req.params.eventId);
+const event = wfEvents.find(e => e.id === eventId);
+if (!event) return res.redirect('/wf-schedule');
+
+const eventRows = eventSheetCaches[eventId] || [];
+
 if (!req.session.user || !req.session.user.data) {
   return res.redirect('/');
 }
@@ -8103,18 +8803,87 @@ if (!isAdmin) {
   return res.status(403).send('You do not have Admin access');
 }
 
+// Load suggestions + visit history for the map
+const [allSuggestions, allVisited] = await Promise.all([
+  prisma.airportSuggestion.findMany({ where: { type: 'visit' }, select: { icao: true } }),
+  prisma.wfVisitedAirport.findMany({ orderBy: { year: 'desc' } })
+]);
+
+// Aggregate suggestion votes per ICAO and look up coordinates
+const voteCounts = {};
+for (const s of allSuggestions) {
+  voteCounts[s.icao] = (voteCounts[s.icao] || 0) + 1;
+}
+const suggestedIcaos = Object.keys(voteCounts).filter(i => !/[*]/.test(i));
+const airportCoords = suggestedIcaos.length > 0
+  ? await prisma.airport.findMany({
+      where: { icao: { in: suggestedIcaos } },
+      select: { icao: true, lat: true, lon: true, name: true }
+    })
+  : [];
+const suggestedAirports = airportCoords
+  .filter(a => a.lat != null && a.lon != null)
+  .map(a => ({ icao: a.icao, lat: a.lat, lon: a.lon, name: a.name, votes: voteCounts[a.icao] || 0 }))
+  .sort((a, b) => b.votes - a.votes);
+
+const visitHistoryMap = {};
+for (const v of allVisited) {
+  if (!visitHistoryMap[v.icao]) visitHistoryMap[v.icao] = [];
+  visitHistoryMap[v.icao].push(v.year);
+}
+
+const currentYear = new Date().getFullYear();
+const fiveYearsAgo = currentYear - 5;
+
+const isScratch = event.mode === 'scratch';
+
+const mapAirports = suggestedAirports.map(a => {
+  const years = visitHistoryMap[a.icao] || [];
+  const recent = years.filter(y => y >= fiveYearsAgo).length;
+  const color = recent > 2 ? 'red' : recent >= 1 ? 'amber' : 'green';
+  const tooltip = years.length === 0 ? 'Never visited'
+    : recent === 0 ? 'Not visited in past 5 years. Last: ' + years[0]
+    : 'Visited ' + recent + 'x in past 5 years (' + years.filter(y => y >= fiveYearsAgo).join(', ') + ')';
+  return { icao: a.icao, lat: a.lat, lon: a.lon, name: a.name, votes: a.votes, color, tooltip };
+});
+
 const content = `
+ <script>window.WF_EVENT_ID = ${eventId};</script>
+ <div style="margin-bottom:16px;">
+   <a href="/wf-schedule" style="color:var(--accent);text-decoration:none;font-size:13px;">&larr; Back to all schedules</a>
+   <span style="color:var(--muted);font-size:13px;margin-left:12px;">${event.name}${event.isActive ? ' (Active)' : ''}</span>
+ </div>
  <main class="dashboard-full">
 <section class="card dashboard-full">
 
-<h2>WorldFlight Admin Schedule</h2>
-<button id="refreshScheduleBtn" style="margin-bottom:16px;">⟳ Force Refresh Schedule</button>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+  <h2 style="margin:0;">WorldFlight Admin Schedule</h2>
+  <div style="display:flex;gap:8px;align-items:center;">
+    ${isScratch ? `
+    <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:4px 12px;">
+      <a href="https://www.simbrief.com/system/profile.php#settings" target="_blank" style="font-size:11px;color:var(--muted);text-decoration:none;" title="Find your Pilot ID in SimBrief Account Settings">SB Pilot ID:</a>
+      <input type="text" id="simbriefPilotId" value="" placeholder="e.g. 546033" style="width:80px;padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;text-align:center;" />
+    </div>
+    <div class="turnaround-setting" style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:4px 12px;">
+      <span style="font-size:12px;color:var(--muted);">Turnaround:</span>
+      <span id="turnaroundDisplay" style="font-size:13px;color:var(--text);font-weight:600;">${event.turnaroundMins || 45} min</span>
+      <button type="button" id="editTurnaroundBtn" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:2px 4px;">&#9998;</button>
+      <input type="hidden" id="turnaroundInput" value="${event.turnaroundMins || 45}" />
+    </div>
+    <button id="addRowBtn" class="action-btn" style="background:var(--success);color:#020617;font-weight:600;">+ Add Leg</button>
+    ` : `
+    <button id="unlinkCsvBtn" class="action-btn" style="background:var(--warning);color:#020617;font-weight:600;">Unlink CSV</button>
+    <button id="refreshScheduleBtn" class="action-btn" style="background:var(--accent);color:#020617;font-weight:600;">Force Refresh from Sheet</button>
+    `}
+  </div>
+</div>
 
 <div class="table-scroll">
 <table class="departures-table" id="mainDeparturesTable">
 
 <thead>
 <tr>
+  ${isScratch ? '<th></th>' : ''}
   <th>WF</th>
   <th>From</th>
   <th>To</th>
@@ -8123,17 +8892,26 @@ const content = `
   <th>Date</th>
   <th>Dep</th>
   <th>Arr</th>
+  <th>Block</th>
   <th class="col-route">ATC Route</th>
 </tr>
 </thead>
 <tbody>
-${adminSheetCache.map(r => {
+${eventRows.map((r, idx) => {
   const sectorKey = `${r.from}-${r.to}`;
+  const isFirst = idx === 0;
   return `
-<tr>
-  <td>${r.number}</td>
-  <td>${r.from}</td>
-  <td>${r.to}</td>
+<tr data-wf="${r.number}" data-idx="${idx}">
+  ${isScratch ? '<td class="col-del"><button class="btn-delete-row" data-wf="' + r.number + '" title="Delete leg">&#x2715;</button></td>' : ''}
+  ${isScratch
+    ? '<td><input class="sched-edit" data-field="number" value="' + r.number + '" style="width:80px;font-weight:600;" /></td>'
+    : '<td style="font-weight:600;">' + r.number + '</td>'}
+  ${isScratch
+    ? '<td><input class="sched-edit" data-field="from" value="' + r.from + '" style="width:60px;text-transform:uppercase;" /></td>'
+    : '<td>' + r.from + '</td>'}
+  ${isScratch
+    ? '<td><input class="sched-edit" data-field="to" value="' + r.to + '" style="width:60px;text-transform:uppercase;" /></td>'
+    : '<td>' + r.to + '</td>'}
   <td>
     <input
       class="dep-flow-input"
@@ -8151,24 +8929,32 @@ ${adminSheetCache.map(r => {
 </select>
 </td>
 
-
-  <td>${r.date_utc}</td>
-  <td>${r.dep_time_utc}</td>
-  <td>${r.arr_time_utc}</td>
-  <td>
-  <div class="route-collapsible">
-    <span class="route-text collapsed">
-      ${r.atc_route}
-      </span>
-
-    <button
-      type="button"
-      class="route-toggle"
-      aria-expanded="false">
-      Show route
-    </button>
-  </div>
-</td>
+  ${isScratch
+    ? (isFirst
+      ? '<td><input class="sched-edit" data-field="dateUtc" value="' + r.date_utc + '" style="width:100px;" /></td>'
+      : '<td class="calc-cell" data-field="date">' + r.date_utc + '</td>')
+    : '<td>' + r.date_utc + '</td>'}
+  ${isScratch
+    ? (isFirst
+      ? '<td><input class="sched-edit" data-field="depTimeUtc" value="' + r.dep_time_utc + '" style="width:60px;" /></td>'
+      : '<td class="calc-cell" data-field="dep">' + r.dep_time_utc + '</td>')
+    : '<td>' + r.dep_time_utc + '</td>'}
+  ${isScratch && !r.block_time && r.from && r.to
+    ? '<td>'
+      + '<a class="simbrief-btn simbrief-launch" data-from="' + r.from + '" data-to="' + r.to + '" data-wf="' + r.number + '" href="#" style="font-size:11px;padding:4px 8px;">'
+      + '<span class="simbrief-logo">SB</span>'
+      + '<span class="simbrief-text">Gen</span>'
+      + '</a>'
+      + '</td>'
+      + '<td><button class="action-btn sb-fetch" data-wf="' + r.number + '" data-from="' + r.from + '" data-to="' + r.to + '" style="font-size:11px;padding:4px 8px;">Fetch</button></td>'
+      + '<td><textarea class="sched-edit sched-route" data-field="atcRoute" rows="2" style="width:100%;min-width:200px;" placeholder="Enter ATC route...">' + r.atc_route + '</textarea></td>'
+    : '<td class="calc-cell" data-field="arr">' + r.arr_time_utc + '</td>'
+      + (isScratch
+        ? '<td><input class="sched-edit" data-field="blockTime" value="' + r.block_time + '" style="width:60px;" /></td>'
+        : '<td>' + r.block_time + '</td>')
+      + (isScratch
+        ? '<td><input class="sched-edit sched-route" data-field="atcRoute" value="' + r.atc_route + '" style="width:100%;min-width:200px;" /></td>'
+        : '<td style="font-size:12px;font-family:monospace;white-space:pre-wrap;word-break:break-all;">' + r.atc_route + '</td>')}
 </tr>`;
 }).join('')}
 </tbody>
@@ -8179,21 +8965,579 @@ ${adminSheetCache.map(r => {
 </main> 
 
 <footer>
-<section class="card">
-    <!-- EVERYTHING that was inside <main> goes here -->
-    <footer class="connected-users-footer">
-  <strong>Connected Users:</strong>
-  <div id="connectedUsersList">Loading...</div>
-</footer>
   </section>
 
-  <!-- KEEP ALL EXISTING <script> TAGS EXACTLY AS THEY ARE -->
-  <script>
-document.getElementById('refreshScheduleBtn').onclick = async () => {
-  await fetch('/wf-schedule/refresh-schedule', { method: 'POST' });
-  location.reload();
-};
+<!-- ADD LEG MODAL -->
+<div id="addLegModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:520px;">
+    <h3>Add New Leg</h3>
+    <form id="addLegForm">
+      <label>
+        Previous Leg
+        <select id="addLegPrev" required>
+          <option value="START">Start (first leg)</option>
+          ${eventRows.map(r => '<option value="' + r.number + '" data-to="' + r.to + '">' + r.number + ' — ' + r.from + ' to ' + r.to + '</option>').join('')}
+        </select>
+      </label>
+
+      <label>
+        From
+        <input type="text" id="addLegFrom" readonly style="text-transform:uppercase;font-family:monospace;" />
+      </label>
+
+      <label>
+        To
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="addLegTo" required placeholder="ICAO" maxlength="4" style="flex:1;text-transform:uppercase;font-family:monospace;" />
+          <button type="button" id="openMapBtn" class="action-btn" style="flex-shrink:0;" title="Browse suggested airports">🌍 Map</button>
+        </div>
+      </label>
+
+      <label>
+        Dep Flow (per hour)
+        <input type="number" id="addLegFlow" min="0" placeholder="0" />
+      </label>
+
+      <label>
+        Flow Type
+        <select id="addLegFlowType">
+          <option value="NONE">None</option>
+          <option value="SLOTTED">Slotted</option>
+          <option value="BOOKING_ONLY">Booking Only</option>
+        </select>
+      </label>
+
+      <div id="addLegMsg" class="modal-message hidden" style="margin-top:8px;"></div>
+
+      <div class="modal-actions">
+        <button type="button" class="modal-btn modal-btn-cancel" id="closeAddLeg">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-submit" id="submitAddLeg">Add Leg</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- AIRPORT MAP MODAL -->
+<div id="airportMapModal" class="modal hidden" style="z-index:10000;">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:90vw;max-width:1200px;height:80vh;padding:0;overflow:hidden;display:flex;flex-direction:column;">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border);">
+      <h3 style="margin:0;">Select Destination — Suggested Airports</h3>
+      <button type="button" id="closeMapModal2" style="background:none;border:none;color:var(--text);font-size:20px;cursor:pointer;">✕</button>
+    </div>
+    <div id="suggestMap" style="flex:1;"></div>
+  </div>
+</div>
+
+<script>
+  window.MAP_AIRPORTS = ${JSON.stringify(mapAirports)};
 </script>
+
+  <script>
+if (document.getElementById('refreshScheduleBtn')) {
+  document.getElementById('refreshScheduleBtn').onclick = () => {
+    openConfirmModal({
+      title: 'Refresh from Google Sheet',
+      message: 'This will re-import the schedule from the Google Sheet. Any manual edits to fields that also exist in the sheet will be overwritten. Continue?'
+    }).then(async (ok) => {
+      if (!ok) return;
+      var btn = document.getElementById('refreshScheduleBtn');
+      btn.disabled = true;
+      btn.textContent = 'Refreshing...';
+      await fetch('/wf-schedule/refresh-schedule', { method: 'POST' });
+      location.reload();
+    });
+  };
+}
+
+if (document.getElementById('unlinkCsvBtn')) {
+  document.getElementById('unlinkCsvBtn').onclick = () => {
+    openConfirmModal({
+      title: 'Unlink CSV?',
+      message: 'This will convert this event to a fully editable schedule. The Google Sheet link will be removed and all current data will be kept as editable rows. This cannot be undone.'
+    }).then(async (ok) => {
+      if (!ok) return;
+      var btn = document.getElementById('unlinkCsvBtn');
+      btn.disabled = true;
+      btn.textContent = 'Unlinking...';
+      var res = await fetch('/admin/api/wf-events/' + window.WF_EVENT_ID + '/unlink-csv', { method: 'POST' });
+      if (res.ok) location.reload();
+    });
+  };
+}
+
+/* ===== INLINE CELL EDITING ===== */
+var saveTimer = {};
+document.querySelectorAll('.sched-edit').forEach(function(input) {
+  var originalValue = input.value;
+
+  input.addEventListener('change', function() {
+    if (input.value === originalValue) return;
+
+    var tr = input.closest('tr');
+    var wfNumber = tr.dataset.wf;
+    var field = input.dataset.field;
+    var value = input.value.trim();
+
+    input.style.borderColor = 'var(--accent)';
+
+    fetch('/admin/api/schedule-row/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: window.WF_EVENT_ID,
+        number: wfNumber,
+        field: field,
+        value: value
+      })
+    }).then(function(res) {
+      if (res.ok) {
+        originalValue = value;
+        // Reload if a time-affecting field changed
+        var timeFields = ['blockTime', 'dateUtc', 'depTimeUtc'];
+        if (timeFields.indexOf(field) !== -1) {
+          location.reload();
+          return;
+        }
+        input.style.borderColor = 'var(--success)';
+        setTimeout(function() { input.style.borderColor = ''; }, 1500);
+        if (field === 'number') tr.dataset.wf = value;
+      } else {
+        input.style.borderColor = 'var(--danger)';
+        setTimeout(function() { input.style.borderColor = ''; }, 2000);
+      }
+    });
+  });
+});
+
+/* ===== TURNAROUND TIME ===== */
+document.getElementById('editTurnaroundBtn').addEventListener('click', function() {
+  var currentVal = Number(document.getElementById('turnaroundInput').value) || 45;
+
+  // Reuse callsign modal for input
+  var modal = document.getElementById('callsignModal');
+  var h3 = modal.querySelector('h3');
+  var help = modal.querySelector('.modal-help');
+  var input = document.getElementById('callsignModalInput');
+  var confirm = document.getElementById('callsignConfirm');
+  var cancel = document.getElementById('callsignCancel');
+  var hint = modal.querySelector('.modal-hint');
+  var error = modal.querySelector('.modal-error');
+
+  h3.textContent = 'Turnaround Time';
+  help.textContent = 'All times will be recalculated.';
+  input.style.display = '';
+  input.type = 'number';
+  input.placeholder = 'Minutes';
+  input.value = currentVal;
+  input.step = '5';
+  input.min = '0';
+  input.maxLength = '';
+  if (hint) hint.style.display = 'none';
+  if (error) error.classList.add('hidden');
+
+  // Make modal smaller
+  var card = modal.querySelector('.modal-card');
+  card.style.maxWidth = '320px';
+
+  modal.classList.remove('hidden');
+  input.focus();
+  input.select();
+
+  function cleanup() {
+    confirm.removeEventListener('click', onConfirm);
+    cancel.removeEventListener('click', onCancel);
+    input.removeEventListener('keydown', onKey);
+    modal.classList.add('hidden');
+    input.type = 'text';
+    input.step = '';
+    input.min = '';
+    card.style.maxWidth = '';
+    if (hint) hint.style.display = '';
+  }
+
+  async function onConfirm() {
+    var val = Number(input.value);
+    if (!Number.isFinite(val) || val < 0) return;
+
+    var res = await fetch('/admin/api/wf-events/' + window.WF_EVENT_ID + '/turnaround', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ turnaroundMins: val })
+    });
+
+    if (res.ok) {
+      document.getElementById('turnaroundInput').value = val;
+      cleanup();
+
+      // Show recalculating overlay
+      var overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,0.9);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;';
+      overlay.innerHTML = '<div style="text-align:center;">' +
+        '<div style="width:36px;height:36px;border:3px solid rgba(255,255,255,0.1);border-top-color:var(--accent,#38bdf8);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px;"></div>' +
+        '<h2 style="color:var(--text,#e5e7eb);font-size:18px;margin:0 0 6px;">Recalculating...</h2>' +
+        '<p style="color:var(--muted,#94a3b8);font-size:13px;">Updating all departure and arrival times</p>' +
+        '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+      document.body.appendChild(overlay);
+
+      recalcTimes();
+    }
+  }
+
+  function onCancel() { cleanup(); }
+  function onKey(e) {
+    if (e.key === 'Enter') onConfirm();
+    if (e.key === 'Escape') onCancel();
+  }
+
+  confirm.addEventListener('click', onConfirm);
+  cancel.addEventListener('click', onCancel);
+  input.addEventListener('keydown', onKey);
+});
+
+/* ===== TIME RECALCULATION ===== */
+function recalcTimes() {
+  fetch('/admin/api/schedule-row/recalc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ eventId: window.WF_EVENT_ID })
+  }).then(function() {
+    location.reload();
+  });
+}
+
+// Trigger recalc on block time change
+document.querySelectorAll('.sched-edit[data-field="blockTime"]').forEach(function(input) {
+  input.addEventListener('change', recalcTimes);
+});
+
+// Trigger recalc on leg 1 dep time or date change
+var firstRowInputs = document.querySelectorAll('tr[data-idx="0"] .sched-edit[data-field="depTimeUtc"], tr[data-idx="0"] .sched-edit[data-field="dateUtc"]');
+firstRowInputs.forEach(function(input) {
+  input.addEventListener('change', recalcTimes);
+});
+
+
+/* ===== ADD LEG MODAL ===== */
+(function() {
+  var modal = document.getElementById('addLegModal');
+  var form = document.getElementById('addLegForm');
+  var prevSelect = document.getElementById('addLegPrev');
+  var fromInput = document.getElementById('addLegFrom');
+  var toInput = document.getElementById('addLegTo');
+  var msg = document.getElementById('addLegMsg');
+
+  function updateFrom() {
+    var opt = prevSelect.options[prevSelect.selectedIndex];
+    if (prevSelect.value === 'START') {
+      fromInput.value = 'YSSY';
+      fromInput.setAttribute('readonly', true);
+    } else {
+      fromInput.value = opt.dataset.to || '';
+      fromInput.setAttribute('readonly', true);
+    }
+  }
+
+  prevSelect.addEventListener('change', updateFrom);
+  // Set to last leg by default
+  if (prevSelect.options.length > 1) {
+    prevSelect.selectedIndex = prevSelect.options.length - 1;
+  }
+  updateFrom();
+
+  document.getElementById('addRowBtn').addEventListener('click', function() {
+    msg.classList.add('hidden');
+    modal.classList.remove('hidden');
+  });
+
+  document.getElementById('closeAddLeg').addEventListener('click', function() {
+    modal.classList.add('hidden');
+  });
+  modal.querySelector('.modal-backdrop').addEventListener('click', function() {
+    modal.classList.add('hidden');
+  });
+
+  form.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var fromVal = fromInput.value.trim().toUpperCase();
+    var toVal = toInput.value.trim().toUpperCase();
+
+    if (!fromVal || !toVal) {
+      msg.textContent = 'From and To are required.';
+      msg.style.color = 'var(--danger)';
+      msg.classList.remove('hidden');
+      return;
+    }
+
+    var submitBtn = document.getElementById('submitAddLeg');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Adding...';
+
+    var res = await fetch('/admin/api/schedule-row/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: window.WF_EVENT_ID,
+        from: fromVal,
+        to: toVal,
+        depFlow: Number(document.getElementById('addLegFlow').value) || 0,
+        flowType: document.getElementById('addLegFlowType').value
+      })
+    });
+
+    if (res.ok) location.reload();
+    else {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Add Leg';
+      msg.textContent = 'Failed to add leg.';
+      msg.style.color = 'var(--danger)';
+      msg.classList.remove('hidden');
+    }
+  });
+
+  /* ===== MAP MODAL ===== */
+  var mapModal = document.getElementById('airportMapModal');
+  var leafletMap = null;
+
+  document.getElementById('openMapBtn').addEventListener('click', function() {
+    mapModal.classList.remove('hidden');
+
+    if (!leafletMap) {
+      leafletMap = L.map('suggestMap', { zoomControl: true }).setView([20, 0], 2);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '',
+        maxZoom: 18
+      }).addTo(leafletMap);
+
+      var colorMap = { green: '#22c55e', amber: '#f59e0b', red: '#ef4444' };
+
+      window.MAP_AIRPORTS.forEach(function(ap) {
+        var markerColor = colorMap[ap.color] || '#94a3b8';
+
+        var icon = L.divIcon({
+          className: 'map-suggest-marker',
+          html: '<div style="background:' + markerColor + ';width:12px;height:12px;border-radius:50%;border:2px solid rgba(255,255,255,0.3);"></div>',
+          iconSize: [16, 16],
+          iconAnchor: [8, 8]
+        });
+
+        var marker = L.marker([ap.lat, ap.lon], { icon: icon }).addTo(leafletMap);
+
+        marker.bindTooltip(
+          '<strong style="color:' + markerColor + ';">' + ap.icao + '</strong>' +
+          (ap.name ? ' — ' + ap.name : '') +
+          '<br>' + ap.votes + ' vote' + (ap.votes !== 1 ? 's' : '') +
+          '<br><span style="color:#94a3b8;">' + ap.tooltip + '</span>',
+          { className: 'map-suggest-tooltip' }
+        );
+
+        marker.on('click', function() {
+          openConfirmModal({
+            title: 'Select ' + ap.icao + '?',
+            message: (ap.name || ap.icao) + ' — ' + ap.votes + ' vote' + (ap.votes !== 1 ? 's' : '') + '. ' + ap.tooltip
+          }).then(function(ok) {
+            if (!ok) return;
+            toInput.value = ap.icao;
+            mapModal.classList.add('hidden');
+          });
+        });
+      });
+
+      setTimeout(function() { leafletMap.invalidateSize(); }, 200);
+    } else {
+      setTimeout(function() { leafletMap.invalidateSize(); }, 200);
+    }
+  });
+
+  document.getElementById('closeMapModal2').addEventListener('click', function() {
+    mapModal.classList.add('hidden');
+  });
+  mapModal.querySelector('.modal-backdrop').addEventListener('click', function() {
+    mapModal.classList.add('hidden');
+  });
+})();
+
+/* ===== DELETE ROW ===== */
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.btn-delete-row');
+  if (!btn) return;
+
+  openConfirmModal({
+    title: 'Delete Leg',
+    message: 'Remove ' + btn.dataset.wf + ' from the schedule?'
+  }).then(async function(ok) {
+    if (!ok) return;
+    var res = await fetch('/admin/api/schedule-row/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventId: window.WF_EVENT_ID, number: btn.dataset.wf })
+    });
+    if (res.ok) location.reload();
+  });
+});
+
+/* ===== SIMBRIEF PILOT ID (persist in localStorage) ===== */
+(function() {
+  var pidInput = document.getElementById('simbriefPilotId');
+  if (!pidInput) return;
+  pidInput.value = localStorage.getItem('simbriefPilotId') || '52776';
+  pidInput.addEventListener('change', function() {
+    localStorage.setItem('simbriefPilotId', pidInput.value.trim());
+  });
+})();
+
+/* ===== SIMBRIEF GENERATE ===== */
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.simbrief-launch');
+  if (!btn) return;
+  e.preventDefault();
+
+  var tr = btn.closest('tr');
+  var from = btn.dataset.from;
+  var to = btn.dataset.to;
+  var routeInput = tr.querySelector('.sched-edit[data-field="atcRoute"]');
+  var route = routeInput ? routeInput.value.trim() : '';
+
+  var url = 'https://dispatch.simbrief.com/options/custom'
+    + '?orig=' + encodeURIComponent(from)
+    + '&dest=' + encodeURIComponent(to)
+    + (route ? '&route=' + encodeURIComponent(route) : '')
+    + '&type=B738'
+    + '&cruise=M78'
+    + '&manualrmk=' + encodeURIComponent('WorldFlight Validated Route - www.planning.worldflight.center');
+
+  window.open(url, 'simbrief', 'width=1100,height=750,scrollbars=yes,resizable=yes');
+});
+
+/* ===== SIMBRIEF FETCH RESULT ===== */
+document.addEventListener('click', async function(e) {
+  var btn = e.target.closest('.sb-fetch');
+  if (!btn) return;
+
+  var pilotId = (document.getElementById('simbriefPilotId')?.value || '').trim();
+  if (!pilotId) {
+    alert('Enter your SimBrief Pilot ID in the top bar first.');
+    return;
+  }
+
+  var tr = btn.closest('tr');
+  var wfNum = btn.dataset.wf;
+  var from = btn.dataset.from;
+  var to = btn.dataset.to;
+
+  btn.disabled = true;
+  btn.textContent = '...';
+
+  try {
+    var res = await fetch('https://www.simbrief.com/api/xml.fetcher.php?userid=' + encodeURIComponent(pilotId) + '&json=1');
+    var data = await res.json();
+
+    if (!data || !data.times) {
+      throw new Error('No flight plan found');
+    }
+
+    // Verify it matches our route
+    var ofpOrig = (data.origin?.icao_code || '').toUpperCase();
+    var ofpDest = (data.destination?.icao_code || '').toUpperCase();
+
+    if (ofpOrig !== from.toUpperCase() || ofpDest !== to.toUpperCase()) {
+      var proceed = confirm(
+        'SimBrief OFP is for ' + ofpOrig + ' → ' + ofpDest +
+        ' but this leg is ' + from + ' → ' + to + '.\\n\\nUse it anyway?'
+      );
+      if (!proceed) { btn.disabled = false; btn.textContent = 'Fetch'; return; }
+    }
+
+    // Extract block time (in seconds) and route
+    var blockSecs = Number(data.times?.sched_block) || Number(data.times?.est_block) || 0;
+    var blockHrs = Math.floor(blockSecs / 3600);
+    var blockMins = Math.floor((blockSecs % 3600) / 60);
+    var blockStr = String(blockHrs).padStart(2, '0') + ':' + String(blockMins).padStart(2, '0');
+
+    var ofpRoute = data.general?.route || '';
+
+    // Save block time
+    await fetch('/admin/api/schedule-row/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventId: window.WF_EVENT_ID, number: wfNum, field: 'blockTime', value: blockStr })
+    });
+
+    // Save route from SimBrief
+    if (ofpRoute) {
+      await fetch('/admin/api/schedule-row/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId: window.WF_EVENT_ID, number: wfNum, field: 'atcRoute', value: ofpRoute })
+      });
+    }
+
+    location.reload();
+  } catch(err) {
+    alert('Failed to fetch from SimBrief: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = 'Fetch';
+  }
+});
+
+</script>
+
+<style>
+  .sched-edit {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text);
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+    transition: border-color .2s;
+  }
+  .sched-edit:hover { border-color: var(--border); }
+  .sched-edit:focus {
+    border-color: var(--accent);
+    outline: none;
+    background: rgba(56,189,248,0.05);
+  }
+  textarea.sched-route {
+    resize: vertical;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    word-break: break-all;
+    white-space: pre-wrap;
+  }
+  #mainDeparturesTable .col-route {
+    max-width: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  #mainDeparturesTable { table-layout:auto; }
+  .calc-cell {
+    color: var(--text);
+    font-size: 13px;
+    padding: 4px 6px;
+  }
+  .map-suggest-tooltip {
+    background: #0b1220 !important;
+    border: 1px solid #1e293b !important;
+    color: #e5e7eb !important;
+    font-size: 12px !important;
+    padding: 8px 12px !important;
+    border-radius: 8px !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important;
+  }
+  .map-suggest-tooltip::before { border-top-color: #1e293b !important; }
+  .map-suggest-marker { background: transparent !important; border: none !important; }
+  .col-del { width:0; padding:0 !important; white-space:nowrap; }
+  .btn-delete-row {
+    background:none; border:none; color:var(--danger); cursor:pointer;
+    font-size:11px; padding:2px 4px; opacity:0.3; transition:opacity .15s; line-height:1;
+  }
+  .btn-delete-row:hover { opacity:1; }
+</style>
 
 <script src="/socket.io/socket.io.js"></script>
 
@@ -8220,6 +9564,11 @@ function applyDepFlowStyle(input) {
   } else if (val >= 41) {
     input.classList.add('dep-flow-high');   // GREEN
   }
+}
+
+/* ===== DEP FLOW: REQUEST EVENT-SPECIFIC FLOWS ===== */
+if (window.WF_EVENT_ID) {
+  socket.emit('requestEventFlows', { eventId: window.WF_EVENT_ID });
 }
 
 /* ===== DEP FLOW: INITIAL SYNC (+ COLOUR) ===== */
@@ -8250,28 +9599,13 @@ document.querySelectorAll('.dep-flow-input').forEach(input => {
 
     socket.emit('updateDepFlow', {
       sector: input.dataset.sector,
-      value: input.value
+      value: input.value,
+      eventId: window.WF_EVENT_ID || null
     });
   });
 });
 
-/* ===== ADMIN REGISTRATION FOR CONNECTED USERS FOOTER ===== */
-socket.emit('registerUser', {
-  cid: "${req.session.user?.data?.cid || 'UNKNOWN'}",
-  position: "${req.session.user?.data?.controller?.callsign || 'UNKNOWN'}"
-});
 
-/* ===== CONNECTED USERS FOOTER ===== */
-socket.on('connectedUsersUpdate', users => {
-  const container = document.getElementById('connectedUsersList');
-  if (!users.length) {
-    container.innerHTML = '<em>No users connected</em>';
-    return;
-  }
-  container.innerHTML = users
-    .map(u => 'CID ' + u.cid + ' - ' + u.position)
-    .join('<br>');
-});
 </script>
 <script>
 /* ===============================
@@ -8391,7 +9725,8 @@ document.addEventListener('DOMContentLoaded', () => {
     sel.addEventListener('change', () => {
       socket.emit('updateDepFlowType', {
         sector: sel.dataset.sector,
-        flowtype: sel.value
+        flowtype: sel.value,
+        eventId: window.WF_EVENT_ID || null
       });
     });
   });
@@ -8404,7 +9739,7 @@ document.addEventListener('DOMContentLoaded', () => {
 `;
 res.send(
   renderLayout({
-    title: 'WF Schedule',
+    title: event.name + ' — Schedule',
     user,
     isAdmin,
     layoutClass: 'dashboard-full',
@@ -8412,6 +9747,397 @@ res.send(
   })
 );
 
+});
+
+/* ===== SCHEDULE ROW EDITING API ===== */
+app.post('/admin/api/schedule-row/update', requireAdmin, async (req, res) => {
+  const { eventId, number, field, value } = req.body;
+
+  const allowed = ['number', 'from', 'to', 'dateUtc', 'depTimeUtc', 'arrTimeUtc', 'blockTime', 'atcRoute'];
+  if (!allowed.includes(field)) {
+    return res.status(400).json({ error: 'Invalid field' });
+  }
+
+  try {
+    await prisma.wfScheduleRow.update({
+      where: { eventId_number: { eventId, number } },
+      data: { [field]: value }
+    });
+
+    // Recalc times if a time-affecting field changed
+    const timeFields = ['blockTime', 'dateUtc', 'depTimeUtc'];
+    if (timeFields.includes(field)) {
+      await recalcScheduleTimes(eventId);
+    } else {
+      await loadScheduleFromDb(eventId);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
+  const { eventId, from, to, depFlow, flowType } = req.body;
+
+  // Find next WF number
+  const existing = await prisma.wfScheduleRow.findMany({
+    where: { eventId },
+    orderBy: { sortOrder: 'desc' },
+    take: 1
+  });
+
+  const lastOrder = existing.length ? existing[0].sortOrder : -1;
+  const lastNum = existing.length ? existing[0].number : 'WF0000';
+  const nextNum = 'WF' + String(parseInt(lastNum.replace(/\D/g, '') || '0') + 1).padStart(4, '0');
+
+  const row = await prisma.wfScheduleRow.create({
+    data: {
+      eventId,
+      sortOrder: lastOrder + 1,
+      number: nextNum,
+      from: (from || '').toUpperCase(),
+      to: (to || '').toUpperCase(),
+      dateUtc: '',
+      depTimeUtc: '',
+      arrTimeUtc: '',
+      blockTime: '',
+      atcRoute: ''
+    }
+  });
+
+  // Create dep flow if provided
+  const sectorKey = (from || '').toUpperCase() + '-' + (to || '').toUpperCase();
+  if (from && to && (depFlow || flowType)) {
+    const rate = Number(depFlow) || 0;
+    const ft = (flowType || 'NONE').toUpperCase();
+    await prisma.depFlow.upsert({
+      where: { eventId_sector: { eventId, sector: sectorKey } },
+      update: { rate, flowtype: ft },
+      create: { eventId, sector: sectorKey, rate, flowtype: ft }
+    });
+
+    if (eventId === activeEventId) {
+      sharedDepFlows[sectorKey] = rate;
+      sharedFlowTypes[sectorKey] = ft;
+    }
+  }
+
+  await recalcScheduleTimes(eventId);
+  res.json({ ok: true });
+});
+
+app.post('/admin/api/schedule-row/delete', requireAdmin, async (req, res) => {
+  const { eventId, number } = req.body;
+
+  try {
+    await prisma.wfScheduleRow.delete({
+      where: { eventId_number: { eventId, number } }
+    });
+    await recalcScheduleTimes(eventId);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.code === 'P2025') return res.json({ ok: true });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/admin/api/schedule-row/recalc', requireAdmin, async (req, res) => {
+  const { eventId } = req.body;
+  if (!eventId) return res.status(400).json({ error: 'Invalid' });
+
+  await recalcScheduleTimes(eventId);
+  res.json({ ok: true });
+});
+
+app.post('/admin/api/wf-events/:id/turnaround', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const { turnaroundMins } = req.body;
+  if (!Number.isFinite(turnaroundMins) || turnaroundMins < 0) {
+    return res.status(400).json({ error: 'Invalid value' });
+  }
+  await prisma.wfEvent.update({ where: { id }, data: { turnaroundMins } });
+  const evt = wfEvents.find(e => e.id === id);
+  if (evt) evt.turnaroundMins = turnaroundMins;
+
+  // Recalculate all times server-side
+  await recalcScheduleTimes(id);
+
+  res.json({ ok: true });
+});
+
+async function recalcScheduleTimes(eventId) {
+  const evt = wfEvents.find(e => e.id === eventId);
+  const turnaround = evt?.turnaroundMins || 45;
+
+  const rows = await prisma.wfScheduleRow.findMany({
+    where: { eventId },
+    orderBy: { sortOrder: 'asc' }
+  });
+
+  if (!rows.length) return;
+
+  // Parse first leg's departure
+  const first = rows[0];
+  const startDate = parseServerDate(first.dateUtc);
+  if (!startDate || !first.depTimeUtc) return;
+
+  const depParts = first.depTimeUtc.split(':');
+  if (depParts.length < 2) return;
+
+  let currentTime = new Date(startDate);
+  currentTime.setUTCHours(Number(depParts[0]), Number(depParts[1]), 0, 0);
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const blockParts = (r.blockTime || '').split(':');
+    const blockMins = blockParts.length >= 2
+      ? Number(blockParts[0]) * 60 + Number(blockParts[1])
+      : 0;
+
+    const hasBlock = blockMins > 0;
+    const depTime = new Date(currentTime);
+    const arrTime = hasBlock ? new Date(depTime.getTime() + blockMins * 60000) : null;
+
+    const depStr = String(depTime.getUTCHours()).padStart(2, '0') + ':' + String(depTime.getUTCMinutes()).padStart(2, '0');
+    const arrStr = arrTime
+      ? String(arrTime.getUTCHours()).padStart(2, '0') + ':' + String(arrTime.getUTCMinutes()).padStart(2, '0')
+      : '';
+    const dateStr = formatServerDate(depTime);
+
+    const updateData = { arrTimeUtc: arrStr };
+    if (i > 0) {
+      updateData.dateUtc = dateStr;
+      updateData.depTimeUtc = depStr;
+    }
+
+    await prisma.wfScheduleRow.update({
+      where: { id: r.id },
+      data: updateData
+    });
+
+    // Next leg departs after turnaround (only if we have an arrival time)
+    if (arrTime) {
+      currentTime = new Date(arrTime.getTime() + turnaround * 60000);
+    } else {
+      // No block time — next leg can't be calculated, stop here
+      break;
+    }
+  }
+
+  await loadScheduleFromDb(eventId);
+  console.log(`[RECALC] Recalculated ${rows.length} legs for event ${eventId} (turnaround: ${turnaround}min)`);
+}
+
+function parseServerDate(str) {
+  if (!str) return null;
+  // ISO: 2025-11-01
+  const iso = Date.parse(str);
+  if (!isNaN(iso)) return new Date(iso);
+
+  // "Sat 1st Nov" style
+  const months = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const m = str.match(/(\d{1,2})\s*(?:st|nd|rd|th)?\s+([A-Za-z]+)/);
+  if (m) {
+    const day = Number(m[1]);
+    const mon = months[m[2].toLowerCase().slice(0, 3)];
+    if (mon !== undefined) return new Date(Date.UTC(new Date().getFullYear(), mon, day));
+  }
+  return null;
+}
+
+function formatServerDate(d) {
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const day = d.getUTCDate();
+  const suffix = day === 1 || day === 21 || day === 31 ? 'st'
+    : day === 2 || day === 22 ? 'nd'
+    : day === 3 || day === 23 ? 'rd' : 'th';
+  return days[d.getUTCDay()] + ' ' + day + suffix + ' ' + months[d.getUTCMonth()];
+}
+
+app.post('/admin/api/wf-events/:id/unlink-csv', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  await prisma.wfEvent.update({
+    where: { id },
+    data: { mode: 'scratch', sheetUrl: '' }
+  });
+  const evt = wfEvents.find(e => e.id === id);
+  if (evt) {
+    evt.mode = 'scratch';
+    evt.sheetUrl = '';
+  }
+  console.log('[EVENT] Unlinked CSV for event ' + id + ' — now editable');
+  res.json({ ok: true });
+});
+
+/* ===== WF EVENT API ===== */
+app.post('/admin/api/wf-events', requireAdmin, async (req, res) => {
+  const { name, year, sheetUrl, mode, importFromEventId } = req.body;
+  const eventMode = mode === 'scratch' ? 'scratch' : 'csv';
+
+  if (!name || !year) {
+    return res.status(400).json({ error: 'Name and year are required' });
+  }
+  if (eventMode === 'csv' && !sheetUrl) {
+    return res.status(400).json({ error: 'Google Sheet URL is required for CSV mode' });
+  }
+
+  const existing = await prisma.wfEvent.findUnique({ where: { year } });
+  if (existing) {
+    return res.status(409).json({ error: 'An event for ' + year + ' already exists' });
+  }
+
+  const event = await prisma.wfEvent.create({
+    data: { name, year, sheetUrl: sheetUrl || '', mode: eventMode, isActive: false }
+  });
+
+  // Import dep flow rates from another event (flow types reset to NONE)
+  if (importFromEventId) {
+    const sourceFlows = await prisma.depFlow.findMany({
+      where: { eventId: Number(importFromEventId) }
+    });
+    if (sourceFlows.length > 0) {
+      await prisma.depFlow.createMany({
+        data: sourceFlows.map(f => ({
+          eventId: event.id,
+          sector: f.sector,
+          rate: f.rate,
+          flowtype: 'NONE'
+        })),
+        skipDuplicates: true
+      });
+      console.log(`[EVENT] Imported ${sourceFlows.length} dep flow rates from event ${importFromEventId} to ${event.id} (flow types reset)`);
+    }
+  }
+
+  // Load the sheet for this new event
+  await refreshSheetForEvent(event);
+  wfEvents = await prisma.wfEvent.findMany({ orderBy: { year: 'desc' } });
+
+  res.json({ success: true, id: event.id });
+});
+
+app.get('/admin/api/wf-events/:id/backup-count', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const count = await prisma.tobtBookingBackup.count({ where: { eventId: id } });
+  res.json({ count });
+});
+
+app.post('/admin/api/wf-events/:id/activate', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const { restoreBookings } = req.body || {};
+  const previousEventId = activeEventId;
+
+  // 1. Backup all existing bookings from current active event
+  const existingBookings = await prisma.tobtBooking.findMany();
+  if (existingBookings.length > 0) {
+    // Clear any old backups for the previous event first
+    await prisma.tobtBookingBackup.deleteMany({ where: { eventId: previousEventId || 0 } });
+
+    await prisma.tobtBookingBackup.createMany({
+      data: existingBookings.map(b => ({
+        eventId: previousEventId || 0,
+        slotKey: b.slotKey,
+        cid: b.cid,
+        callsign: b.callsign,
+        from: b.from,
+        to: b.to,
+        dateUtc: b.dateUtc,
+        depTimeUtc: b.depTimeUtc,
+        tobtTimeUtc: b.tobtTimeUtc,
+        originalId: b.id
+      }))
+    });
+    console.log(`[EVENT] Backed up ${existingBookings.length} bookings from event ${previousEventId}`);
+  }
+
+  // 2. Clear all live bookings
+  await prisma.tobtBooking.deleteMany({});
+
+  // 3. Clear all in-memory state
+  Object.keys(tobtBookingsByKey).forEach(k => delete tobtBookingsByKey[k]);
+  Object.keys(tobtBookingsByCid).forEach(k => delete tobtBookingsByCid[k]);
+  Object.keys(sharedToggles).forEach(k => delete sharedToggles[k]);
+  Object.keys(sharedTSAT).forEach(k => delete sharedTSAT[k]);
+  Object.keys(tsatQueues).forEach(k => delete tsatQueues[k]);
+  Object.keys(allTobtSlots).forEach(k => delete allTobtSlots[k]);
+  Object.keys(recentlyStarted).forEach(k => delete recentlyStarted[k]);
+
+  // 4. Switch active event
+  await prisma.$transaction([
+    prisma.wfEvent.updateMany({ data: { isActive: false } }),
+    prisma.wfEvent.update({ where: { id }, data: { isActive: true } })
+  ]);
+
+  activeEventId = id;
+  adminSheetCache = eventSheetCaches[id] || [];
+  wfEvents = await prisma.wfEvent.findMany({ orderBy: { year: 'desc' } });
+
+  // 5. Reload dep flows and rebuild slots for the new event
+  await loadDepFlowsFromDb();
+  rebuildAllTobtSlots();
+
+  // 6. Restore bookings from backup if requested
+  let restoredCount = 0;
+  if (restoreBookings) {
+    const backups = await prisma.tobtBookingBackup.findMany({ where: { eventId: id } });
+    if (backups.length > 0) {
+      for (const b of backups) {
+        try {
+          await prisma.tobtBooking.create({
+            data: {
+              slotKey: b.slotKey,
+              cid: b.cid,
+              callsign: b.callsign,
+              from: b.from,
+              to: b.to,
+              dateUtc: b.dateUtc,
+              depTimeUtc: b.depTimeUtc,
+              tobtTimeUtc: b.tobtTimeUtc
+            }
+          });
+          restoredCount++;
+        } catch (err) {
+          // skip duplicates or invalid entries
+        }
+      }
+      // Reload in-memory booking caches
+      await loadTobtBookingsFromDb();
+      console.log(`[EVENT] Restored ${restoredCount}/${backups.length} bookings for event ${id}`);
+    }
+  }
+
+  console.log(`[EVENT] Activated event ID ${id} — ${adminSheetCache.length} rows, ${Object.keys(sharedDepFlows).length} flows`);
+  res.json({ success: true });
+});
+
+app.delete('/admin/api/wf-events/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const event = await prisma.wfEvent.findUnique({ where: { id } });
+  if (!event) return res.json({ ok: true });
+  if (event.isActive) return res.status(400).json({ error: 'Cannot delete the active event' });
+
+  await prisma.depFlow.deleteMany({ where: { eventId: id } });
+  await prisma.wfEvent.delete({ where: { id } });
+  delete eventSheetCaches[id];
+  wfEvents = await prisma.wfEvent.findMany({ orderBy: { year: 'desc' } });
+
+  res.json({ ok: true });
+});
+
+app.post('/admin/api/wf-events/:id/refresh', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const event = wfEvents.find(e => e.id === id);
+  if (!event) return res.status(404).json({ error: 'Event not found' });
+
+  await refreshSheetForEvent(event);
+  if (id === activeEventId) {
+    adminSheetCache = eventSheetCaches[id] || [];
+  }
+
+  res.json({ success: true, rows: (eventSheetCaches[id] || []).length });
 });
 
 /* ===== SETTINGS PAGE ===== */
