@@ -62,7 +62,8 @@
       "Bash(grep -n '`')",
       "Bash(cp \"c:/dev/AMS-Ceo/src/data/navdata/earth_fix.dat\" \"c:/dev/WorldFlight-Planning/data/navdata/\")",
       "Bash(cp \"c:/dev/AMS-Ceo/src/data/navdata/earth_awy.dat\" \"c:/dev/WorldFlight-Planning/data/navdata/\")",
-      "Bash(cp \"c:/dev/AMS-Ceo/public/data/fir-boundaries.geojson\" \"c:/dev/WorldFlight-Planning/public/\")"
+      "Bash(cp \"c:/dev/AMS-Ceo/public/data/fir-boundaries.geojson\" \"c:/dev/WorldFlight-Planning/public/\")",
+      "Bash(node -e ':*)"
     ]
   }
 }

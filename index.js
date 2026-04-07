@@ -1272,13 +1272,13 @@ async function bootstrap() {
   loadNavFixes();
   loadFirData();
   await refreshPilots();
-  await loadDepFlowsFromDb();
-  await loadTobtBookingsFromDb();
   await loadPageVisibility();
   await loadSiteBanner();
 
-  await refreshAdminSheet();   // 🔑 REQUIRED
-wfWorldMapCache.clear();
+  await refreshAdminSheet();   // 🔑 sets activeEventId + loads schedule rows
+  await loadDepFlowsFromDb();  // needs activeEventId
+  await loadTobtBookingsFromDb();
+  wfWorldMapCache.clear();
 
 // Warm default map cache once per server start (no overrides)
 await (async () => {
@@ -1291,6 +1291,9 @@ await (async () => {
 
 
   rebuildAllTobtSlots();       // 🔑 NOW WORKS
+
+  // Pre-warm FIR analysis cache in background
+  buildFirAnalysis().then(() => console.log('[AIRSPACE] FIR analysis cache warmed')).catch(() => {});
 
   setInterval(refreshPilots, 60000);
 }
@@ -3182,10 +3185,10 @@ async function refreshSheetForEvent(event) {
 
     console.log(`✅ Sheet synced to DB for ${event.name}: ${rows.length} rows`);
   } catch (err) {
-    console.error(`❌ Failed to refresh sheet for ${event.name}:`, err.message);
+    console.error(`⚠️ Sheet fetch failed for ${event.name}: ${err.message} — loading from DB`);
   }
 
-  // Always load from DB (includes any manual edits)
+  // Always load from DB (includes any manual edits, or as fallback when sheet fetch fails)
   return await loadScheduleFromDb(event.id);
 }
 
@@ -4386,6 +4389,17 @@ function wfWorldMapKey(params = {}) {
 
 
 
+app.get('/api/wf/world-map/version', (req, res) => {
+  const qs = new URLSearchParams({ a: req.query.a || '', b: req.query.b || '', c: req.query.c || '' }).toString();
+  const key = wfWorldMapKey({
+    a: (req.query.a || '').toString().trim().toUpperCase(),
+    b: (req.query.b || '').toString().trim().toUpperCase(),
+    c: (req.query.c || '').toString().trim().toUpperCase()
+  });
+  const cached = wfWorldMapCache.get(key);
+  res.json({ builtAt: cached?.builtAt ?? null, eventId: activeEventId });
+});
+
 app.get('/api/wf/world-map', async (req, res) => {
   const a = (req.query.a || '').toString().trim().toUpperCase();
   const b = (req.query.b || '').toString().trim().toUpperCase();
@@ -4401,7 +4415,7 @@ app.get('/api/wf/world-map', async (req, res) => {
   // 1) Serve from cache instantly
   const cached = wfWorldMapCache.get(key);
   if (cached) {
-    return res.json({ builtAt: cached.builtAt, ...cached.payload });
+    return res.json({ builtAt: cached.builtAt, eventId: activeEventId, ...cached.payload });
   }
 
   // 2) De-dupe concurrent builds (first request builds, others await)
@@ -4422,7 +4436,7 @@ app.get('/api/wf/world-map', async (req, res) => {
 
   try {
     const built = await p;
-    return res.json({ builtAt: built.builtAt, ...built.payload });
+    return res.json({ builtAt: built.builtAt, eventId: activeEventId, ...built.payload });
   } catch (err) {
     console.error('[WF MAP] Build failed', err);
     return res.status(500).json({ error: 'Failed to build world map' });
@@ -10656,6 +10670,239 @@ app.get('/api/resolve-route', async (req, res) => {
   res.json({ points: cleaned, firs: firTransits });
 });
 
+// ===== AIRSPACE MANAGEMENT API =====
+// Cache FIR analysis per event to avoid recomputing on every page load
+let firAnalysisCache = { eventId: null, data: null, building: null };
+
+async function buildFirAnalysis() {
+  if (firAnalysisCache.eventId === activeEventId && firAnalysisCache.data) {
+    return firAnalysisCache.data;
+  }
+  // De-dupe concurrent builds
+  if (firAnalysisCache.building) return firAnalysisCache.building;
+
+  const buildPromise = _buildFirAnalysisInner();
+  firAnalysisCache.building = buildPromise;
+  try {
+    const result = await buildPromise;
+    firAnalysisCache = { eventId: activeEventId, data: result, building: null };
+    return result;
+  } catch (err) {
+    firAnalysisCache.building = null;
+    throw err;
+  }
+}
+
+async function _buildFirAnalysisInner() {
+  const legs = adminSheetCache.filter(r => r?.from && r?.to);
+  const firMap = {}; // firId -> { legs: [...], totalStaffMins, ... }
+
+  // Batch-load all airports in one query to avoid N+1
+  const allIcaos = new Set();
+  for (const leg of legs) {
+    allIcaos.add(leg.from);
+    allIcaos.add(leg.to);
+    if (leg.atc_route) {
+      for (const tok of leg.atc_route.split(/\s+/).filter(Boolean)) {
+        if (/^[A-Z]{4}$/.test(tok.toUpperCase())) allIcaos.add(tok.toUpperCase());
+      }
+    }
+  }
+  const airportRows = await prisma.airport.findMany({
+    where: { icao: { in: Array.from(allIcaos) } },
+    select: { icao: true, lat: true, lon: true }
+  });
+  const airportLookup = {};
+  for (const ap of airportRows) airportLookup[ap.icao] = ap;
+
+  for (const leg of legs) {
+    const points = [];
+
+    // Resolve route points using in-memory lookup
+    const depAp = airportLookup[leg.from];
+    if (depAp) points.push({ name: leg.from, lat: depAp.lat, lon: depAp.lon });
+
+    if (leg.atc_route) {
+      const tokens = leg.atc_route.split(/\s+/).filter(Boolean);
+      for (const tok of tokens) {
+        const lastPt = points.length > 0 ? points[points.length - 1] : (depAp || { lat: 0, lon: 0 });
+        const llFix = parseNavLatLon(tok);
+        if (llFix) { points.push({ name: tok, lat: llFix.lat, lon: llFix.lon }); continue; }
+        const upper = tok.toUpperCase();
+        if (/^(DCT|[A-Z]{1,2}\d{1,4}|[A-Z]\d{1,4}[A-Z]?)$/.test(upper) && upper.length <= 5 && /\d/.test(upper)) continue;
+        if (upper === 'DCT') continue;
+        const fix = closestFix(upper, lastPt.lat, lastPt.lon);
+        if (fix) { points.push({ name: upper, lat: fix.lat, lon: fix.lon }); continue; }
+        if (/^[A-Z]{4}$/.test(upper)) {
+          const ap = airportLookup[upper];
+          if (ap) { points.push({ name: upper, lat: ap.lat, lon: ap.lon }); continue; }
+        }
+      }
+    }
+
+    const arrAp = airportLookup[leg.to];
+    if (arrAp) points.push({ name: leg.to, lat: arrAp.lat, lon: arrAp.lon });
+
+    if (points.length < 2) continue;
+
+    // Calculate cumulative distances
+    const toRad = Math.PI / 180;
+    function haversineNm(lat1, lon1, lat2, lon2) {
+      const dLat = (lat2 - lat1) * toRad;
+      const dLon = (lon2 - lon1) * toRad;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+      return 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 3440.065;
+    }
+
+    let totalDist = 0;
+    const cumDist = [0];
+    for (let i = 1; i < points.length; i++) {
+      totalDist += haversineNm(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+      cumDist.push(totalDist);
+    }
+
+    // Sample route for FIR transits
+    const SAMPLES = 100;
+    let lastFir = null;
+    const legFirSegments = [];
+
+    for (let s = 0; s <= SAMPLES; s++) {
+      const frac = s / SAMPLES;
+      const targetDist = frac * totalDist;
+      let segIdx = 0;
+      for (let i = 1; i < cumDist.length; i++) {
+        if (cumDist[i] >= targetDist) { segIdx = i - 1; break; }
+        if (i === cumDist.length - 1) segIdx = i - 1;
+      }
+      const segLen = cumDist[segIdx + 1] - cumDist[segIdx];
+      const segFrac = segLen > 0 ? (targetDist - cumDist[segIdx]) / segLen : 0;
+      const sLat = points[segIdx].lat + (points[segIdx + 1].lat - points[segIdx].lat) * segFrac;
+      const sLon = points[segIdx].lon + (points[segIdx + 1].lon - points[segIdx].lon) * segFrac;
+
+      const firs = getFirsForPoint(sLat, sLon);
+      const firId = firs[0] || null;
+
+      if (firId && firId !== lastFir) {
+        if (legFirSegments.length > 0) legFirSegments[legFirSegments.length - 1].exitFrac = frac;
+        legFirSegments.push({ fir: firId, entryFrac: frac, exitFrac: 1.0 });
+        lastFir = firId;
+      }
+    }
+
+    // Parse dep/block times
+    const depParts = (leg.dep_time_utc || '').split(':');
+    const blockParts = (leg.block_time || '').split(':');
+    const depMins = depParts.length >= 2 ? Number(depParts[0]) * 60 + Number(depParts[1]) : null;
+    const blockMins = blockParts.length >= 2 ? Number(blockParts[0]) * 60 + Number(blockParts[1]) : null;
+
+    const sectorKey = `${leg.from}-${leg.to}`;
+
+    for (const seg of legFirSegments) {
+      if (!firMap[seg.fir]) {
+        // Look up FIR metadata
+        const firFeature = firFeatures.find(f => f.properties?.id === seg.fir);
+        firMap[seg.fir] = {
+          fir: seg.fir,
+          region: firFeature?.properties?.region || '',
+          division: firFeature?.properties?.division || '',
+          legs: []
+        };
+      }
+
+      const legEntry = {
+        wf: leg.number,
+        from: leg.from,
+        to: leg.to,
+        date: leg.date_utc,
+        atcRoute: leg.atc_route || '',
+        entryFrac: seg.entryFrac,
+        exitFrac: seg.exitFrac,
+        depFlow: sharedDepFlows[sectorKey] || 0,
+        flowType: sharedFlowTypes[sectorKey] || 'NONE'
+      };
+
+      if (depMins !== null && blockMins !== null && blockMins > 0) {
+        const entryMins = depMins + seg.entryFrac * blockMins;
+        const exitMins = depMins + seg.exitFrac * blockMins;
+        const staffStart = entryMins - 60;
+        const staffEnd = exitMins + 60;
+        const fmt = m => String(Math.floor(((m % 1440) + 1440) % 1440 / 60)).padStart(2, '0') + ':' + String(Math.floor(((m % 1440) + 1440) % 1440 % 60)).padStart(2, '0');
+        legEntry.entryTime = fmt(entryMins);
+        legEntry.exitTime = fmt(exitMins);
+        legEntry.staffStart = fmt(staffStart);
+        legEntry.staffEnd = fmt(staffEnd);
+        legEntry.staffMins = Math.round((staffEnd - staffStart));
+      }
+
+      firMap[seg.fir].legs.push(legEntry);
+    }
+  }
+
+  // Merge multiple transits of the same leg through the same FIR
+  for (const fir of Object.values(firMap)) {
+    const merged = [];
+    for (const leg of fir.legs) {
+      const prev = merged.find(m => m.wf === leg.wf && m.from === leg.from && m.to === leg.to);
+      if (prev) {
+        // Extend the existing entry to cover both transits
+        prev.exitFrac = Math.max(prev.exitFrac, leg.exitFrac);
+        prev.entryFrac = Math.min(prev.entryFrac, leg.entryFrac);
+        if (leg.entryTime && prev.entryTime && leg.entryTime < prev.entryTime) prev.entryTime = leg.entryTime;
+        if (leg.exitTime && prev.exitTime && leg.exitTime > prev.exitTime) prev.exitTime = leg.exitTime;
+        if (leg.staffStart && prev.staffStart && leg.staffStart < prev.staffStart) prev.staffStart = leg.staffStart;
+        if (leg.staffEnd && prev.staffEnd && leg.staffEnd > prev.staffEnd) prev.staffEnd = leg.staffEnd;
+        if (prev.staffMins && leg.staffMins) {
+          // Recalculate from merged window
+          const sp = prev.staffStart.split(':'), ep = prev.staffEnd.split(':');
+          prev.staffMins = (Number(ep[0]) * 60 + Number(ep[1])) - (Number(sp[0]) * 60 + Number(sp[1]));
+          if (prev.staffMins < 0) prev.staffMins += 1440;
+        }
+      } else {
+        merged.push(Object.assign({}, leg));
+      }
+    }
+    fir.legs = merged;
+
+    // Sort by date then entry time
+    fir.legs.sort((a, b) => {
+      if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
+      return (a.entryTime || '').localeCompare(b.entryTime || '');
+    });
+  }
+
+  const result = Object.values(firMap).sort((a, b) => a.fir.localeCompare(b.fir));
+  firAnalysisCache = { eventId: activeEventId, data: result };
+  return result;
+}
+
+app.get('/api/airspace-management', requireLogin, async (req, res) => {
+  try {
+    const allFirs = await buildFirAnalysis();
+    const fir = (req.query.fir || '').toUpperCase().trim();
+
+    if (fir) {
+      const match = allFirs.find(f => f.fir === fir);
+      if (!match) return res.json({ fir, legs: [], region: '', division: '' });
+      return res.json(match);
+    }
+
+    // Return summary (no full leg details)
+    const summary = allFirs.map(f => ({
+      fir: f.fir,
+      region: f.region,
+      division: f.division,
+      legCount: f.legs.length
+    }));
+    res.json({ eventId: activeEventId, firs: summary });
+  } catch (err) {
+    console.error('[AIRSPACE] Analysis failed:', err);
+    res.status(500).json({ error: 'Failed to build analysis' });
+  }
+});
+
+// Clear FIR analysis cache when schedule or flows change
+function clearFirAnalysisCache() { firAnalysisCache = { eventId: null, data: null }; }
+
 function parseNavLatLon(token) {
   const t = token.toUpperCase().trim();
   // 52N020W
@@ -11047,8 +11294,9 @@ app.post('/admin/api/wf-events/:id/activate', requireAdmin, async (req, res) => 
     }
   }
 
-  // Clear world map cache so it rebuilds from the new schedule
+  // Clear caches so they rebuild from the new schedule
   wfWorldMapCache.clear();
+  clearFirAnalysisCache();
 
   console.log(`[EVENT] Activated event ID ${id} — ${adminSheetCache.length} rows, ${Object.keys(sharedDepFlows).length} flows`);
   res.json({ success: true });
@@ -13065,6 +13313,668 @@ app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
   res.send(
     renderLayout({
       title: 'ATC Slot Management',
+      user,
+      isAdmin,
+      layoutClass: 'dashboard-full',
+      content
+    })
+  );
+});
+
+// ===== AIRSPACE MANAGEMENT PAGE =====
+app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) => {
+  const user = req.session.user?.data;
+  if (!user) return res.redirect('/');
+  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+
+  const content = `
+  <style>
+    .airspace-page { max-width: 1400px; margin: 0 auto; }
+    .airspace-search-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+    .airspace-search-row input, .airspace-search-row select {
+      padding: 8px 12px; background: var(--panel); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 13px;
+    }
+    .airspace-search-row input { width: 140px; text-transform: uppercase; }
+    .airspace-search-row select { min-width: 140px; }
+    .airspace-search-row button {
+      padding: 8px 16px; background: var(--accent); color: #020617; border: none;
+      border-radius: 6px; font-weight: 600; cursor: pointer;
+    }
+    .airspace-filter-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; display: block; }
+    #airspaceFirMap { width: 100%; height: 340px; border-radius: 8px; margin-top: 12px; border: 1px solid var(--border); }
+    #airspaceFirMap path:focus { outline: none; }
+    .fir-summary-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 8px; margin-top: 16px; max-height: 260px; overflow-y: auto;
+    }
+    .fir-chip {
+      padding: 8px 12px; background: var(--panel); border: 1px solid var(--border);
+      border-radius: 6px; cursor: pointer; font-size: 13px; display: flex;
+      justify-content: space-between; align-items: center; transition: border-color .2s;
+    }
+    .fir-chip:hover { border-color: var(--accent); }
+    .fir-chip .fir-name { font-weight: 600; color: var(--text); }
+    .fir-chip .fir-count { font-size: 11px; color: var(--muted); }
+    .fir-detail-card { margin-top: 20px; }
+    .fir-detail-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .fir-detail-header h2 { margin: 0; }
+    .fir-detail-meta { font-size: 13px; color: var(--muted); }
+    .fir-detail-header .back-link { color: var(--accent); text-decoration: none; font-size: 13px; }
+    #firDetailTable { width: 100%; }
+    #firDetailTable th, #firDetailTable td { padding: 6px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
+    #firDetailTable th { font-size: 13px; font-weight: 600; color: var(--muted); }
+    #firDetailTable td { font-size: 13px; }
+    .staff-window { font-family: monospace; font-size: 12px; }
+    .flow-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+    }
+    .flow-badge.none { background: rgba(255,255,255,0.05); color: var(--muted); }
+    .flow-badge.slotted { background: rgba(34,197,94,0.15); color: #4ade80; }
+    .flow-badge.booking { background: rgba(251,146,60,0.15); color: #fb923c; }
+    .fir-highlight { fill: rgba(56,189,248,0.2); stroke: var(--accent); stroke-width: 2; }
+    .fir-timeline { margin-top: 16px; }
+    .fir-timeline-bar {
+      position: relative; height: 32px; background: rgba(255,255,255,0.03);
+      border-radius: 4px; margin-bottom: 4px; border: 1px solid var(--border);
+    }
+    .fir-timeline-segment {
+      position: absolute; top: 2px; bottom: 2px; border-radius: 3px;
+      background: rgba(56,189,248,0.3); border: 1px solid rgba(56,189,248,0.5);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10px; color: var(--text); overflow: hidden; white-space: nowrap;
+    }
+    .fir-timeline-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+    #firDetailTable td.fir-route-col {
+      font-family: monospace; font-size: 11px;
+      max-width: 300px; line-height: 1.5; cursor: pointer;
+    }
+    #firDetailTable td.fir-route-col .route-text {
+      display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #firDetailTable td.fir-route-col.expanded .route-text {
+      display: block; -webkit-line-clamp: unset; white-space: normal; word-break: break-all;
+    }
+    .fir-view-btn {
+      padding: 3px 10px; background: rgba(56,189,248,0.12); color: var(--accent);
+      border: 1px solid rgba(56,189,248,0.3); border-radius: 4px; cursor: pointer;
+      font-size: 11px; font-weight: 600; white-space: nowrap;
+    }
+    .fir-view-btn:hover { background: rgba(56,189,248,0.25); }
+    .fir-route-modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 9999;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .fir-route-modal {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      width: 700px; max-width: 90vw; max-height: 85vh; overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .fir-route-modal-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+    }
+    .fir-route-modal-header h3 { margin: 0; font-size: 15px; }
+    .fir-route-modal-close {
+      background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer;
+    }
+    .fir-route-modal-map { height: 400px; width: 100%; }
+  </style>
+
+  <main class="dashboard-full airspace-page">
+    <!-- Search / Select Section -->
+    <section class="card" id="airspaceSearchSection">
+      <h2>Airspace Management</h2>
+      <p style="color:var(--muted);margin-bottom:12px;">Enter an FIR code or click one on the map to view staffing requirements for the active schedule.</p>
+
+      <div class="airspace-search-row">
+        <div>
+          <label class="airspace-filter-label">FIR Code</label>
+          <input type="text" id="firSearchInput" placeholder="e.g. EGTT" maxlength="10" />
+        </div>
+        <button id="firSearchBtn" style="align-self:flex-end;">Load FIR</button>
+        <div style="border-left:1px solid var(--border);height:36px;align-self:flex-end;"></div>
+        <div>
+          <label class="airspace-filter-label">Region</label>
+          <select id="firFilterRegion"><option value="">All Regions</option></select>
+        </div>
+        <div>
+          <label class="airspace-filter-label">Division</label>
+          <select id="firFilterDivision"><option value="">All Divisions</option></select>
+        </div>
+      </div>
+
+      <div id="airspaceFirMap"></div>
+
+      <div id="firChipContainer" style="margin-top:16px;">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">FIRs on the active schedule (click to view):</div>
+        <div class="fir-summary-grid" id="firSummaryGrid"></div>
+      </div>
+    </section>
+
+    <!-- Detail Section (hidden until FIR selected) -->
+    <section class="card fir-detail-card" id="firDetailSection" style="display:none;">
+      <div class="fir-detail-header">
+        <div>
+          <a href="#" class="back-link" id="firBackLink">&larr; Back to all FIRs</a>
+          <h2 id="firDetailTitle"></h2>
+          <div class="fir-detail-meta" id="firDetailMeta"></div>
+        </div>
+      </div>
+
+      <!-- Timeline -->
+      <div class="fir-timeline" id="firTimeline"></div>
+
+      <!-- Legs table -->
+      <div class="table-scroll" style="margin-top:16px;">
+        <table id="firDetailTable">
+          <thead>
+            <tr>
+              <th>WF</th>
+              <th>From</th>
+              <th>To</th>
+              <th>Date</th>
+              <th>Staff Window</th>
+              <th>Staff Duration</th>
+              <th>ATC Route</th>
+              <th>Dep Flow</th>
+              <th>Flow Type</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="firDetailBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  document.addEventListener('DOMContentLoaded', function() {
+    var map = null;
+    var firGeoLayer = null;
+    var highlightLayer = null;
+
+    // Init map
+    map = L.map('airspaceFirMap', { zoomControl: true }).setView([30, 0], 2);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      subdomains: 'abcd', maxZoom: 8, noWrap: true
+    }).addTo(map);
+    setTimeout(function() { map.invalidateSize(); }, 200);
+
+    // FIR metadata lookup (populated from geojson)
+    var firMeta = {}; // firId -> { region, division }
+    var allFirSummary = []; // stored for filtering
+
+    // Load FIR boundaries onto map
+    fetch('/fir-boundaries.geojson')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var defaultStyle = { color: 'rgba(255,255,255,0.12)', weight: 1, fillOpacity: 0 };
+        var hoverStyle = { color: '#38bdf8', weight: 2, fillColor: 'rgba(56,189,248,0.15)', fillOpacity: 0.25 };
+
+        // Build metadata + populate dropdowns
+        var regions = new Set(), divisions = new Set();
+        data.features.forEach(function(f) {
+          var p = f.properties || {};
+          if (p.id) firMeta[p.id] = { region: p.region || '', division: p.division || '' };
+          if (p.region) regions.add(p.region);
+          if (p.division) divisions.add(p.division);
+        });
+
+        var regionSel = document.getElementById('firFilterRegion');
+        Array.from(regions).sort().forEach(function(r) {
+          regionSel.innerHTML += '<option value="' + r + '">' + r + '</option>';
+        });
+        var divSel = document.getElementById('firFilterDivision');
+        Array.from(divisions).sort().forEach(function(d) {
+          divSel.innerHTML += '<option value="' + d + '">' + d + '</option>';
+        });
+
+        firGeoLayer = L.geoJSON(data, {
+          style: defaultStyle,
+          onEachFeature: function(feature, layer) {
+            var firId = feature.properties && feature.properties.id;
+            if (firId) {
+              layer._firId = firId;
+              layer._firRegion = (feature.properties.region || '');
+              layer._firDivision = (feature.properties.division || '');
+              layer.on('mouseover', function() { layer.setStyle(hoverStyle); layer.bringToFront(); });
+              layer.on('mouseout', function() { firGeoLayer.resetStyle(layer); });
+              layer.on('click', function() {
+                layer.setStyle({ color: '#38bdf8', weight: 3, fillColor: 'rgba(56,189,248,0.35)', fillOpacity: 0.4 });
+                setTimeout(function() { layer.setStyle({ color: '#38bdf8', weight: 2, fillColor: 'rgba(56,189,248,0.2)', fillOpacity: 0.3 }); }, 150);
+                setTimeout(function() { layer.setStyle({ color: '#38bdf8', weight: 3, fillColor: 'rgba(56,189,248,0.35)', fillOpacity: 0.4 }); }, 300);
+                setTimeout(function() { loadFirDetail(firId); }, 500);
+              });
+              layer.bindTooltip(firId, { sticky: true, className: 'fir-tooltip' });
+            }
+          }
+        }).addTo(map);
+
+        // Filter handlers
+        regionSel.addEventListener('change', applyFilters);
+        divSel.addEventListener('change', applyFilters);
+      });
+
+    function applyFilters() {
+      var region = document.getElementById('firFilterRegion').value;
+      var division = document.getElementById('firFilterDivision').value;
+      if (!region && !division) return;
+
+      // Collect all matching FIRs that are on the active schedule
+      var matchingFirs = allFirSummary.filter(function(f) {
+        var meta = firMeta[f.fir] || {};
+        var matchR = !region || meta.region === region;
+        var matchD = !division || meta.division === division;
+        return matchR && matchD;
+      });
+
+      if (!matchingFirs.length) return;
+
+      // Load grouped detail view
+      loadGroupDetail(matchingFirs, region, division);
+    }
+
+    // Load summary
+    fetch('/api/airspace-management', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var grid = document.getElementById('firSummaryGrid');
+        if (!data.firs || !data.firs.length) {
+          grid.innerHTML = '<div style="color:var(--muted);font-size:13px;">No FIR data available. Ensure the active schedule has routes defined.</div>';
+          return;
+        }
+        allFirSummary = data.firs;
+        grid.innerHTML = data.firs.map(function(f) {
+          var meta = firMeta[f.fir] || {};
+          return '<div class="fir-chip" data-fir="' + f.fir + '" data-region="' + (meta.region || f.region || '') + '" data-division="' + (meta.division || f.division || '') + '">'
+            + '<span class="fir-name">' + f.fir + '</span>'
+            + '<span class="fir-count">' + f.legCount + ' leg' + (f.legCount !== 1 ? 's' : '') + '</span>'
+            + '</div>';
+        }).join('');
+
+        grid.querySelectorAll('.fir-chip').forEach(function(chip) {
+          chip.addEventListener('click', function() {
+            loadFirDetail(chip.dataset.fir);
+          });
+        });
+      });
+
+    // Search
+    document.getElementById('firSearchBtn').addEventListener('click', function() {
+      var val = document.getElementById('firSearchInput').value.trim().toUpperCase();
+      if (val) loadFirDetail(val);
+    });
+    document.getElementById('firSearchInput').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        var val = this.value.trim().toUpperCase();
+        if (val) loadFirDetail(val);
+      }
+    });
+
+    // Back link
+    document.getElementById('firBackLink').addEventListener('click', function(e) {
+      e.preventDefault();
+      document.getElementById('firDetailSection').style.display = 'none';
+      document.getElementById('airspaceSearchSection').style.display = '';
+      if (highlightLayer) { map.removeLayer(highlightLayer); highlightLayer = null; }
+    });
+
+    function loadFirDetail(firId) {
+      fetch('/api/airspace-management?fir=' + encodeURIComponent(firId), { credentials: 'same-origin' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          document.getElementById('airspaceSearchSection').style.display = 'none';
+          document.getElementById('firDetailSection').style.display = '';
+
+          document.getElementById('firDetailTitle').textContent = data.fir + ' Airspace';
+          var metaParts = [];
+          if (data.region) metaParts.push('Region: ' + data.region);
+          if (data.division) metaParts.push('Division: ' + data.division);
+          metaParts.push(data.legs.length + ' leg' + (data.legs.length !== 1 ? 's' : '') + ' transiting');
+          document.getElementById('firDetailMeta').textContent = metaParts.join(' — ');
+
+          // Highlight FIR on map
+          if (highlightLayer) { map.removeLayer(highlightLayer); }
+          if (firGeoLayer) {
+            firGeoLayer.eachLayer(function(layer) {
+              if (layer.feature && layer.feature.properties && layer.feature.properties.id === data.fir) {
+                highlightLayer = L.geoJSON(layer.feature, {
+                  style: { color: 'var(--accent)', weight: 2, fillColor: 'rgba(56,189,248,0.15)', fillOpacity: 0.3 }
+                }).addTo(map);
+                map.fitBounds(highlightLayer.getBounds(), { padding: [30, 30], maxZoom: 6 });
+              }
+            });
+          }
+
+          // Build timeline
+          var timeline = document.getElementById('firTimeline');
+          if (data.legs.length && data.legs[0].staffStart) {
+            var allMins = [];
+            data.legs.forEach(function(l) {
+              if (l.staffStart && l.staffEnd) {
+                var sParts = l.staffStart.split(':');
+                var eParts = l.staffEnd.split(':');
+                allMins.push(Number(sParts[0]) * 60 + Number(sParts[1]));
+                var end = Number(eParts[0]) * 60 + Number(eParts[1]);
+                if (end < allMins[allMins.length - 1]) end += 1440;
+                allMins.push(end);
+              }
+            });
+            var minTime = Math.min.apply(null, allMins);
+            var maxTime = Math.max.apply(null, allMins);
+            var range = maxTime - minTime || 1;
+
+            // Group by date
+            var dateGroups = {};
+            data.legs.forEach(function(l) {
+              var d = l.date || 'Unknown';
+              if (!dateGroups[d]) dateGroups[d] = [];
+              dateGroups[d].push(l);
+            });
+
+            var html = '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Staffing Timeline</div>';
+            Object.keys(dateGroups).forEach(function(date) {
+              html += '<div class="fir-timeline-label">' + date + '</div>';
+              html += '<div class="fir-timeline-bar">';
+              dateGroups[date].forEach(function(l) {
+                if (!l.staffStart || !l.staffEnd) return;
+                var sp = l.staffStart.split(':');
+                var ep = l.staffEnd.split(':');
+                var s = Number(sp[0]) * 60 + Number(sp[1]);
+                var e = Number(ep[0]) * 60 + Number(ep[1]);
+                if (e < s) e += 1440;
+                var left = ((s - minTime) / range * 100);
+                var width = ((e - s) / range * 100);
+                html += '<div class="fir-timeline-segment" style="left:' + left + '%;width:' + Math.max(width, 2) + '%;" title="' + l.wf + ' ' + l.from + '-' + l.to + '\\nStaff: ' + l.staffStart + '-' + l.staffEnd + '">' + l.wf + '</div>';
+              });
+              html += '</div>';
+            });
+            timeline.innerHTML = html;
+          } else {
+            timeline.innerHTML = '<div style="color:var(--muted);font-size:12px;">No timing data available (schedule needs departure times and block times).</div>';
+          }
+
+          // Build table
+          var tbody = document.getElementById('firDetailBody');
+          if (!data.legs.length) {
+            tbody.innerHTML = '<tr><td colspan="10" style="color:var(--muted);text-align:center;padding:20px;">No WorldFlight legs transit this FIR.</td></tr>';
+            return;
+          }
+          // Store legs for modal use
+          window._firLegs = data.legs;
+          window._firId = data.fir;
+
+          tbody.innerHTML = data.legs.map(function(l, idx) {
+            var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
+            var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
+            return '<tr>'
+              + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
+              + '<td>' + l.from + '</td>'
+              + '<td>' + l.to + '</td>'
+              + '<td>' + (l.date || '-') + '</td>'
+              + '<td class="staff-window">' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</td>'
+              + '<td>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</td>'
+              + '<td class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
+              + '<td>' + (l.depFlow || '-') + '</td>'
+              + '<td><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
+              + '<td><button class="fir-view-btn" data-leg-idx="' + idx + '">View</button></td>'
+              + '</tr>';
+          }).join('');
+
+          // Attach view button handlers
+          tbody.querySelectorAll('.fir-view-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+              var idx = Number(this.dataset.legIdx);
+              openFirRouteModal(window._firLegs[idx], window._firId);
+            });
+          });
+          // Click to expand route column
+          tbody.querySelectorAll('.fir-route-col').forEach(function(td) {
+            td.addEventListener('click', function() { this.classList.toggle('expanded'); });
+          });
+        })
+        .catch(function(err) {
+          console.error('Failed to load FIR detail:', err);
+        });
+    }
+
+    // Route view modal
+    function loadGroupDetail(matchingFirs, region, division) {
+      // Fetch all FIR details in parallel
+      var fetches = matchingFirs.map(function(f) {
+        return fetch('/api/airspace-management?fir=' + encodeURIComponent(f.fir), { credentials: 'same-origin' })
+          .then(function(r) { return r.json(); });
+      });
+
+      Promise.all(fetches).then(function(results) {
+        document.getElementById('airspaceSearchSection').style.display = 'none';
+        document.getElementById('firDetailSection').style.display = '';
+
+        var label = division || region || 'Filtered';
+        document.getElementById('firDetailTitle').textContent = label + ' Airspace';
+        document.getElementById('firDetailMeta').textContent = results.length + ' FIR' + (results.length !== 1 ? 's' : '') + ' — ' + results.reduce(function(sum, r) { return sum + (r.legs || []).length; }, 0) + ' total leg transits';
+
+        // Clear highlight
+        if (highlightLayer) { map.removeLayer(highlightLayer); highlightLayer = null; }
+
+        // Build combined table grouped by FIR
+        var allLegs = [];
+        results.forEach(function(r) {
+          if (!r.legs || !r.legs.length) return;
+          r.legs.forEach(function(l) {
+            allLegs.push(Object.assign({}, l, { _fir: r.fir }));
+          });
+        });
+
+        // Sort by date then staff start
+        allLegs.sort(function(a, b) {
+          if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
+          return (a.staffStart || '').localeCompare(b.staffStart || '');
+        });
+
+        // Build timeline grouped by FIR
+        var timeline = document.getElementById('firTimeline');
+        if (allLegs.length && allLegs[0].staffStart) {
+          var allMins = [];
+          allLegs.forEach(function(l) {
+            if (l.staffStart && l.staffEnd) {
+              var sp = l.staffStart.split(':'), ep = l.staffEnd.split(':');
+              var s = Number(sp[0]) * 60 + Number(sp[1]);
+              var e = Number(ep[0]) * 60 + Number(ep[1]);
+              if (e < s) e += 1440;
+              allMins.push(s, e);
+            }
+          });
+          var minTime = Math.min.apply(null, allMins);
+          var maxTime = Math.max.apply(null, allMins);
+          var range = maxTime - minTime || 1;
+
+          var firGroups = {};
+          allLegs.forEach(function(l) {
+            if (!firGroups[l._fir]) firGroups[l._fir] = [];
+            firGroups[l._fir].push(l);
+          });
+
+          var html = '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Staffing Timeline by FIR</div>';
+          Object.keys(firGroups).sort().forEach(function(fir) {
+            html += '<div class="fir-timeline-label">' + fir + '</div>';
+            html += '<div class="fir-timeline-bar">';
+            firGroups[fir].forEach(function(l) {
+              if (!l.staffStart || !l.staffEnd) return;
+              var sp = l.staffStart.split(':'), ep = l.staffEnd.split(':');
+              var s = Number(sp[0]) * 60 + Number(sp[1]);
+              var e = Number(ep[0]) * 60 + Number(ep[1]);
+              if (e < s) e += 1440;
+              var left = ((s - minTime) / range * 100);
+              var width = ((e - s) / range * 100);
+              html += '<div class="fir-timeline-segment" style="left:' + left + '%;width:' + Math.max(width, 2) + '%;" title="' + l.wf + ' ' + l.from + '-' + l.to + '\\nStaff: ' + l.staffStart + '-' + l.staffEnd + '">' + l.wf + '</div>';
+            });
+            html += '</div>';
+          });
+          timeline.innerHTML = html;
+        } else {
+          timeline.innerHTML = '';
+        }
+
+        // Build table
+        window._firLegs = allLegs;
+        window._firId = null;
+
+        var tbody = document.getElementById('firDetailBody');
+        tbody.innerHTML = allLegs.map(function(l, idx) {
+          var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
+          var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
+          return '<tr>'
+            + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
+            + '<td>' + l.from + '</td>'
+            + '<td>' + l.to + '</td>'
+            + '<td>' + (l.date || '-') + '</td>'
+            + '<td class="staff-window">' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</td>'
+            + '<td>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</td>'
+            + '<td class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
+            + '<td>' + (l.depFlow || '-') + '</td>'
+            + '<td><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
+            + '<td style="font-size:11px;color:var(--muted);">' + l._fir + '</td>'
+            + '</tr>';
+        }).join('');
+
+        tbody.querySelectorAll('.fir-route-col').forEach(function(td) {
+          td.addEventListener('click', function() { this.classList.toggle('expanded'); });
+        });
+      });
+    }
+
+    function openFirRouteModal(leg, firId) {
+      // Remove existing modal
+      var existing = document.getElementById('firRouteModal');
+      if (existing) existing.remove();
+
+      var overlay = document.createElement('div');
+      overlay.id = 'firRouteModal';
+      overlay.className = 'fir-route-modal-overlay';
+      overlay.innerHTML = '<div class="fir-route-modal">'
+        + '<div class="fir-route-modal-header">'
+        + '<h3>' + leg.wf + ': ' + leg.from + ' → ' + leg.to + ' through ' + firId + '</h3>'
+        + '<button class="fir-route-modal-close">&times;</button>'
+        + '</div>'
+        + '<div class="fir-route-modal-map" id="firRouteModalMap"></div>'
+        + '</div>';
+      document.body.appendChild(overlay);
+
+      // Close handlers
+      overlay.querySelector('.fir-route-modal-close').addEventListener('click', function() { overlay.remove(); });
+      overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+
+      // Init map
+      setTimeout(function() {
+        var modalMap = L.map('firRouteModalMap', { zoomControl: true }).setView([30, 0], 3);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+          subdomains: 'abcd', maxZoom: 10, noWrap: true
+        }).addTo(modalMap);
+
+        // Draw FIR boundary
+        fetch('/fir-boundaries.geojson')
+          .then(function(r) { return r.json(); })
+          .then(function(geoData) {
+            var firFeature = geoData.features.find(function(f) { return f.properties && f.properties.id === firId; });
+            if (firFeature) {
+              var firLayer = L.geoJSON(firFeature, {
+                style: { color: '#38bdf8', weight: 2, fillColor: 'rgba(56,189,248,0.15)', fillOpacity: 0.3 }
+              }).addTo(modalMap);
+            }
+
+            // Draw route, highlight waypoints inside this FIR
+            fetch('/api/resolve-route?from=' + leg.from + '&to=' + leg.to + '&route=' + encodeURIComponent(leg.atcRoute) + '&depTime=&blockTime=')
+              .then(function(r) { return r.json(); })
+              .then(function(routeData) {
+                if (!routeData.points || routeData.points.length < 2) return;
+
+                // Point-in-polygon (ray casting) against the FIR geometry
+                function pointInFir(lat, lon) {
+                  if (!firFeature) return false;
+                  var geom = firFeature.geometry;
+                  var polys = geom.type === 'MultiPolygon' ? geom.coordinates : geom.type === 'Polygon' ? [geom.coordinates] : [];
+                  for (var p = 0; p < polys.length; p++) {
+                    var ring = polys[p][0];
+                    if (!ring) continue;
+                    var inside = false;
+                    for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                      var yi = ring[i][0], xi = ring[i][1]; // GeoJSON [lon, lat]
+                      var yj = ring[j][0], xj = ring[j][1];
+                      if (((yi > lon) !== (yj > lon)) && (lat < (xj - xi) * (lon - yi) / (yj - yi) + xi)) inside = !inside;
+                    }
+                    if (inside) return true;
+                  }
+                  return false;
+                }
+
+                // Tag each waypoint as inside/outside FIR
+                var pts = routeData.points.map(function(p) {
+                  return { name: p.name, lat: p.lat, lon: p.lon, inFir: pointInFir(p.lat, p.lon) };
+                });
+
+                // Draw full route dim
+                var allCoords = pts.map(function(p) { return [p.lat, p.lon]; });
+                L.polyline(allCoords, { color: 'rgba(255,255,255,0.15)', weight: 1.5, dashArray: '4 4' }).addTo(modalMap);
+
+                // Find boundary crossing point by binary search
+                function findCrossing(insidePt, outsidePt, steps) {
+                  var a = [insidePt.lat, insidePt.lon], b = [outsidePt.lat, outsidePt.lon];
+                  for (var s = 0; s < (steps || 15); s++) {
+                    var mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
+                    if (pointInFir(mid[0], mid[1])) a = mid; else b = mid;
+                  }
+                  return [(a[0]+b[0])/2, (a[1]+b[1])/2];
+                }
+
+                // Draw highlighted segments, clipped to FIR boundary
+                for (var i = 0; i < pts.length - 1; i++) {
+                  var a = pts[i], b = pts[i + 1];
+                  if (a.inFir && b.inFir) {
+                    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: '#38bdf8', weight: 3 }).addTo(modalMap);
+                  } else if (a.inFir && !b.inFir) {
+                    var cross = findCrossing(a, b);
+                    L.polyline([[a.lat, a.lon], cross], { color: '#38bdf8', weight: 3 }).addTo(modalMap);
+                  } else if (!a.inFir && b.inFir) {
+                    var cross = findCrossing(b, a);
+                    L.polyline([cross, [b.lat, b.lon]], { color: '#38bdf8', weight: 3 }).addTo(modalMap);
+                  }
+                }
+
+                // Draw waypoints
+                pts.forEach(function(p) {
+                  var inside = p.inFir;
+                  L.circleMarker([p.lat, p.lon], {
+                    radius: inside ? 4 : 2,
+                    color: inside ? '#38bdf8' : 'rgba(255,255,255,0.4)',
+                    fillColor: inside ? '#38bdf8' : 'rgba(255,255,255,0.4)',
+                    fillOpacity: 1
+                  }).bindTooltip(p.name, { permanent: inside, direction: 'top', className: 'fir-tooltip', offset: [0, -6] }).addTo(modalMap);
+                });
+              });
+
+            // Fit to FIR bounds
+            if (firFeature) {
+              modalMap.fitBounds(firLayer.getBounds(), { padding: [20, 20] });
+            }
+          });
+      }, 100);
+    }
+
+    // Allow direct FIR from URL hash
+    if (location.hash && location.hash.length > 1) {
+      loadFirDetail(location.hash.slice(1).toUpperCase());
+    }
+  });
+  </script>
+  `;
+
+  res.send(
+    renderLayout({
+      title: 'Airspace Management',
       user,
       isAdmin,
       layoutClass: 'dashboard-full',

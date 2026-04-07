@@ -67,6 +67,10 @@ export default function renderLayout({
         <span class="icon">🎧</span>
         <span class="label">WF Slot Management</span>
       </a>
+      <a href="/airspace" class="nav-item" data-tooltip="Airspace Management">
+        <span class="icon">🌐</span>
+        <span class="label">Airspace Management</span>
+      </a>
     </div>` : ''}
 
     ${isAdmin ? `

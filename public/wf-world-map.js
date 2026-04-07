@@ -1,15 +1,17 @@
-const WF_CACHE_TTL = 1000 * 60 * 30; // 30 minutes
-
-// NEW: meta key used to remember server build timestamp for a given qs
-function wfMetaKey(qs) {
-  return `wfWorldMap:meta:v1:${qs || 'default'}`;
+// --- Session cache helpers ---
+function wfCacheKey(eventId, builtAt, qs) {
+  return `wfWorldMap:v6:${eventId}:${builtAt}:${qs || 'default'}`;
 }
 
-// CHANGED: cache key now includes server build timestamp when available
-function wfCacheKey(qs, builtAt) {
-  // Backwards-compatible fallback if server doesn't send builtAt
-  const tag = builtAt ? String(builtAt) : 'no-builtAt';
-  return `wfWorldMap:v4:${tag}:${qs || 'default'}`;
+function getCachedMapData(key) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function setCachedMapData(key, data) {
+  try { sessionStorage.setItem(key, JSON.stringify(data)); } catch {}
 }
 
 function getSidebarOffset() {
@@ -22,57 +24,6 @@ function getSidebarOffset() {
   return 260; // expanded width (px)
 }
 
-function getCachedMapData(key) {
-  try {
-    const raw = sessionStorage.getItem(key);
-    if (!raw) return null;
-
-    const { ts, data } = JSON.parse(raw);
-    if (Date.now() - ts > WF_CACHE_TTL) {
-      sessionStorage.removeItem(key);
-      return null;
-    }
-    return data;
-  } catch {
-    return null;
-  }
-}
-
-function setCachedMapData(key, data) {
-  try {
-    sessionStorage.setItem(
-      key,
-      JSON.stringify({ ts: Date.now(), data })
-    );
-  } catch {}
-}
-
-// NEW: store / read builtAt per qs so we can hit sessionStorage without fetching every time
-function getCachedBuiltAt(qs) {
-  try {
-    const raw = sessionStorage.getItem(wfMetaKey(qs));
-    if (!raw) return null;
-    const { ts, builtAt } = JSON.parse(raw);
-
-    // Tie meta to same TTL policy
-    if (Date.now() - ts > WF_CACHE_TTL) {
-      sessionStorage.removeItem(wfMetaKey(qs));
-      return null;
-    }
-    return builtAt ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function setCachedBuiltAt(qs, builtAt) {
-  try {
-    sessionStorage.setItem(
-      wfMetaKey(qs),
-      JSON.stringify({ ts: Date.now(), builtAt })
-    );
-  } catch {}
-}
 
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('wfWorldMap');
@@ -393,24 +344,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const qs = new URLSearchParams(window.WF_MAP_QUERY || {}).toString();
 
-    // NEW: try to use cached builtAt to avoid fetching when session cache is warm
-    const cachedBuiltAt = getCachedBuiltAt(qs);
-    if (cachedBuiltAt) {
-      const warmKey = wfCacheKey(qs, cachedBuiltAt);
-      const warm = getCachedMapData(warmKey);
-      if (warm) {
-        lastData = warm;
-
-        airportLayer.clearLayers();
-        atcLayer.clearLayers();
-
-        renderData(map, warm);
-        setOverlay(overlay, false);
-        return;
+    // Lightweight version check — only fetch full data if stale
+    try {
+      const vRes = await fetch('/api/wf/world-map/version' + (qs ? `?${qs}` : ''), { credentials: 'same-origin' });
+      if (vRes.ok) {
+        const { builtAt, eventId } = await vRes.json();
+        if (builtAt && eventId) {
+          const key = wfCacheKey(eventId, builtAt, qs);
+          const cached = getCachedMapData(key);
+          if (cached) {
+            lastData = cached;
+            airportLayer.clearLayers();
+            atcLayer.clearLayers();
+            renderData(map, cached);
+            setOverlay(overlay, false);
+            return;
+          }
+        }
       }
-    }
+    } catch {}
 
-    // Fallback: fetch from server (fast once server-side caching is implemented)
+    // Full fetch (cache miss or version check failed)
     const res = await fetch(
       '/api/wf/world-map' + (qs ? `?${qs}` : ''),
       { credentials: 'same-origin' }
@@ -422,13 +376,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const payload = await res.json();
-
-    // NEW: if server returns builtAt, use it to pin cache to a server build
-    const builtAt = payload?.builtAt ?? null;
-    if (builtAt) setCachedBuiltAt(qs, builtAt);
-
-    const key = wfCacheKey(qs, builtAt);
-    setCachedMapData(key, payload);
+    const { builtAt, eventId } = payload;
+    if (builtAt && eventId) {
+      setCachedMapData(wfCacheKey(eventId, builtAt, qs), payload);
+    }
 
     lastData = payload;
 
