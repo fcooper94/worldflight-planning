@@ -1943,10 +1943,18 @@ app.get('/api/previous-destinations', async (req, res) => {
 
     // Look up airport coordinates and names
     const icaos = Object.keys(byIcao);
-    const airports = await prisma.airport.findMany({
-      where: { icao: { in: icaos } },
-      select: { icao: true, name: true, lat: true, lon: true }
-    });
+    let airports;
+    try {
+      airports = await prisma.airport.findMany({
+        where: { icao: { in: icaos } },
+        select: { icao: true, name: true, lat: true, lon: true }
+      });
+    } catch {
+      airports = await prisma.airport.findMany({
+        where: { icao: { in: icaos } },
+        select: { icao: true, lat: true, lon: true }
+      });
+    }
 
     const result = {};
     for (const ap of airports) {
@@ -2052,11 +2060,19 @@ app.get('/api/suggestion-stats', async (req, res) => {
 
   // Look up airport names
   const allIcaos = [...new Set([...recentVisit, ...recentAvoid].map(s => s.icao))];
-  const airports = await prisma.airport.findMany({
-    where: { icao: { in: allIcaos } },
-    select: { icao: true, name: true }
-  });
-  const nameMap = Object.fromEntries(airports.map(a => [a.icao, a.name]));
+  let airports;
+  try {
+    airports = await prisma.airport.findMany({
+      where: { icao: { in: allIcaos } },
+      select: { icao: true, name: true }
+    });
+  } catch {
+    airports = await prisma.airport.findMany({
+      where: { icao: { in: allIcaos } },
+      select: { icao: true }
+    });
+  }
+  const nameMap = Object.fromEntries(airports.map(a => [a.icao, a.name || null]));
 
   const addName = s => ({ ...s, name: nameMap[s.icao] || null });
 

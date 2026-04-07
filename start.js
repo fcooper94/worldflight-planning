@@ -33,14 +33,10 @@ function switchToDev() {
   console.log('');
   console.log('  Switching to Offline (Dev) mode...');
 
-  // Backup production files if not already backed up
+  // Backup production .env if not already backed up
   if (existsSync('.env') && !existsSync('.env.prod.bak') && !envContent.includes('DEV_MODE=true')) {
     copyFileSync('.env', '.env.prod.bak');
     console.log('  Backed up .env → .env.prod.bak');
-  }
-  if (existsSync('prisma/schema.prisma') && !existsSync('prisma/schema.prisma.bak')) {
-    copyFileSync('prisma/schema.prisma', 'prisma/schema.prisma.bak');
-    console.log('  Backed up schema → prisma/schema.prisma.bak');
   }
 
   if (!existsSync('.env.dev')) {
@@ -53,12 +49,11 @@ function switchToDev() {
   }
 
   copyFileSync('.env.dev', '.env');
-  copyFileSync('prisma/schema.dev.prisma', 'prisma/schema.prisma');
 
-  console.log('  Generating Prisma client...');
-  execSync('npx prisma generate', { stdio: 'inherit' });
+  console.log('  Generating Prisma client (dev schema)...');
+  execSync('npx prisma generate --schema=prisma/schema.dev.prisma', { stdio: 'inherit' });
   console.log('  Pushing schema to SQLite...');
-  execSync('npx prisma db push', { stdio: 'inherit' });
+  execSync('npx prisma db push --schema=prisma/schema.dev.prisma', { stdio: 'inherit' });
 
   console.log('');
   console.log('  Offline mode ready. Login auto-bypasses VATSIM.');
@@ -76,11 +71,6 @@ function switchToProd() {
   } else if (envContent.includes('DEV_MODE=true')) {
     console.error('  ERROR: No .env.prod.bak found. Restore your .env manually.');
     process.exit(1);
-  }
-
-  if (existsSync('prisma/schema.prisma.bak')) {
-    copyFileSync('prisma/schema.prisma.bak', 'prisma/schema.prisma');
-    console.log('  Restored schema from backup');
   }
 
   console.log('  Generating Prisma client...');

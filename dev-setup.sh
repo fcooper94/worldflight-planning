@@ -16,13 +16,7 @@ if [ "$1" = "prod" ]; then
     exit 1
   fi
 
-  if [ ! -f prisma/schema.prisma.bak ]; then
-    echo "ERROR: No production schema backup found (prisma/schema.prisma.bak)"
-    exit 1
-  fi
-
   cp .env.prod.bak .env
-  cp prisma/schema.prisma.bak prisma/schema.prisma
   npx prisma generate
 
   echo ""
@@ -35,7 +29,7 @@ echo "Switching to DEV mode..."
 echo "Make sure the server is stopped!"
 echo ""
 
-# Backup production files (only if not already backed up)
+# Backup production .env (only if not already backed up)
 if [ ! -f .env.prod.bak ]; then
   cp .env .env.prod.bak
   echo "Backed up .env to .env.prod.bak"
@@ -43,22 +37,13 @@ else
   echo "Production .env backup already exists"
 fi
 
-if [ ! -f prisma/schema.prisma.bak ]; then
-  cp prisma/schema.prisma prisma/schema.prisma.bak
-  echo "Backed up schema to prisma/schema.prisma.bak"
-else
-  echo "Production schema backup already exists"
-fi
-
-# Switch to dev files
+# Switch to dev .env
 cp .env.dev .env
-cp prisma/schema.dev.prisma prisma/schema.prisma
+echo "Switched .env to dev mode"
 
-echo "Switched .env and schema to dev mode"
-
-# Generate client and create SQLite DB
-npx prisma generate
-npx prisma db push
+# Generate client and create SQLite DB using dev schema (without overwriting schema.prisma)
+npx prisma generate --schema=prisma/schema.dev.prisma
+npx prisma db push --schema=prisma/schema.dev.prisma
 
 echo ""
 echo "Dev mode ready! Start with: node index.js"
