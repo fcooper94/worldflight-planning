@@ -32,7 +32,8 @@
       "Bash(node -c auth/callback.js)",
       "Bash(node scripts/backfill-airport-names.js)",
       "Bash(tasklist)",
-      "Bash(taskkill //F //PID 2256)"
+      "Bash(taskkill //F //PID 2256)",
+      "Bash(chmod +x \"c:/dev/WorldFlight Planning/.git/hooks/pre-commit\")"
     ]
   }
 }
