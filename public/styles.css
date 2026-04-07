@@ -658,13 +658,12 @@ select{ cursor:pointer; }
 /* Route column */
 .col-route{
   width:auto;
-  min-width:500px;     /* ↓ was 700px */
-  max-width:520px;     /* 🔑 hard cap */
+  min-width:700px;
   white-space:normal;
   overflow-wrap:anywhere;
   line-height:1.65;
   font-size:12px;
-  padding-right:36px; /* ↑ stronger separation */
+  padding-right:36px;
 }
 
 .departures-table thead th.col-route{

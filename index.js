@@ -8,6 +8,91 @@ import path from 'path';
 
 const prisma = new PrismaClient();
 
+/* ===== NAVDATA: WAYPOINT LOOKUP ===== */
+const navFixes = new Map(); // name -> [{ lat, lon }, { lat, lon }, ...]
+
+/* ===== FIR DATA ===== */
+let firFeatures = [];
+
+function loadFirData() {
+  const firFile = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public', 'fir-boundaries.geojson');
+  if (!fs.existsSync(firFile)) { console.log('[FIR] fir-boundaries.geojson not found'); return; }
+  const data = JSON.parse(fs.readFileSync(firFile, 'utf-8'));
+  firFeatures = data.features || [];
+  console.log('[FIR] Loaded ' + firFeatures.length + ' FIR boundaries');
+}
+
+function pointInPolygon(lat, lon, coords) {
+  // Ray-casting algorithm for a single ring
+  let inside = false;
+  for (let i = 0, j = coords.length - 1; i < coords.length; j = i++) {
+    const xi = coords[i][1], yi = coords[i][0]; // GeoJSON is [lon, lat]
+    const xj = coords[j][1], yj = coords[j][0];
+    if (((yi > lon) !== (yj > lon)) && (lat < (xj - xi) * (lon - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function getFirsForPoint(lat, lon) {
+  const results = [];
+  for (const f of firFeatures) {
+    const geom = f.geometry;
+    if (!geom) continue;
+    const polys = geom.type === 'MultiPolygon' ? geom.coordinates : geom.type === 'Polygon' ? [geom.coordinates] : [];
+    for (const poly of polys) {
+      if (poly[0] && pointInPolygon(lat, lon, poly[0])) {
+        results.push(f.properties?.id || 'Unknown');
+        break;
+      }
+    }
+  }
+  return results;
+}
+
+function loadNavFixes() {
+  const fixFile = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata', 'earth_fix.dat');
+  if (!fs.existsSync(fixFile)) { console.log('[NAV] earth_fix.dat not found'); return; }
+  const lines = fs.readFileSync(fixFile, 'utf-8').split('\n');
+  let count = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('I') || trimmed.startsWith('9') || trimmed.indexOf('Version') !== -1) continue;
+    const parts = trimmed.split(/\s+/);
+    if (parts.length >= 3) {
+      const lat = parseFloat(parts[0]);
+      const lon = parseFloat(parts[1]);
+      const name = parts[2];
+      if (name && !isNaN(lat) && !isNaN(lon)) {
+        if (!navFixes.has(name)) navFixes.set(name, []);
+        navFixes.get(name).push({ lat, lon });
+        count++;
+      }
+    }
+  }
+  console.log('[NAV] Loaded ' + count + ' fixes (' + navFixes.size + ' unique names) from earth_fix.dat');
+}
+
+function closestFix(name, refLat, refLon) {
+  const fixes = navFixes.get(name);
+  if (!fixes || !fixes.length) return null;
+  if (fixes.length === 1) return fixes[0];
+
+  let best = null;
+  let bestDist = Infinity;
+  const toRad = Math.PI / 180;
+
+  for (const f of fixes) {
+    const dLat = (f.lat - refLat) * toRad;
+    const dLon = (f.lon - refLon) * toRad;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(refLat * toRad) * Math.cos(f.lat * toRad) * Math.sin(dLon / 2) ** 2;
+    const d = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    if (d < bestDist) { bestDist = d; best = f; }
+  }
+  return best;
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const icao = req.params.icao.toUpperCase();
@@ -1184,6 +1269,8 @@ function clearTSAT(sectorKey, callsign) {
 }
 
 async function bootstrap() {
+  loadNavFixes();
+  loadFirData();
   await refreshPilots();
   await loadDepFlowsFromDb();
   await loadTobtBookingsFromDb();
@@ -7890,6 +7977,13 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
       icon: '⚙️',
       href: '/admin/settings',
       badge: null
+    },
+    {
+      title: 'AIRAC Data',
+      desc: 'Upload and manage navigation data (waypoints, airways) for route planning.',
+      icon: '🧭',
+      href: '/admin/airac',
+      badge: null
     }
   ];
 
@@ -8902,10 +8996,12 @@ ${eventRows.map((r, idx) => {
   const isFirst = idx === 0;
   return `
 <tr data-wf="${r.number}" data-idx="${idx}">
-  ${isScratch ? '<td class="col-del"><button class="btn-delete-row" data-wf="' + r.number + '" title="Delete leg">&#x2715;</button></td>' : ''}
-  ${isScratch
-    ? '<td><input class="sched-edit" data-field="number" value="' + r.number + '" style="width:80px;font-weight:600;" /></td>'
-    : '<td style="font-weight:600;">' + r.number + '</td>'}
+  ${isScratch ? '<td class="col-del" style="white-space:nowrap;">'
+    + '<button class="btn-delete-row" data-wf="' + r.number + '" title="Delete leg">&#x2715;</button>'
+    + (r.from && r.to ? '<a class="row-icon simbrief-launch" data-from="' + r.from + '" data-to="' + r.to + '" data-wf="' + r.number + '" href="#" title="Generate SimBrief plan">SB</a>' : '')
+    + (r.from && r.to ? '<button class="row-icon sb-fetch" data-wf="' + r.number + '" data-from="' + r.from + '" data-to="' + r.to + '" title="Fetch block time from SimBrief">&#x2913;</button>' : '')
+    + '</td>' : ''}
+  <td><a href="#" class="sector-link" data-wf="${r.number}" data-from="${r.from}" data-to="${r.to}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-arr="${r.arr_time_utc}" data-block="${r.block_time}" data-route="${r.atc_route}">${r.number}</a></td>
   ${isScratch
     ? '<td><input class="sched-edit" data-field="from" value="' + r.from + '" style="width:60px;text-transform:uppercase;" /></td>'
     : '<td>' + r.from + '</td>'}
@@ -8940,14 +9036,8 @@ ${eventRows.map((r, idx) => {
       : '<td class="calc-cell" data-field="dep">' + r.dep_time_utc + '</td>')
     : '<td>' + r.dep_time_utc + '</td>'}
   ${isScratch && !r.block_time && r.from && r.to
-    ? '<td>'
-      + '<a class="simbrief-btn simbrief-launch" data-from="' + r.from + '" data-to="' + r.to + '" data-wf="' + r.number + '" href="#" style="font-size:11px;padding:4px 8px;">'
-      + '<span class="simbrief-logo">SB</span>'
-      + '<span class="simbrief-text">Gen</span>'
-      + '</a>'
-      + '</td>'
-      + '<td><button class="action-btn sb-fetch" data-wf="' + r.number + '" data-from="' + r.from + '" data-to="' + r.to + '" style="font-size:11px;padding:4px 8px;">Fetch</button></td>'
-      + '<td><textarea class="sched-edit sched-route" data-field="atcRoute" rows="2" style="width:100%;min-width:200px;" placeholder="Enter ATC route...">' + r.atc_route + '</textarea></td>'
+    ? '<td></td><td></td>'
+      + '<td><div class="sched-edit sched-route" data-field="atcRoute" contenteditable="true" style="min-width:200px;">' + (r.atc_route || '') + '</div></td>'
     : '<td class="calc-cell" data-field="arr">' + r.arr_time_utc + '</td>'
       + (isScratch
         ? '<td><input class="sched-edit" data-field="blockTime" value="' + r.block_time + '" style="width:60px;" /></td>'
@@ -8970,53 +9060,253 @@ ${eventRows.map((r, idx) => {
 <!-- ADD LEG MODAL -->
 <div id="addLegModal" class="modal hidden">
   <div class="modal-backdrop"></div>
-  <div class="modal-dialog" style="width:520px;">
-    <h3>Add New Leg</h3>
+  <div id="addLegDialog" class="modal-dialog" style="width:95vw;max-width:1400px;padding:0;overflow:hidden;">
     <form id="addLegForm">
-      <label>
-        Previous Leg
-        <select id="addLegPrev" required>
-          <option value="START">Start (first leg)</option>
-          ${eventRows.map(r => '<option value="' + r.number + '" data-to="' + r.to + '">' + r.number + ' — ' + r.from + ' to ' + r.to + '</option>').join('')}
-        </select>
-      </label>
+    <div style="display:flex;height:75vh;max-height:700px;">
 
-      <label>
-        From
-        <input type="text" id="addLegFrom" readonly style="text-transform:uppercase;font-family:monospace;" />
-      </label>
+      <!-- LEFT: FORM SECTIONS -->
+      <div style="flex:0 0 480px;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:20px;">
 
-      <label>
-        To
-        <div style="display:flex;gap:8px;">
-          <input type="text" id="addLegTo" required placeholder="ICAO" maxlength="4" style="flex:1;text-transform:uppercase;font-family:monospace;" />
-          <button type="button" id="openMapBtn" class="action-btn" style="flex-shrink:0;" title="Browse suggested airports">🌍 Map</button>
+        <h3 style="margin:0 0 4px;">Add New Leg</h3>
+
+        <!-- SECTION 1: OVERVIEW -->
+        <div class="leg-section">
+          <div class="leg-section-title">Overview</div>
+
+          <label>
+            Previous Leg
+            <select id="addLegPrev" required>
+              <option value="START">Start (first leg)</option>
+              ${eventRows.map(r => '<option value="' + r.number + '" data-to="' + r.to + '" data-arr="' + r.arr_time_utc + '" data-date="' + r.date_utc + '">' + r.number + ' — ' + r.from + ' to ' + r.to + '</option>').join('')}
+            </select>
+          </label>
+
+          <table class="leg-fields" style="width:100%;border-collapse:separate;border-spacing:6px 0;">
+            <tr>
+              <td style="width:50%;"><label>From<input type="text" id="addLegFrom" readonly style="text-transform:uppercase;font-family:monospace;" /></label></td>
+              <td style="width:50%;"><label>To<input type="text" id="addLegTo" required placeholder="ICAO" maxlength="4" style="text-transform:uppercase;font-family:monospace;" /></label></td>
+              <td style="width:36px;vertical-align:bottom;"><button type="button" id="openMapBtn" class="action-btn" style="padding:7px 8px;" title="Browse suggested airports">🌍</button></td>
+            </tr>
+            <tr>
+              <td><label>Dep Time<input type="text" id="addLegDepTime" readonly style="font-family:monospace;" /></label></td>
+              <td><label>Extra Delay<input type="number" id="addLegDelay" min="0" value="0" placeholder="0 mins" /></label></td>
+              <td></td>
+            </tr>
+          </table>
         </div>
-      </label>
 
-      <label>
-        Dep Flow (per hour)
-        <input type="number" id="addLegFlow" min="0" placeholder="0" />
-      </label>
+        <!-- SECTION 2: ROUTE DETAILS -->
+        <div class="leg-section">
+          <div class="leg-section-title">Route Details</div>
+          <label style="display:block;">
+            ATC Route
+            <textarea id="addLegRoute" rows="2" placeholder="Enter or paste ATC route..." style="font-family:monospace;font-size:12px;resize:none;overflow:hidden;"></textarea>
+          </label>
+          <div style="display:flex;gap:8px;margin-top:10px;">
+            <button type="button" id="addLegSimbriefGen" class="action-btn" style="font-size:12px;padding:6px 14px;background:var(--accent);color:#020617;font-weight:600;">Plan with SimBrief</button>
+            <button type="button" id="addLegSimbriefFetch" class="action-btn" style="font-size:12px;padding:6px 14px;" disabled>Pull SimBrief Data</button>
+          </div>
+          <div id="addLegSimbriefMsg" style="font-size:11px;color:var(--muted);margin-top:6px;display:none;"></div>
 
-      <label>
-        Flow Type
-        <select id="addLegFlowType">
-          <option value="NONE">None</option>
-          <option value="SLOTTED">Slotted</option>
-          <option value="BOOKING_ONLY">Booking Only</option>
-        </select>
-      </label>
+          <label id="addLegFirSection" style="display:none;margin-top:10px;">
+            FIR Transit (Staffing Timings)
+            <div id="addLegFirList" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;min-height:28px;"></div>
+          </label>
+        </div>
 
-      <div id="addLegMsg" class="modal-message hidden" style="margin-top:8px;"></div>
+        <!-- SECTION 3: FLOW RESTRICTIONS -->
+        <div class="leg-section">
+          <div class="leg-section-title">Flow Restrictions</div>
+          <table class="leg-fields" style="width:100%;border-collapse:separate;border-spacing:6px 0;">
+            <tr>
+              <td style="width:50%;"><label>Dep Flow (per hour)<input type="number" id="addLegFlow" min="0" placeholder="0" /></label></td>
+              <td style="width:50%;"><label>Flow Type<select id="addLegFlowType"><option value="NONE">None</option><option value="SLOTTED">Slotted</option><option value="BOOKING_ONLY">Booking Only</option></select></label></td>
+              <td style="width:36px;"></td>
+            </tr>
+          </table>
+        </div>
 
-      <div class="modal-actions">
-        <button type="button" class="modal-btn modal-btn-cancel" id="closeAddLeg">Cancel</button>
-        <button type="submit" class="modal-btn modal-btn-submit" id="submitAddLeg">Add Leg</button>
+        <div id="addLegMsg" class="modal-message hidden"></div>
+
+        <div class="modal-actions" style="margin-top:auto;padding-top:12px;">
+          <button type="button" class="modal-btn modal-btn-cancel" id="closeAddLeg">Cancel</button>
+          <button type="submit" class="modal-btn modal-btn-submit" id="submitAddLeg">Add Leg</button>
+        </div>
       </div>
+
+      <!-- RIGHT: MAP -->
+      <div id="addLegMapPanel" style="flex:1;border-left:1px solid var(--border);position:relative;background:#0b1220;">
+        <div id="addLegMap" style="position:absolute;inset:0;"></div>
+        <div id="addLegMapPlaceholder" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;">
+          Enter a destination to preview the route
+        </div>
+      </div>
+
+    </div>
     </form>
   </div>
 </div>
+
+<style>
+  .leg-section {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .leg-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .leg-section label {
+    display: block;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .leg-section label:first-of-type {
+    margin-top: 0;
+  }
+  .leg-section input,
+  .leg-section select,
+  .leg-section textarea {
+    width: 100%;
+    margin-top: 3px;
+    padding: 7px 8px;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    color: #e5e7eb;
+    font-size: 13px;
+    box-sizing: border-box;
+  }
+  .leg-section input[readonly] {
+    color: #64748b;
+    background: #080d17;
+    cursor: not-allowed;
+  }
+  #addLegDialog ::-webkit-scrollbar { width: 4px; }
+  #addLegDialog ::-webkit-scrollbar-track { background: transparent; }
+  #addLegDialog ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+  #addLegDialog ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+  #addLegDialog { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.08) transparent; }
+</style>
+
+<!-- SECTOR OVERVIEW MODAL -->
+<div id="sectorModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:560px;">
+    <div class="sector-overview">
+      <div class="sector-header">
+        <span id="sectorWf" class="sector-wf"></span>
+        <span id="sectorRoute" class="sector-route-badge"></span>
+      </div>
+
+      <div class="sector-airports">
+        <div class="sector-airport">
+          <span class="sector-label">FROM</span>
+          <span id="sectorFrom" class="sector-icao"></span>
+        </div>
+        <div class="sector-arrow">&#x2708;</div>
+        <div class="sector-airport">
+          <span class="sector-label">TO</span>
+          <span id="sectorTo" class="sector-icao"></span>
+        </div>
+      </div>
+
+      <div class="sector-times">
+        <div class="sector-time-item">
+          <span class="sector-label">Date</span>
+          <span id="sectorDate" class="sector-value"></span>
+        </div>
+        <div class="sector-time-item">
+          <span class="sector-label">Departure</span>
+          <span id="sectorDep" class="sector-value"></span>
+        </div>
+        <div class="sector-time-item">
+          <span class="sector-label">Arrival</span>
+          <span id="sectorArr" class="sector-value"></span>
+        </div>
+        <div class="sector-time-item">
+          <span class="sector-label">Block Time</span>
+          <span id="sectorBlock" class="sector-value"></span>
+        </div>
+      </div>
+
+      <div class="sector-route-section">
+        <span class="sector-label">ATC Route</span>
+        <div id="sectorAtcRoute" class="sector-route-text"></div>
+      </div>
+    </div>
+
+    <div class="modal-actions" style="margin-top:16px;">
+      <button type="button" class="modal-btn modal-btn-cancel" id="closeSectorModal">Close</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .sector-link {
+    color: var(--accent); font-weight: 700; text-decoration: none;
+    font-family: monospace; font-size: 14px;
+  }
+  .sector-link:hover { text-decoration: underline; }
+
+  .sector-overview { }
+  .sector-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px;
+  }
+  .sector-wf {
+    font-size: 28px; font-weight: 700; color: var(--accent);
+    font-family: monospace; letter-spacing: 1px;
+  }
+  .sector-route-badge {
+    font-size: 11px; color: var(--muted); background: rgba(255,255,255,0.05);
+    padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  }
+
+  .sector-airports {
+    display: flex; align-items: center; justify-content: center;
+    gap: 24px; margin-bottom: 24px;
+  }
+  .sector-airport { text-align: center; }
+  .sector-icao {
+    display: block; font-size: 32px; font-weight: 700; color: var(--text);
+    font-family: monospace; letter-spacing: 2px;
+  }
+  .sector-arrow { font-size: 28px; color: var(--muted); }
+  .sector-label {
+    font-size: 11px; color: var(--muted); text-transform: uppercase;
+    font-weight: 600; letter-spacing: 0.5px;
+  }
+
+  .sector-times {
+    display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 12px; margin-bottom: 20px;
+    background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px;
+  }
+  .sector-time-item { text-align: center; }
+  .sector-value {
+    display: block; font-size: 16px; font-weight: 600; color: var(--text);
+    margin-top: 4px;
+  }
+
+  .sector-route-section { margin-top: 12px; }
+  .sector-route-text {
+    margin-top: 6px; padding: 10px 14px;
+    background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+    border-radius: 8px; font-family: monospace; font-size: 12px;
+    color: var(--text); line-height: 1.6; word-break: break-word;
+  }
+</style>
 
 <!-- AIRPORT MAP MODAL -->
 <div id="airportMapModal" class="modal hidden" style="z-index:10000;">
@@ -9070,15 +9360,18 @@ if (document.getElementById('unlinkCsvBtn')) {
 /* ===== INLINE CELL EDITING ===== */
 var saveTimer = {};
 document.querySelectorAll('.sched-edit').forEach(function(input) {
-  var originalValue = input.value;
+  var isContentEditable = input.hasAttribute('contenteditable');
+  var originalValue = isContentEditable ? input.textContent.trim() : input.value;
+  var eventName = isContentEditable ? 'blur' : 'change';
 
-  input.addEventListener('change', function() {
-    if (input.value === originalValue) return;
+  input.addEventListener(eventName, function() {
+    var currentVal = isContentEditable ? input.textContent.trim() : input.value;
+    if (currentVal === originalValue) return;
 
     var tr = input.closest('tr');
     var wfNumber = tr.dataset.wf;
     var field = input.dataset.field;
-    var value = input.value.trim();
+    var value = currentVal;
 
     input.style.borderColor = 'var(--accent)';
 
@@ -9112,7 +9405,7 @@ document.querySelectorAll('.sched-edit').forEach(function(input) {
 });
 
 /* ===== TURNAROUND TIME ===== */
-document.getElementById('editTurnaroundBtn').addEventListener('click', function() {
+if (document.getElementById('editTurnaroundBtn')) document.getElementById('editTurnaroundBtn').addEventListener('click', function() {
   var currentVal = Number(document.getElementById('turnaroundInput').value) || 45;
 
   // Reuse callsign modal for input
@@ -9222,31 +9515,60 @@ firstRowInputs.forEach(function(input) {
 /* ===== ADD LEG MODAL ===== */
 (function() {
   var modal = document.getElementById('addLegModal');
+  if (!modal) return;
   var form = document.getElementById('addLegForm');
   var prevSelect = document.getElementById('addLegPrev');
   var fromInput = document.getElementById('addLegFrom');
   var toInput = document.getElementById('addLegTo');
   var msg = document.getElementById('addLegMsg');
 
+  var depTimeInput = document.getElementById('addLegDepTime');
+  var delayInput = document.getElementById('addLegDelay');
+  var turnaroundMins = Number(document.getElementById('turnaroundInput')?.value) || 45;
+
   function updateFrom() {
     var opt = prevSelect.options[prevSelect.selectedIndex];
     if (prevSelect.value === 'START') {
       fromInput.value = 'YSSY';
-      fromInput.setAttribute('readonly', true);
+      depTimeInput.value = 'Set in schedule';
     } else {
       fromInput.value = opt.dataset.to || '';
-      fromInput.setAttribute('readonly', true);
+      // Calculate departure time from previous leg arrival + turnaround + delay
+      var prevArr = opt.dataset.arr || '';
+      var prevDate = opt.dataset.date || '';
+      updateDepTime(prevArr, prevDate);
     }
+    fromInput.setAttribute('readonly', true);
   }
 
+  function updateDepTime(prevArr, prevDate) {
+    if (!prevArr || !prevArr.includes(':')) {
+      depTimeInput.value = 'Pending';
+      return;
+    }
+    var parts = prevArr.split(':');
+    var h = Number(parts[0]);
+    var m = Number(parts[1]);
+    var totalMins = h * 60 + m + turnaroundMins + (Number(delayInput.value) || 0);
+    var depH = Math.floor(totalMins / 60) % 24;
+    var depM = totalMins % 60;
+    depTimeInput.value = String(depH).padStart(2, '0') + ':' + String(depM).padStart(2, '0') + ' UTC';
+  }
+
+  delayInput.addEventListener('input', function() {
+    var opt = prevSelect.options[prevSelect.selectedIndex];
+    if (prevSelect.value !== 'START') {
+      updateDepTime(opt.dataset.arr || '', opt.dataset.date || '');
+    }
+  });
+
   prevSelect.addEventListener('change', updateFrom);
-  // Set to last leg by default
   if (prevSelect.options.length > 1) {
     prevSelect.selectedIndex = prevSelect.options.length - 1;
   }
   updateFrom();
 
-  document.getElementById('addRowBtn').addEventListener('click', function() {
+  if (document.getElementById('addRowBtn')) document.getElementById('addRowBtn').addEventListener('click', function() {
     msg.classList.add('hidden');
     modal.classList.remove('hidden');
   });
@@ -9282,7 +9604,9 @@ firstRowInputs.forEach(function(input) {
         from: fromVal,
         to: toVal,
         depFlow: Number(document.getElementById('addLegFlow').value) || 0,
-        flowType: document.getElementById('addLegFlowType').value
+        flowType: document.getElementById('addLegFlowType').value,
+        atcRoute: (document.getElementById('addLegRoute').value || '').trim(),
+        blockTime: (document.getElementById('addLegSimbriefFetch')?.dataset?.blockTime || '')
       })
     });
 
@@ -9339,6 +9663,7 @@ firstRowInputs.forEach(function(input) {
           }).then(function(ok) {
             if (!ok) return;
             toInput.value = ap.icao;
+            toInput.dispatchEvent(new Event('input'));
             mapModal.classList.add('hidden');
           });
         });
@@ -9377,6 +9702,306 @@ document.addEventListener('click', function(e) {
   });
 });
 
+/* ===== GREAT CIRCLE HELPER ===== */
+function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
+  var toRad = Math.PI / 180;
+  var toDeg = 180 / Math.PI;
+  var f1 = lat1 * toRad, l1 = lon1 * toRad;
+  var f2 = lat2 * toRad, l2 = lon2 * toRad;
+  var d = 2 * Math.asin(Math.sqrt(
+    Math.pow(Math.sin((f2 - f1) / 2), 2) +
+    Math.cos(f1) * Math.cos(f2) * Math.pow(Math.sin((l2 - l1) / 2), 2)
+  ));
+  var points = [];
+  for (var i = 0; i <= numPoints; i++) {
+    var frac = i / numPoints;
+    var a = Math.sin((1 - frac) * d) / Math.sin(d);
+    var b = Math.sin(frac * d) / Math.sin(d);
+    var x = a * Math.cos(f1) * Math.cos(l1) + b * Math.cos(f2) * Math.cos(l2);
+    var y = a * Math.cos(f1) * Math.sin(l1) + b * Math.cos(f2) * Math.sin(l2);
+    var z = a * Math.sin(f1) + b * Math.sin(f2);
+    points.push([Math.atan2(z, Math.sqrt(x * x + y * y)) * toDeg, Math.atan2(y, x) * toDeg]);
+  }
+  return points;
+}
+
+/* ===== ROUTE PREVIEW MAP ===== */
+(function() {
+  var toInput = document.getElementById('addLegTo');
+  var fromInput = document.getElementById('addLegFrom');
+  var mapPanel = document.getElementById('addLegMapPanel');
+  var dialog = document.getElementById('addLegDialog');
+
+  var placeholder = document.getElementById('addLegMapPlaceholder');
+
+  if (!toInput || !fromInput || !mapPanel) return;
+
+  var legMap = null;
+  var legMarkers = [];
+  var legLine = null;
+  var mapDebounce = null;
+
+  function updateRouteMap() {
+    clearTimeout(mapDebounce);
+    var fromVal = (fromInput.value || '').trim().toUpperCase();
+    var toVal = (toInput.value || '').trim().toUpperCase();
+
+    if (!/^[A-Z]{4}$/.test(fromVal) || !/^[A-Z]{4}$/.test(toVal)) {
+      if (placeholder) placeholder.style.display = '';
+      return;
+    }
+
+    mapDebounce = setTimeout(async function() {
+      try {
+        var r1 = await fetch('/api/airport-coords/' + fromVal);
+        var r2 = await fetch('/api/airport-coords/' + toVal);
+        if (!r1.ok || !r2.ok) return;
+        var fromAp = await r1.json();
+        var toAp = await r2.json();
+
+        if (placeholder) placeholder.style.display = 'none';
+
+        if (!legMap) {
+          legMap = L.map('addLegMap', { zoomControl: false, attributionControl: false }).setView([0, 0], 2);
+          L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 18 }).addTo(legMap);
+
+          // Load FIR boundaries
+          fetch('/fir-boundaries.geojson').then(function(r) { return r.json(); }).then(function(geojson) {
+            var firLayer = L.geoJSON(geojson, {
+              interactive: false,
+              style: { color: '#334155', weight: 1, opacity: 0.4, fillColor: 'transparent', fillOpacity: 0 }
+            }).addTo(legMap);
+
+            // FIR name labels — show when zoomed in
+            var firLabels = L.layerGroup();
+            geojson.features.forEach(function(f) {
+              if (!f.properties?.id || !f.properties?.label_lat) return;
+              var label = L.marker(
+                [parseFloat(f.properties.label_lat), parseFloat(f.properties.label_lon)],
+                { icon: L.divIcon({
+                  className: 'fir-label',
+                  html: '<span>' + f.properties.id + '</span>',
+                  iconSize: [60, 16],
+                  iconAnchor: [30, 8]
+                })}
+              );
+              firLabels.addLayer(label);
+            });
+
+            function toggleFirLabels() {
+              if (legMap.getZoom() >= 4) {
+                if (!legMap.hasLayer(firLabels)) legMap.addLayer(firLabels);
+              } else {
+                if (legMap.hasLayer(firLabels)) legMap.removeLayer(firLabels);
+              }
+            }
+            legMap.on('zoomend', toggleFirLabels);
+            toggleFirLabels();
+
+          }).catch(function() {});
+        }
+
+        setTimeout(function() { legMap.invalidateSize(); }, 350);
+
+        legMarkers.forEach(function(m) { legMap.removeLayer(m); });
+        legMarkers = [];
+        if (legLine) { legMap.removeLayer(legLine); legLine = null; }
+
+        var fromIcon = L.divIcon({ className: '', html: '<div style="background:#4ade80;width:10px;height:10px;border-radius:50%;border:2px solid #fff;"></div>', iconSize: [14, 14], iconAnchor: [7, 7] });
+        var toIcon = L.divIcon({ className: '', html: '<div style="background:#38bdf8;width:10px;height:10px;border-radius:50%;border:2px solid #fff;"></div>', iconSize: [14, 14], iconAnchor: [7, 7] });
+
+        var m1 = L.marker([fromAp.lat, fromAp.lon], { icon: fromIcon }).addTo(legMap);
+        m1.bindTooltip('<strong>' + fromAp.icao + '</strong>', { className: 'map-suggest-tooltip', permanent: true, direction: 'top', offset: [0, -8] });
+
+        var m2 = L.marker([toAp.lat, toAp.lon], { icon: toIcon }).addTo(legMap);
+        m2.bindTooltip('<strong>' + toAp.icao + '</strong>', { className: 'map-suggest-tooltip', permanent: true, direction: 'top', offset: [0, -8] });
+
+        legMarkers = [m1, m2];
+
+        // Read route from the Add Leg modal textarea
+        var routeTextarea = document.getElementById('addLegRoute');
+        var routeStr = routeTextarea ? routeTextarea.value.trim() : '';
+
+        if (routeStr) {
+          // Resolve route via API
+          var depTimeEl = document.getElementById('addLegDepTime');
+          var depTimeVal = depTimeEl ? depTimeEl.value.replace(' UTC', '').trim() : '';
+          var blockTimeVal = document.getElementById('addLegSimbriefFetch')?.dataset?.blockTime || '';
+
+          fetch('/api/resolve-route?from=' + fromVal + '&to=' + toVal + '&route=' + encodeURIComponent(routeStr) + '&depTime=' + encodeURIComponent(depTimeVal) + '&blockTime=' + encodeURIComponent(blockTimeVal))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (data.points && data.points.length >= 2) {
+                var routeCoords = data.points.map(function(p) { return [p.lat, p.lon]; });
+
+                // Draw resolved route as solid line
+                var routeLine = L.polyline(routeCoords, { color: '#f59e0b', weight: 2.5, opacity: 0.9 }).addTo(legMap);
+                legMarkers.push(routeLine);
+
+                // Add small dots for each waypoint
+                data.points.forEach(function(p, i) {
+                  if (i === 0 || i === data.points.length - 1) return;
+                  var wpIcon = L.divIcon({ className: '', html: '<div style="background:#f59e0b;width:4px;height:4px;border-radius:50%;"></div>', iconSize: [4, 4], iconAnchor: [2, 2] });
+                  var wpM = L.marker([p.lat, p.lon], { icon: wpIcon }).addTo(legMap);
+                  wpM.bindTooltip(p.name, { className: 'map-suggest-tooltip' });
+                  legMarkers.push(wpM);
+                });
+
+                legMap.fitBounds(routeLine.getBounds(), { padding: [20, 20], animate: false });
+              }
+
+            }).catch(function() {});
+        }
+
+        // Great circle arc (always shown as dashed reference)
+        var gcPoints = greatCircleArc(fromAp.lat, fromAp.lon, toAp.lat, toAp.lon, 80);
+        legLine = L.polyline(gcPoints, {
+          color: '#38bdf8', weight: 1.5, opacity: 0.3, dashArray: '4,6'
+        }).addTo(legMap);
+
+        legMap.fitBounds(legLine.getBounds(), { padding: [20, 20], animate: false });
+
+      } catch(err) { console.error('[ROUTE MAP ERROR]', err); }
+    }, 400);
+  }
+
+  toInput.addEventListener('input', updateRouteMap);
+  toInput.addEventListener('change', updateRouteMap);
+
+  var routeTextarea = document.getElementById('addLegRoute');
+  if (routeTextarea) {
+    var routeDebounce = null;
+    routeTextarea.addEventListener('input', function() {
+      routeTextarea.style.height = 'auto';
+      routeTextarea.style.height = routeTextarea.scrollHeight + 'px';
+      clearTimeout(routeDebounce);
+      routeDebounce = setTimeout(updateRouteMap, 600);
+    });
+  }
+})();
+
+/* ===== ADD LEG SIMBRIEF ===== */
+(function() {
+  var genBtn = document.getElementById('addLegSimbriefGen');
+  var fetchBtn = document.getElementById('addLegSimbriefFetch');
+  var msgEl = document.getElementById('addLegSimbriefMsg');
+  var routeTextarea = document.getElementById('addLegRoute');
+  var fromInput = document.getElementById('addLegFrom');
+  var toInput = document.getElementById('addLegTo');
+
+  if (!genBtn || !fetchBtn) return;
+
+  genBtn.addEventListener('click', function() {
+    var from = (fromInput.value || '').trim().toUpperCase();
+    var to = (toInput.value || '').trim().toUpperCase();
+    var route = (routeTextarea.value || '').trim();
+
+    if (!from || !to) { alert('Enter From and To first.'); return; }
+
+    var pilotId = (document.getElementById('simbriefPilotId')?.value || '').trim();
+
+    var url = 'https://dispatch.simbrief.com/options/custom'
+      + '?orig=' + encodeURIComponent(from)
+      + '&dest=' + encodeURIComponent(to)
+      + (route ? '&route=' + encodeURIComponent(route) : '')
+      + '&type=B738'
+      + '&cruise=M78'
+      + '&manualrmk=' + encodeURIComponent('WorldFlight Validated Route - www.planning.worldflight.center');
+
+    window.open(url, 'simbrief', 'width=1100,height=750,scrollbars=yes,resizable=yes');
+
+    // Enable fetch button
+    fetchBtn.disabled = false;
+    fetchBtn.style.background = 'var(--success)';
+    fetchBtn.style.color = '#020617';
+    fetchBtn.style.fontWeight = '600';
+    msgEl.textContent = 'Generate your plan in SimBrief, then click Pull SimBrief Data.';
+    msgEl.style.display = '';
+    msgEl.style.color = 'var(--accent)';
+  });
+
+  fetchBtn.addEventListener('click', async function() {
+    var pilotId = (document.getElementById('simbriefPilotId')?.value || '').trim();
+    if (!pilotId) { alert('Enter your SimBrief Pilot ID first.'); return; }
+
+    var from = (fromInput.value || '').trim().toUpperCase();
+    var to = (toInput.value || '').trim().toUpperCase();
+
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = 'Fetching...';
+    msgEl.textContent = 'Fetching from SimBrief...';
+    msgEl.style.color = 'var(--accent)';
+
+    try {
+      var res = await fetch('https://www.simbrief.com/api/xml.fetcher.php?userid=' + encodeURIComponent(pilotId) + '&json=1');
+      var data = await res.json();
+
+      if (!data || !data.times) throw new Error('No flight plan found');
+
+      var ofpOrig = (data.origin?.icao_code || '').toUpperCase();
+      var ofpDest = (data.destination?.icao_code || '').toUpperCase();
+
+      if (ofpOrig !== from || ofpDest !== to) {
+        msgEl.textContent = 'Latest plan is ' + ofpOrig + ' → ' + ofpDest + ', expected ' + from + ' → ' + to + '. Generate the correct plan first.';
+        msgEl.style.color = 'var(--danger)';
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = 'Pull SimBrief Data';
+        return;
+      }
+
+      // Extract route and block time
+      var ofpRoute = data.general?.route || '';
+      var blockSecs = Number(data.times?.sched_block) || Number(data.times?.est_block) || 0;
+      var blockHrs = Math.floor(blockSecs / 3600);
+      var blockMins = Math.floor((blockSecs % 3600) / 60);
+      var blockStr = String(blockHrs).padStart(2, '0') + ':' + String(blockMins).padStart(2, '0');
+
+      // Fill in route
+      if (ofpRoute) {
+        routeTextarea.value = ofpRoute;
+        routeTextarea.dispatchEvent(new Event('input'));
+      }
+
+      msgEl.innerHTML = 'Route and block time (' + blockStr + ') loaded from SimBrief.';
+      msgEl.style.color = 'var(--success)';
+
+      // Store block time for when we submit
+      fetchBtn.dataset.blockTime = blockStr;
+      fetchBtn.textContent = 'Pull SimBrief Data';
+      fetchBtn.disabled = true;
+
+      // Now fetch FIR transit data with block time available
+      var depTimeEl = document.getElementById('addLegDepTime');
+      var depTimeVal = depTimeEl ? depTimeEl.value.replace(' UTC', '').trim() : '';
+      var firSection = document.getElementById('addLegFirSection');
+
+      if (from && to && ofpRoute && depTimeVal && blockStr) {
+        fetch('/api/resolve-route?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to) + '&route=' + encodeURIComponent(ofpRoute) + '&depTime=' + encodeURIComponent(depTimeVal) + '&blockTime=' + encodeURIComponent(blockStr))
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.firs && data.firs.length && firSection) {
+              firSection.style.display = 'block';
+              var firList = document.getElementById('addLegFirList');
+              firList.innerHTML = data.firs.map(function(f) {
+                var label = f.fir;
+                if (f.staffStart && f.staffEnd) {
+                  label += ' <span class="fir-time">' + f.staffStart + ' – ' + f.staffEnd + '</span>';
+                }
+                return '<span class="fir-tag">' + label + '</span>';
+              }).join('');
+            }
+          }).catch(function() {});
+      }
+
+    } catch(err) {
+      msgEl.textContent = 'Failed: ' + err.message;
+      msgEl.style.color = 'var(--danger)';
+      fetchBtn.disabled = false;
+      fetchBtn.textContent = 'Pull SimBrief Data';
+    }
+  });
+})();
+
 /* ===== SIMBRIEF PILOT ID (persist in localStorage) ===== */
 (function() {
   var pidInput = document.getElementById('simbriefPilotId');
@@ -9384,6 +10009,37 @@ document.addEventListener('click', function(e) {
   pidInput.value = localStorage.getItem('simbriefPilotId') || '52776';
   pidInput.addEventListener('change', function() {
     localStorage.setItem('simbriefPilotId', pidInput.value.trim());
+  });
+})();
+
+/* ===== SECTOR OVERVIEW ===== */
+(function() {
+  var sectorModal = document.getElementById('sectorModal');
+  if (!sectorModal) return;
+
+  document.addEventListener('click', function(e) {
+    var link = e.target.closest('.sector-link');
+    if (!link) return;
+    e.preventDefault();
+
+    document.getElementById('sectorWf').textContent = link.dataset.wf;
+    document.getElementById('sectorFrom').textContent = link.dataset.from || '—';
+    document.getElementById('sectorTo').textContent = link.dataset.to || '—';
+    document.getElementById('sectorDate').textContent = link.dataset.date || '—';
+    document.getElementById('sectorDep').textContent = link.dataset.dep || '—';
+    document.getElementById('sectorArr').textContent = link.dataset.arr || '—';
+    document.getElementById('sectorBlock').textContent = link.dataset.block || '—';
+    document.getElementById('sectorAtcRoute').textContent = link.dataset.route || 'No route set';
+    document.getElementById('sectorRoute').textContent = (link.dataset.from || '') + ' → ' + (link.dataset.to || '');
+
+    sectorModal.classList.remove('hidden');
+  });
+
+  document.getElementById('closeSectorModal').addEventListener('click', function() {
+    sectorModal.classList.add('hidden');
+  });
+  sectorModal.querySelector('.modal-backdrop').addEventListener('click', function() {
+    sectorModal.classList.add('hidden');
   });
 })();
 
@@ -9396,8 +10052,8 @@ document.addEventListener('click', function(e) {
   var tr = btn.closest('tr');
   var from = btn.dataset.from;
   var to = btn.dataset.to;
-  var routeInput = tr.querySelector('.sched-edit[data-field="atcRoute"]');
-  var route = routeInput ? routeInput.value.trim() : '';
+  var routeEl = tr.querySelector('[data-field="atcRoute"]');
+  var route = routeEl ? (routeEl.value || routeEl.textContent || '').trim() : '';
 
   var url = 'https://dispatch.simbrief.com/options/custom'
     + '?orig=' + encodeURIComponent(from)
@@ -9427,7 +10083,15 @@ document.addEventListener('click', async function(e) {
   var to = btn.dataset.to;
 
   btn.disabled = true;
-  btn.textContent = '...';
+
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,0.9);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;';
+  overlay.innerHTML = '<div style="text-align:center;">'
+    + '<div style="width:36px;height:36px;border:3px solid rgba(255,255,255,0.1);border-top-color:var(--accent,#38bdf8);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px;"></div>'
+    + '<h2 style="color:var(--text,#e5e7eb);font-size:18px;margin:0 0 6px;">Fetching from SimBrief...</h2>'
+    + '<p style="color:var(--muted,#94a3b8);font-size:13px;">' + from + ' to ' + to + '</p>'
+    + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+  document.body.appendChild(overlay);
 
   try {
     var res = await fetch('https://www.simbrief.com/api/xml.fetcher.php?userid=' + encodeURIComponent(pilotId) + '&json=1');
@@ -9442,11 +10106,40 @@ document.addEventListener('click', async function(e) {
     var ofpDest = (data.destination?.icao_code || '').toUpperCase();
 
     if (ofpOrig !== from.toUpperCase() || ofpDest !== to.toUpperCase()) {
-      var proceed = confirm(
-        'SimBrief OFP is for ' + ofpOrig + ' → ' + ofpDest +
-        ' but this leg is ' + from + ' → ' + to + '.\\n\\nUse it anyway?'
-      );
-      if (!proceed) { btn.disabled = false; btn.textContent = 'Fetch'; return; }
+      overlay.remove();
+      // Show as info-only modal (hide cancel, change confirm to OK)
+      var modal = document.getElementById('callsignModal');
+      var card = modal.querySelector('.modal-card');
+      var h3 = card.querySelector('h3');
+      var help = card.querySelector('.modal-help');
+      var input = document.getElementById('callsignModalInput');
+      var confirmBtn = document.getElementById('callsignConfirm');
+      var cancelBtn = document.getElementById('callsignCancel');
+      var hint = card.querySelector('.modal-hint');
+
+      h3.textContent = 'Wrong Flight Plan';
+      help.textContent = 'Your latest SimBrief plan is ' + ofpOrig + ' \u2192 ' + ofpDest + ', but this leg is ' + from + ' \u2192 ' + to + '. Please generate the correct plan in SimBrief first (click SB), then try Fetch again.';
+      input.style.display = 'none';
+      if (hint) hint.style.display = 'none';
+      cancelBtn.style.display = 'none';
+      confirmBtn.textContent = 'OK';
+      modal.classList.remove('hidden');
+
+      await new Promise(function(resolve) {
+        function done() {
+          modal.classList.add('hidden');
+          input.style.display = '';
+          if (hint) hint.style.display = '';
+          cancelBtn.style.display = '';
+          confirmBtn.textContent = 'Confirm';
+          confirmBtn.removeEventListener('click', done);
+          resolve();
+        }
+        confirmBtn.addEventListener('click', done);
+      });
+      btn.disabled = false;
+      btn.textContent = '⤓';
+      return;
     }
 
     // Extract block time (in seconds) and route
@@ -9475,9 +10168,10 @@ document.addEventListener('click', async function(e) {
 
     location.reload();
   } catch(err) {
+    overlay.remove();
     alert('Failed to fetch from SimBrief: ' + err.message);
     btn.disabled = false;
-    btn.textContent = 'Fetch';
+    btn.textContent = '\u2913';
   }
 });
 
@@ -9500,13 +10194,23 @@ document.addEventListener('click', async function(e) {
     outline: none;
     background: rgba(56,189,248,0.05);
   }
-  textarea.sched-route {
-    resize: vertical;
+  div.sched-route {
     font-family: monospace;
     font-size: 12px;
-    line-height: 1.4;
-    word-break: break-all;
-    white-space: pre-wrap;
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: normal;
+    padding: 4px 6px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  div.sched-route:hover { border-color: var(--border); }
+  div.sched-route:focus { border-color: var(--accent); background: rgba(56,189,248,0.05); }
+  div.sched-route:empty::before {
+    content: 'Enter ATC route...';
+    color: var(--muted2);
   }
   #mainDeparturesTable .col-route {
     max-width: none;
@@ -9514,7 +10218,13 @@ document.addEventListener('click', async function(e) {
     overflow-wrap: anywhere;
     word-break: break-word;
   }
+  ${isScratch ? `
   #mainDeparturesTable { table-layout:auto; }
+  ` : `
+  #mainDeparturesTable { table-layout:auto; }
+  #mainDeparturesTable td { font-size:13px; white-space:nowrap; }
+  #mainDeparturesTable td:last-child { white-space:normal; }
+  `}
   .calc-cell {
     color: var(--text);
     font-size: 13px;
@@ -9531,12 +10241,50 @@ document.addEventListener('click', async function(e) {
   }
   .map-suggest-tooltip::before { border-top-color: #1e293b !important; }
   .map-suggest-marker { background: transparent !important; border: none !important; }
+  #addLegMap path { pointer-events: visibleStroke; cursor: default; }
+  #addLegMap path:focus { outline: none; }
+  .fir-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    background: rgba(56,189,248,0.08);
+    border: 1px solid rgba(56,189,248,0.2);
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: monospace;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .fir-time {
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 10px;
+  }
+  .fir-label {
+    background: none !important; border: none !important; box-shadow: none !important;
+    text-align: center;
+  }
+  .fir-label span {
+    font-size: 9px; font-weight: 600; color: rgba(148,163,184,0.5);
+    letter-spacing: 1px; text-transform: uppercase;
+  }
   .col-del { width:0; padding:0 !important; white-space:nowrap; }
   .btn-delete-row {
     background:none; border:none; color:var(--danger); cursor:pointer;
     font-size:11px; padding:2px 4px; opacity:0.3; transition:opacity .15s; line-height:1;
   }
   .btn-delete-row:hover { opacity:1; }
+  .row-icon {
+    background: none; border: none; cursor: pointer;
+    font-size: 10px; font-weight: 700; padding: 2px 3px;
+    border-radius: 3px; text-decoration: none;
+    opacity: 0.4; transition: opacity .15s;
+    display: inline-block; line-height: 1;
+  }
+  .row-icon:hover { opacity: 1; }
+  a.row-icon.simbrief-launch { color: #60a5fa; }
+  button.row-icon.sb-fetch { color: #4ade80; font-size: 13px; }
 </style>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -9566,6 +10314,12 @@ function applyDepFlowStyle(input) {
   }
 }
 
+/* ===== DEP FLOW: LOADING STATE ===== */
+document.querySelectorAll('.dep-flow-input').forEach(function(inp) {
+  inp.style.opacity = '0.3';
+  inp.disabled = true;
+});
+
 /* ===== DEP FLOW: REQUEST EVENT-SPECIFIC FLOWS ===== */
 if (window.WF_EVENT_ID) {
   socket.emit('requestEventFlows', { eventId: window.WF_EVENT_ID });
@@ -9573,7 +10327,13 @@ if (window.WF_EVENT_ID) {
 
 /* ===== DEP FLOW: INITIAL SYNC (+ COLOUR) ===== */
 socket.on('syncDepFlows', flows => {
-  window.sharedFlowRates = flows; // exposed for any client-side TSAT logic if needed
+  // Remove loading state
+  document.querySelectorAll('.dep-flow-input').forEach(function(inp) {
+    inp.style.opacity = '';
+    inp.disabled = false;
+  });
+
+  window.sharedFlowRates = flows;
   Object.entries(flows).forEach(([sector, value]) => {
     const input = document.querySelector('.dep-flow-input[data-sector="' + sector + '"]');
     if (input) {
@@ -9701,8 +10461,19 @@ document.addEventListener('click', function (e) {
 <script>
 document.addEventListener('DOMContentLoaded', () => {
 
+  /* ===== FLOW TYPE: LOADING STATE ===== */
+  document.querySelectorAll('.flowtype-select').forEach(function(sel) {
+    sel.style.opacity = '0.3';
+    sel.disabled = true;
+  });
+
   /* ===== FLOW TYPE: INITIAL SYNC ===== */
   socket.on('syncFlowTypes', types => {
+    document.querySelectorAll('.flowtype-select').forEach(function(sel) {
+      sel.style.opacity = '';
+      sel.disabled = false;
+    });
+
     window.sharedFlowTypes = types || {};
 
     document.querySelectorAll('.flowtype-select').forEach(sel => {
@@ -9749,6 +10520,169 @@ res.send(
 
 });
 
+app.get('/api/airport-coords/:icao', async (req, res) => {
+  const icao = req.params.icao?.toUpperCase();
+  if (!icao || !/^[A-Z]{4}$/.test(icao)) return res.status(400).json({ error: 'Invalid' });
+  const ap = await prisma.airport.findUnique({ where: { icao }, select: { icao: true, name: true, lat: true, lon: true } });
+  if (!ap) return res.status(404).json({ error: 'Not found' });
+  res.json(ap);
+});
+
+app.get('/api/resolve-route', async (req, res) => {
+  const { from, to, route } = req.query;
+  if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+
+  const points = [];
+
+  // Add departure airport
+  const depAp = await prisma.airport.findUnique({ where: { icao: from.toUpperCase() }, select: { lat: true, lon: true } });
+  if (depAp) points.push({ name: from.toUpperCase(), lat: depAp.lat, lon: depAp.lon });
+
+  // Parse route tokens — always pick the fix closest to the previous resolved point
+  if (route) {
+    const tokens = route.split(/\s+/).filter(Boolean);
+    for (const tok of tokens) {
+      const lastPt = points.length > 0 ? points[points.length - 1] : (depAp || { lat: 0, lon: 0 });
+
+      // Lat/lon fix (e.g. 52N020W, 8128S17000W)
+      const llFix = parseNavLatLon(tok);
+      if (llFix) { points.push({ name: tok, lat: llFix.lat, lon: llFix.lon }); continue; }
+
+      // Skip airway identifiers (e.g. P2, UL416, A338, Q475, J92, V115, DCT)
+      const upper = tok.toUpperCase();
+      if (/^(DCT|[A-Z]{1,2}\d{1,4}|[A-Z]\d{1,4}[A-Z]?)$/.test(upper) && upper.length <= 5 && /\d/.test(upper)) continue;
+      if (upper === 'DCT') continue;
+
+      // Named fix from navdata — pick closest to previous point
+      const fix = closestFix(upper, lastPt.lat, lastPt.lon);
+      if (fix) { points.push({ name: upper, lat: fix.lat, lon: fix.lon }); continue; }
+
+      // ICAO airport code
+      if (/^[A-Z]{4}$/.test(tok.toUpperCase())) {
+        const ap = await prisma.airport.findUnique({ where: { icao: tok.toUpperCase() }, select: { lat: true, lon: true } });
+        if (ap) { points.push({ name: tok.toUpperCase(), lat: ap.lat, lon: ap.lon }); continue; }
+      }
+      // Skip unresolvable tokens (airway names like UL416, SID/STAR names)
+    }
+  }
+
+  // Add arrival airport
+  const arrAp = await prisma.airport.findUnique({ where: { icao: to.toUpperCase() }, select: { lat: true, lon: true } });
+  if (arrAp) points.push({ name: to.toUpperCase(), lat: arrAp.lat, lon: arrAp.lon });
+
+  // Deduplicate consecutive identical points
+  const cleaned = [];
+  for (const p of points) {
+    const prev = cleaned[cleaned.length - 1];
+    if (!prev || prev.lat !== p.lat || prev.lon !== p.lon) cleaned.push(p);
+  }
+
+  // Calculate cumulative distances between route points (in nm)
+  const toRad = Math.PI / 180;
+  function haversineNm(lat1, lon1, lat2, lon2) {
+    const dLat = (lat2 - lat1) * toRad;
+    const dLon = (lon2 - lon1) * toRad;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+    return 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 3440.065;
+  }
+
+  let totalDist = 0;
+  const cumDist = [0];
+  for (let i = 1; i < cleaned.length; i++) {
+    totalDist += haversineNm(cleaned[i - 1].lat, cleaned[i - 1].lon, cleaned[i].lat, cleaned[i].lon);
+    cumDist.push(totalDist);
+  }
+
+  // Sample route at fine intervals and determine FIR at each point
+  const SAMPLES = 100;
+  const firSegments = []; // { fir, entryFrac, exitFrac }
+  let lastFir = null;
+
+  for (let s = 0; s <= SAMPLES; s++) {
+    const frac = s / SAMPLES;
+    const targetDist = frac * totalDist;
+
+    // Find which segment this falls in
+    let segIdx = 0;
+    for (let i = 1; i < cumDist.length; i++) {
+      if (cumDist[i] >= targetDist) { segIdx = i - 1; break; }
+      if (i === cumDist.length - 1) segIdx = i - 1;
+    }
+
+    const segLen = cumDist[segIdx + 1] - cumDist[segIdx];
+    const segFrac = segLen > 0 ? (targetDist - cumDist[segIdx]) / segLen : 0;
+    const sLat = cleaned[segIdx].lat + (cleaned[segIdx + 1].lat - cleaned[segIdx].lat) * segFrac;
+    const sLon = cleaned[segIdx].lon + (cleaned[segIdx + 1].lon - cleaned[segIdx].lon) * segFrac;
+
+    const firs = getFirsForPoint(sLat, sLon);
+    const firId = firs[0] || null;
+
+    if (firId && firId !== lastFir) {
+      if (firSegments.length > 0) {
+        firSegments[firSegments.length - 1].exitFrac = frac;
+      }
+      firSegments.push({ fir: firId, entryFrac: frac, exitFrac: 1.0 });
+      lastFir = firId;
+    }
+  }
+  if (firSegments.length > 0) {
+    firSegments[firSegments.length - 1].exitFrac = 1.0;
+  }
+
+  // Calculate staffing windows using depTime and blockTime from query
+  const depTimeStr = req.query.depTime || '';
+  const blockTimeStr = req.query.blockTime || '';
+  const depParts = depTimeStr.split(':');
+  const blockParts = blockTimeStr.split(':');
+  const depMins = depParts.length >= 2 ? Number(depParts[0]) * 60 + Number(depParts[1]) : null;
+  const blockMins = blockParts.length >= 2 ? Number(blockParts[0]) * 60 + Number(blockParts[1]) : null;
+
+  const firTransits = firSegments.map(seg => {
+    const result = { fir: seg.fir, entryFrac: seg.entryFrac, exitFrac: seg.exitFrac };
+
+    if (depMins !== null && blockMins !== null && blockMins > 0) {
+      const entryMins = depMins + seg.entryFrac * blockMins;
+      const exitMins = depMins + seg.exitFrac * blockMins;
+      const staffStart = entryMins - 60;
+      const staffEnd = exitMins + 60;
+
+      result.staffStart = String(Math.floor(((staffStart % 1440) + 1440) % 1440 / 60)).padStart(2, '0') + ':' + String(Math.floor(((staffStart % 1440) + 1440) % 1440 % 60)).padStart(2, '0');
+      result.staffEnd = String(Math.floor(((staffEnd % 1440) + 1440) % 1440 / 60)).padStart(2, '0') + ':' + String(Math.floor(((staffEnd % 1440) + 1440) % 1440 % 60)).padStart(2, '0');
+    }
+
+    return result;
+  });
+
+  res.json({ points: cleaned, firs: firTransits });
+});
+
+function parseNavLatLon(token) {
+  const t = token.toUpperCase().trim();
+  // 52N020W
+  let m = t.match(/^(\d{2})(N|S)(\d{3})(E|W)$/);
+  if (m) {
+    return { lat: Number(m[1]) * (m[2] === 'S' ? -1 : 1), lon: Number(m[3]) * (m[4] === 'W' ? -1 : 1) };
+  }
+  // 5230N02000W (ddmm + dddmm)
+  m = t.match(/^(\d{2})(\d{2})(N|S)(\d{3})(\d{2})(E|W)$/);
+  if (m) {
+    return {
+      lat: (Number(m[1]) + Number(m[2]) / 60) * (m[3] === 'S' ? -1 : 1),
+      lon: (Number(m[4]) + Number(m[5]) / 60) * (m[6] === 'W' ? -1 : 1)
+    };
+  }
+  // 8128S17000W (dddmm format)
+  m = t.match(/^(\d{2,3})(\d{2})(S|N)(\d{3,5})(W|E)$/);
+  if (m) {
+    const latDeg = m[1].length === 3 ? Number(m[1]) : Number(m[1]);
+    return {
+      lat: (Number(m[1]) + Number(m[2]) / 60) * (m[3] === 'S' ? -1 : 1),
+      lon: Number(m[4]) * (m[5] === 'W' ? -1 : 1)
+    };
+  }
+  return null;
+}
+
 /* ===== SCHEDULE ROW EDITING API ===== */
 app.post('/admin/api/schedule-row/update', requireAdmin, async (req, res) => {
   const { eventId, number, field, value } = req.body;
@@ -9779,7 +10713,7 @@ app.post('/admin/api/schedule-row/update', requireAdmin, async (req, res) => {
 });
 
 app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
-  const { eventId, from, to, depFlow, flowType } = req.body;
+  const { eventId, from, to, depFlow, flowType, atcRoute, blockTime } = req.body;
 
   // Find next WF number
   const existing = await prisma.wfScheduleRow.findMany({
@@ -9789,8 +10723,12 @@ app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
   });
 
   const lastOrder = existing.length ? existing[0].sortOrder : -1;
-  const lastNum = existing.length ? existing[0].number : 'WF0000';
-  const nextNum = 'WF' + String(parseInt(lastNum.replace(/\D/g, '') || '0') + 1).padStart(4, '0');
+  const evt = wfEvents.find(e => e.id === eventId);
+  const yearPrefix = String(evt?.year || new Date().getFullYear()).slice(-2);
+  const sectorCount = existing.length
+    ? parseInt(existing[0].number.replace(/\D/g, '').slice(-2)) || existing.length
+    : 0;
+  const nextNum = 'WF' + yearPrefix + String(sectorCount + 1).padStart(2, '0');
 
   const row = await prisma.wfScheduleRow.create({
     data: {
@@ -9802,8 +10740,8 @@ app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
       dateUtc: '',
       depTimeUtc: '',
       arrTimeUtc: '',
-      blockTime: '',
-      atcRoute: ''
+      blockTime: (blockTime || '').trim(),
+      atcRoute: (atcRoute || '').trim()
     }
   });
 
@@ -10138,6 +11076,228 @@ app.post('/admin/api/wf-events/:id/refresh', requireAdmin, async (req, res) => {
   }
 
   res.json({ success: true, rows: (eventSheetCaches[id] || []).length });
+});
+
+/* ===== AIRAC DATA PAGE ===== */
+function parseAiracHeader(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const head = fs.readFileSync(filePath, 'utf-8').split('\n').slice(0, 3).join(' ');
+    const m = head.match(/data cycle (\d{4}),\s*build (\d{8})/);
+    if (!m) return { exists: true, cycle: 'Unknown', buildDate: 'Unknown', valid: false };
+
+    const cycle = m[1];
+    const buildStr = m[2];
+    const buildDate = new Date(buildStr.slice(0, 4) + '-' + buildStr.slice(4, 6) + '-' + buildStr.slice(6, 8));
+
+    // AIRAC cycles are 28 days. Calculate expiry.
+    const expiryDate = new Date(buildDate.getTime() + 28 * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const valid = now < expiryDate;
+    const daysLeft = Math.ceil((expiryDate - now) / (24 * 60 * 60 * 1000));
+
+    const stats = fs.statSync(filePath);
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').length;
+
+    return {
+      exists: true,
+      cycle,
+      buildDate: buildDate.toISOString().slice(0, 10),
+      expiryDate: expiryDate.toISOString().slice(0, 10),
+      valid,
+      daysLeft,
+      fileSize: (stats.size / 1024 / 1024).toFixed(1) + ' MB',
+      lines
+    };
+  } catch { return null; }
+}
+
+app.get('/admin/airac', requireAdmin, (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+  const navDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata');
+
+  const fixInfo = parseAiracHeader(path.join(navDir, 'earth_fix.dat'));
+  const awyInfo = parseAiracHeader(path.join(navDir, 'earth_awy.dat'));
+
+  // Determine overall AIRAC status
+  const cycle = fixInfo?.cycle || awyInfo?.cycle || 'None';
+  const isValid = fixInfo?.valid || false;
+  const daysLeft = fixInfo?.daysLeft || 0;
+
+  function statusBadge(info) {
+    if (!info || !info.exists) return '<span class="badge badge-denied">Missing</span>';
+    if (info.valid) return '<span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;">Current</span>';
+    return '<span class="badge badge-denied">Expired</span>';
+  }
+
+  function fileCard(title, info, fieldName) {
+    return '<div class="leg-section">' +
+      '<div class="leg-section-title">' + title + '</div>' +
+      (info && info.exists
+        ? '<table style="width:100%;font-size:13px;color:var(--text);">' +
+          '<tr><td style="color:var(--muted);padding:4px 0;">Cycle</td><td style="font-weight:600;">' + info.cycle + ' ' + statusBadge(info) + '</td></tr>' +
+          '<tr><td style="color:var(--muted);padding:4px 0;">Build Date</td><td>' + info.buildDate + '</td></tr>' +
+          '<tr><td style="color:var(--muted);padding:4px 0;">Expires</td><td>' + info.expiryDate + (info.valid ? ' (' + info.daysLeft + ' days left)' : ' (expired)') + '</td></tr>' +
+          '<tr><td style="color:var(--muted);padding:4px 0;">File Size</td><td>' + info.fileSize + '</td></tr>' +
+          '<tr><td style="color:var(--muted);padding:4px 0;">Entries</td><td>' + info.lines.toLocaleString() + ' lines</td></tr>' +
+          '</table>'
+        : '<p style="color:var(--muted);font-size:13px;">File not found. Upload to enable route planning.</p>'
+      ) +
+      '<div style="margin-top:12px;">' +
+        '<form method="POST" action="/admin/api/airac/upload" enctype="multipart/form-data" style="display:flex;align-items:center;gap:8px;">' +
+          '<input type="hidden" name="fileType" value="' + fieldName + '" />' +
+          '<input type="file" name="navfile" accept=".dat" required style="font-size:12px;color:var(--muted);" />' +
+          '<button type="submit" class="action-btn primary" style="font-size:12px;padding:6px 14px;">Upload</button>' +
+        '</form>' +
+      '</div>' +
+    '</div>';
+  }
+
+  const content = `
+    <section class="card card-full">
+      <h2>AIRAC Data</h2>
+
+      <div class="leg-section" style="margin-bottom:20px;">
+        <div class="leg-section-title">AIRAC Summary</div>
+        <div style="display:flex;align-items:center;gap:16px;">
+          <div style="font-size:48px;">🧭</div>
+          <div>
+            <div style="font-size:22px;font-weight:700;color:var(--text);">Cycle ${cycle}</div>
+            <div style="font-size:13px;color:var(--muted);margin-top:2px;">
+              ${isValid
+                ? '<span style="color:#4ade80;">&#9679;</span> Current — ' + daysLeft + ' days until expiry'
+                : cycle !== 'None'
+                  ? '<span style="color:#f87171;">&#9679;</span> Expired — please upload a new cycle'
+                  : '<span style="color:#f87171;">&#9679;</span> No data loaded — upload navdata files below'}
+            </div>
+            <div style="font-size:12px;color:var(--muted2);margin-top:4px;">
+              Fixes loaded: <strong style="color:var(--text);">${navFixes.size.toLocaleString()}</strong> unique waypoints
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+        ${fileCard('Waypoints / Fixes (earth_fix.dat)', fixInfo, 'earth_fix')}
+        ${fileCard('Airways (earth_awy.dat)', awyInfo, 'earth_awy')}
+        ${(() => {
+          const firPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public', 'fir-boundaries.geojson');
+          let firInfo = null;
+          try {
+            if (fs.existsSync(firPath)) {
+              const stats = fs.statSync(firPath);
+              const raw = fs.readFileSync(firPath, 'utf-8');
+              const data = JSON.parse(raw);
+              firInfo = {
+                exists: true,
+                cycle: 'N/A',
+                buildDate: stats.mtime.toISOString().slice(0, 10),
+                expiryDate: null,
+                valid: true,
+                daysLeft: null,
+                fileSize: (stats.size / 1024 / 1024).toFixed(1) + ' MB',
+                lines: (data.features || []).length,
+                noExpiry: true
+              };
+            }
+          } catch {}
+
+          const info = firInfo;
+          const title = 'FIR Boundaries (VATSpy)';
+          const fieldName = 'fir_boundaries';
+
+          if (!info || !info.exists) {
+            return '<div class="leg-section">' +
+              '<div class="leg-section-title">' + title + '</div>' +
+              '<p style="color:var(--muted);font-size:13px;">File not found. Upload to enable FIR display.</p>' +
+              '<div style="margin-top:12px;">' +
+                '<form method="POST" action="/admin/api/airac/upload" enctype="multipart/form-data" style="display:flex;align-items:center;gap:8px;">' +
+                  '<input type="hidden" name="fileType" value="' + fieldName + '" />' +
+                  '<input type="file" name="navfile" accept=".geojson,.json" required style="font-size:12px;color:var(--muted);" />' +
+                  '<button type="submit" class="action-btn primary" style="font-size:12px;padding:6px 14px;">Upload</button>' +
+                '</form>' +
+              '</div>' +
+            '</div>';
+          }
+
+          return '<div class="leg-section">' +
+            '<div class="leg-section-title">' + title + '</div>' +
+            '<table style="width:100%;font-size:13px;color:var(--text);">' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Source</td><td style="font-weight:600;">VATSpy <span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;">Loaded</span></td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Last Updated</td><td>' + info.buildDate + '</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Expiry</td><td style="color:var(--muted);">No expiry</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">File Size</td><td>' + info.fileSize + '</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">FIR Regions</td><td>' + info.lines.toLocaleString() + ' boundaries</td></tr>' +
+            '</table>' +
+            '<div style="margin-top:12px;">' +
+              '<form method="POST" action="/admin/api/airac/upload" enctype="multipart/form-data" style="display:flex;align-items:center;gap:8px;">' +
+                '<input type="hidden" name="fileType" value="' + fieldName + '" />' +
+                '<input type="file" name="navfile" accept=".geojson,.json" required style="font-size:12px;color:var(--muted);" />' +
+                '<button type="submit" class="action-btn primary" style="font-size:12px;padding:6px 14px;">Upload</button>' +
+              '</form>' +
+            '</div>' +
+          '</div>';
+        })()}
+      </div>
+    </section>
+  `;
+
+  res.send(renderLayout({ title: 'AIRAC Data', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/admin/api/airac/upload', requireAdmin, multer({
+  dest: path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata', 'tmp')
+}).single('navfile'), async (req, res) => {
+  const { fileType } = req.body;
+  const isFir = fileType === 'fir_boundaries';
+  const allowed = { earth_fix: 'earth_fix.dat', earth_awy: 'earth_awy.dat' };
+  const targetName = isFir ? 'fir-boundaries.geojson' : allowed[fileType];
+
+  if (!targetName || !req.file) {
+    return res.status(400).send('Invalid upload');
+  }
+
+  const targetPath = isFir
+    ? path.join(path.dirname(fileURLToPath(import.meta.url)), 'public', targetName)
+    : path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata', targetName);
+
+  try {
+    const content = fs.readFileSync(req.file.path, 'utf-8').slice(0, 1000);
+
+    if (isFir) {
+      // Validate it's valid GeoJSON with features
+      if (!content.includes('FeatureCollection') && !content.includes('features')) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).send('Invalid file — does not appear to be a GeoJSON FeatureCollection');
+      }
+    } else {
+      // Validate it's a valid navdata file
+      if (!content.includes('data cycle')) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).send('Invalid file — does not contain AIRAC data header');
+      }
+    }
+
+    // Replace the file
+    fs.copyFileSync(req.file.path, targetPath);
+    fs.unlinkSync(req.file.path);
+
+    // Reload data
+    if (fileType === 'earth_fix') {
+      navFixes.clear();
+      loadNavFixes();
+    }
+    if (isFir) {
+      loadFirData();
+    }
+
+    console.log('[AIRAC] Uploaded ' + targetName);
+    res.redirect('/admin/airac');
+  } catch (err) {
+    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    res.status(500).send('Upload failed: ' + err.message);
+  }
 });
 
 /* ===== SETTINGS PAGE ===== */

@@ -50,7 +50,19 @@
       "Bash(curl -sI \"https://www.simbrief.com/api/xml.fetcher.php?userid=8448&json=1\")",
       "Bash(curl -s \"https://www.simbrief.com/api/xml.fetcher.php?userid=546033&json=1\")",
       "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\(''''fetch'''',{}\\).get\\(''''status'''',''''''''\\)\\)\")",
-      "Bash(curl -s \"https://www.simbrief.com/api/xml.fetcher.php?userid=52776&json=1\")"
+      "Bash(curl -s \"https://www.simbrief.com/api/xml.fetcher.php?userid=52776&json=1\")",
+      "Bash(curl -s http://localhost:8080/api/airport-coords/CYVR)",
+      "Bash(curl -s http://localhost:8080/api/airport-coords/LEMD)",
+      "Bash(curl -s http://localhost:8080/wf-schedule/2)",
+      "Bash(grep -n \"^\\\\`;\" c:/dev/WorldFlight-Planning/index.js)",
+      "Bash(awk 'NR>=9150 && NR<=10035' c:/dev/WorldFlight-Planning/index.js)",
+      "Bash(grep -n '\\\\${')",
+      "Bash(node -e \":*)",
+      "Bash(awk 'NR>=8850 && NR<=10035' c:/dev/WorldFlight-Planning/index.js)",
+      "Bash(grep -n '`')",
+      "Bash(cp \"c:/dev/AMS-Ceo/src/data/navdata/earth_fix.dat\" \"c:/dev/WorldFlight-Planning/data/navdata/\")",
+      "Bash(cp \"c:/dev/AMS-Ceo/src/data/navdata/earth_awy.dat\" \"c:/dev/WorldFlight-Planning/data/navdata/\")",
+      "Bash(cp \"c:/dev/AMS-Ceo/public/data/fir-boundaries.geojson\" \"c:/dev/WorldFlight-Planning/public/\")"
     ]
   }
 }
