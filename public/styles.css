@@ -599,6 +599,10 @@ select{ cursor:pointer; }
 /* =========================
    Tables
    ========================= */
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
 .tsat-col .table-scroll {
   flex: 1;               /* 🔑 fills column */
   overflow-y: auto;
@@ -658,7 +662,7 @@ select{ cursor:pointer; }
 /* Route column */
 .col-route{
   width:auto;
-  min-width:700px;
+  min-width:200px;
   white-space:normal;
   overflow-wrap:anywhere;
   line-height:1.65;

@@ -11047,6 +11047,9 @@ app.post('/admin/api/wf-events/:id/activate', requireAdmin, async (req, res) => 
     }
   }
 
+  // Clear world map cache so it rebuilds from the new schedule
+  wfWorldMapCache.clear();
+
   console.log(`[EVENT] Activated event ID ${id} — ${adminSheetCache.length} rows, ${Object.keys(sharedDepFlows).length} flows`);
   res.json({ success: true });
 });
