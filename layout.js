@@ -539,8 +539,6 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
         sidebar.classList.remove('mobile-open');
         backdrop.classList.remove('visible');
         setCollapsed(true);
-      } else {
-        setCollapsed(window.innerWidth < 900);
       }
     });
   }

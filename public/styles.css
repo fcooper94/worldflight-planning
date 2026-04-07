@@ -6124,6 +6124,9 @@ main.dashboard.map-layout {
   }
   .sidebar.mobile-open {
     transform: translateX(0);
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
   /* Show labels in mobile slide-out */
   .sidebar.mobile-open .label,
