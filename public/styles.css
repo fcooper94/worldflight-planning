@@ -66,6 +66,8 @@ a:hover{ text-decoration:none; }
 
 /* Site Banner */
 .site-banner {
+  position: relative;
+  z-index: 1;
   background: linear-gradient(135deg, rgba(59,130,246,0.15), rgba(139,92,246,0.15));
   border-bottom: 1px solid rgba(59,130,246,0.25);
   padding: 10px 20px;
@@ -328,7 +330,7 @@ body.no-sidebar .topbar{ padding-left: 0; }
     grid-template-rows: auto;
     align-items: center;
     gap: 0 10px;
-    overflow: hidden;
+    overflow: visible;
   }
 
   /* Small logo top-left with menu indicator */
@@ -610,7 +612,10 @@ select{ cursor:pointer; }
 .table-scroll {
   width: 100%;
   overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.table-scroll::-webkit-scrollbar { display: none; }
 .tsat-col .table-scroll {
   flex: 1;               /* 🔑 fills column */
   overflow-y: auto;
@@ -781,6 +786,10 @@ select{ cursor:pointer; }
   border-top:1px solid var(--border);
   font-size:14px;
   color:#cbd5f5;
+}
+@media (max-width: 900px) {
+  .connected-users-footer,
+  .admin-connected-footer { display: none !important; }
 }
 #connectedUsersList{
   color:#60a5fa;
@@ -2536,8 +2545,23 @@ tr:hover .row-actions {
 .my-slots-table-wrapper {
   overflow-x: auto;
   overflow-y: hidden;
-
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   padding-bottom: 6px; /* space so scrollbar doesn’t crowd content */
+}
+.my-slots-table-wrapper::-webkit-scrollbar { display: none; }
+@media (max-width: 900px) {
+  .card.card-full.my-slots-card {
+    width: calc(100vw - 44px) !important;
+    max-width: calc(100vw - 44px) !important;
+    box-sizing: border-box;
+    padding: 10px 8px;
+    margin: 8px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .my-slots-card::-webkit-scrollbar { display: none; }
 }
 
 /* Table base */
@@ -4613,6 +4637,18 @@ html[data-map-theme="light"] .ac-label {
   overflow-y: hidden;
   position: relative;
   scrollbar-gutter: stable both-edges;
+}
+@media (max-width: 900px) {
+  .schedule-page .card {
+    width: calc(100vw - 44px);
+    box-sizing: border-box;
+    padding: 10px 8px;
+    margin: 8px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .schedule-page .card::-webkit-scrollbar { display: none; }
 }
 
 /* ----- Table base ----- */

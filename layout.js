@@ -123,10 +123,13 @@ export default function renderLayout({
   <!-- ===== TOPBAR ===== -->
   <header class="topbar">
 
-  <button type="button" class="topbar-mobile-logo" id="mobileMenuBtn" aria-label="Menu">
+  ${hideSidebar ? `
+  <div class="topbar-mobile-logo">
+    <img src="/logo.png" alt="WorldFlight" />
+  </div>` : `<button type="button" class="topbar-mobile-logo" id="mobileMenuBtn" aria-label="Menu">
     <img src="/logo.png" alt="WorldFlight" />
     <span class="mobile-menu-icon">☰</span>
-  </button>
+  </button>`}
 
   ${hideSidebar ? `
   <a href="/" class="header-brand">
@@ -531,12 +534,16 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       window.dispatchEvent(new Event('sidebar:toggle'));
     }
 
-    // Wide screens: expand by default, narrow/mobile: collapse
-    const saved = localStorage.getItem('sidebarCollapsed');
-    if (saved !== null) {
-      setCollapsed(saved === 'true');
+    // Wide screens: restore saved state, mobile: always start collapsed
+    if (isMobile()) {
+      setCollapsed(true);
     } else {
-      setCollapsed(window.innerWidth <= 2000);
+      const saved = localStorage.getItem('sidebarCollapsed');
+      if (saved !== null) {
+        setCollapsed(saved === 'true');
+      } else {
+        setCollapsed(window.innerWidth <= 2000);
+      }
     }
 
     toggle.addEventListener('click', () => {

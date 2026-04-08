@@ -14190,7 +14190,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           // Mobile cards
           var cards = document.getElementById('firDetailCards');
           if (cards) {
-            cards.innerHTML = data.legs.map(function(l) {
+            cards.innerHTML = data.legs.map(function(l, idx) {
               var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
               var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
               return '<div class="fir-leg-card">'
