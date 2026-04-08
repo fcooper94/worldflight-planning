@@ -13487,7 +13487,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     .fir-detail-header h2 { margin: 0; }
     .fir-detail-meta { font-size: 13px; color: var(--muted); }
     .fir-detail-header .back-link { color: var(--accent); text-decoration: none; font-size: 13px; }
-    #firDetailTable { width: 100%; }
+    #firDetailTable { width: max-content; min-width: 100%; }
     #firDetailTable th, #firDetailTable td { padding: 6px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
     #firDetailTable th { font-size: 13px; font-weight: 600; color: var(--muted); }
     #firDetailTable td { font-size: 13px; }
@@ -13583,6 +13583,23 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
       background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer;
     }
     .fir-route-modal-map { height: 400px; width: 100%; }
+
+    @media (max-width: 900px) {
+      .airspace-page { padding: 0 4px; }
+      .airspace-page .card { padding: 12px 10px; }
+      .airspace-search-row { flex-direction: column; align-items: stretch; gap: 8px; }
+      .airspace-search-row input, .airspace-search-row select { width: 100%; min-width: 0; box-sizing: border-box; }
+      .airspace-search-row > div[style*="border-left"] { display: none; }
+      #firSearchBtn { width: 100%; }
+      #airspaceFirMap { height: 220px; }
+      .fir-summary-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); max-height: 180px; }
+      #firDetailTable th, #firDetailTable td { padding: 4px 5px; font-size: 11px; }
+      .fir-timeline-segment { font-size: 8px; }
+      .fir-route-modal { width: 95vw; max-height: 90vh; }
+      .fir-route-modal-map { height: 250px; }
+      .fir-detail-header h2 { font-size: 16px; }
+      .fir-detail-meta { font-size: 11px; }
+    }
   </style>
 
   <main class="dashboard-full airspace-page">
@@ -13644,24 +13661,24 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           </div>
         </div>
       </div>
+      <div class="table-scroll">
       <div class="fir-timeline" id="firTimeline"></div>
 
       <!-- Legs table -->
-      <div class="table-scroll" style="margin-top:16px;">
-        <table id="firDetailTable">
+        <table id="firDetailTable" style="margin-top:16px;">
           <thead>
             <tr>
               <th>WF</th>
-              <th>FIR</th>
+              <th class="">FIR</th>
               <th>From</th>
               <th>To</th>
               <th>Date</th>
               <th>Staff Window</th>
-              <th>Staff Duration</th>
-              <th>ATC Route</th>
-              <th>Dep Flow</th>
-              <th>Flow Type</th>
-              <th></th>
+              <th class="">Staff Duration</th>
+              <th class="">ATC Route</th>
+              <th class="">Dep Flow</th>
+              <th class="">Flow Type</th>
+              <th class=""></th>
             </tr>
           </thead>
           <tbody id="firDetailBody"></tbody>
@@ -14103,16 +14120,16 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
             return '<tr>'
               + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
-              + '<td style="font-family:monospace;font-weight:600;color:var(--accent);">' + data.fir + '</td>'
+              + '<td class="" style="font-family:monospace;font-weight:600;color:var(--accent);">' + data.fir + '</td>'
               + '<td>' + l.from + '</td>'
               + '<td>' + l.to + '</td>'
               + '<td>' + (l.date || '-') + '</td>'
               + '<td class="staff-window">' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</td>'
-              + '<td>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</td>'
+              + '<td class="">' + (l.staffMins ? l.staffMins + ' min' : '-') + '</td>'
               + '<td class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
-              + '<td>' + (l.depFlow || '-') + '</td>'
-              + '<td><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
-              + '<td><button class="fir-view-btn" data-leg-idx="' + idx + '">View</button></td>'
+              + '<td class="">' + (l.depFlow || '-') + '</td>'
+              + '<td class=""><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
+              + '<td class=""><button class="fir-view-btn" data-leg-idx="' + idx + '">View</button></td>'
               + '</tr>';
           }).join('');
 
@@ -14181,16 +14198,16 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
           return '<tr>'
             + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
-            + '<td><span style="font-family:monospace;font-weight:600;color:var(--accent);">' + l._fir + '</span></td>'
+            + '<td class=""><span style="font-family:monospace;font-weight:600;color:var(--accent);">' + l._fir + '</span></td>'
             + '<td>' + l.from + '</td>'
             + '<td>' + l.to + '</td>'
             + '<td>' + (l.date || '-') + '</td>'
             + '<td class="staff-window">' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</td>'
-            + '<td>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</td>'
+            + '<td class="">' + (l.staffMins ? l.staffMins + ' min' : '-') + '</td>'
             + '<td class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
-            + '<td>' + (l.depFlow || '-') + '</td>'
-            + '<td><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
-            + '<td style="white-space:nowrap;">'
+            + '<td class="">' + (l.depFlow || '-') + '</td>'
+            + '<td class=""><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
+            + '<td class="" style="white-space:nowrap;">'
             + '<button class="fir-view-btn" data-group-leg-idx="' + idx + '" data-leg-fir="' + l._fir + '" style="font-size:11px;padding:3px 8px;margin-right:4px;">View</button>'
             + '<button class="fir-view-btn" data-view-fir="' + l._fir + '" style="font-size:11px;padding:3px 8px;">Open ' + l._fir + '</button>'
             + '</td>'
