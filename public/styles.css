@@ -4677,11 +4677,28 @@ html[data-map-theme="light"] .ac-label {
   }
   .schedule-page .card::-webkit-scrollbar { display: none; }
   .schedule-page .table-scroll { overflow-x: visible !important; }
+  .schedule-page .col-book {
+    width: 80px !important;
+    min-width: 80px !important;
+    max-width: 80px !important;
+  }
   .schedule-page .book-pill,
   .schedule-page .col-book .flowtype-pill {
-    font-size: 9px; padding: 3px 4px; white-space: nowrap; width: auto; min-width: 0;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 8px !important;
+    padding: 4px 2px !important;
+    white-space: nowrap !important;
+    width: 76px !important;
+    height: 24px !important;
+    min-width: 76px !important;
+    max-width: 76px !important;
+    min-height: 24px !important;
+    max-height: 24px !important;
+    line-height: 1 !important;
+    box-sizing: border-box !important;
   }
-  .schedule-page .col-book { width: auto; min-width: 0; }
 }
 
 /* ----- Table base ----- */
