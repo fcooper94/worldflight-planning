@@ -13604,7 +13604,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
     @media (max-width: 900px) {
       .airspace-page { padding: 0; margin: 0; width: 100vw; box-sizing: border-box; }
-      .airspace-page .card { padding: 10px 8px; margin: 8px 4px; width: calc(100vw - 44px); box-sizing: border-box; }
+      .airspace-page .card { padding: 10px 8px; margin: 8px 4px; width: calc(100vw - 42px); box-sizing: border-box; }
       .airspace-search-row { flex-direction: column; align-items: stretch; gap: 8px; }
       .airspace-search-row input, .airspace-search-row select { width: 100%; min-width: 0; box-sizing: border-box; }
       .airspace-search-row > div[style*="border-left"] { display: none; }

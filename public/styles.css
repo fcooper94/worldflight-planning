@@ -271,7 +271,7 @@ body.no-sidebar .topbar{ padding-left: 0; }
   height: var(--topbar-h);
   padding-left: var(--sidebar-expanded);
   padding-right: 24px;
-  z-index: 50;
+  z-index: 100;
 
   background:
     linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.15)),
@@ -6148,7 +6148,6 @@ main.dashboard.map-layout {
   }
   body.sidebar-open {
     overflow: hidden !important;
-    touch-action: none;
   }
   /* Show labels in mobile slide-out */
   .sidebar.mobile-open .label,
