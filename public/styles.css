@@ -1267,6 +1267,33 @@ select{ cursor:pointer; }
   box-shadow: 0 7px 15px rgba(56,189,248,0.4);
 }
 
+@media (max-width: 900px) {
+  .login-container {
+    max-width: calc(100vw - 32px);
+    padding: 36px 24px;
+    border-radius: 14px;
+  }
+  .login-logo {
+    width: 120px;
+    margin-bottom: 24px;
+  }
+  .login-container h1 {
+    font-size: 32px;
+  }
+  .login-container h2 {
+    font-size: 20px;
+  }
+  .login-subtitle {
+    font-size: 16px;
+  }
+  .login-btn {
+    padding: 16px 32px;
+    font-size: 18px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+}
+
 .tsat-top-row.three-cols {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -4650,7 +4677,11 @@ html[data-map-theme="light"] .ac-label {
   }
   .schedule-page .card::-webkit-scrollbar { display: none; }
   .schedule-page .table-scroll { overflow-x: visible !important; }
-  .schedule-page .book-pill { font-size: 10px; padding: 2px 6px; white-space: nowrap; }
+  .schedule-page .book-pill,
+  .schedule-page .col-book .flowtype-pill {
+    font-size: 9px; padding: 3px 4px; white-space: nowrap; width: auto; min-width: 0;
+  }
+  .schedule-page .col-book { width: auto; min-width: 0; }
 }
 
 /* ----- Table base ----- */
