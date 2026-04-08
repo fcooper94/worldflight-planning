@@ -55,22 +55,18 @@ export default function renderLayout({
         <span class="icon">💡</span>
         <span class="label">Suggest Airport</span>
       </a>
-      <a href="/view-suggestions" class="nav-item" data-tooltip="View Suggestions">
-        <span class="icon">📊</span>
-        <span class="label">View Suggestions</span>
-      </a>
     </div>` : ''}
 
-    ${pv('atc') ? `<div class="nav-section">
+    ${pv('atc') || pv('airspace') ? `<div class="nav-section">
       <div class="nav-title">Controllers</div>
-      <a href="/atc" class="nav-item" data-tooltip="WF Slot Management">
+      ${pv('atc') ? `<a href="/atc" class="nav-item" data-tooltip="WF Slot Management">
         <span class="icon">🎧</span>
         <span class="label">WF Slot Management</span>
-      </a>
-      <a href="/airspace" class="nav-item" data-tooltip="Airspace Management">
+      </a>` : ''}
+      ${pv('airspace') ? `<a href="/airspace" class="nav-item" data-tooltip="Airspace Management">
         <span class="icon">🌐</span>
         <span class="label">Airspace Management</span>
-      </a>
+      </a>` : ''}
     </div>` : ''}
 
     ${isAdmin ? `

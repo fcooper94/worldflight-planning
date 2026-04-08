@@ -35,15 +35,27 @@ function pointInPolygon(lat, lon, coords) {
   return inside;
 }
 
+const FIR_ALIASES = {
+  'EGTL': 'EGTT',  // London Terminal → London Area
+};
+
+function baseFirCode(id) {
+  if (!id) return 'Unknown';
+  const base = id.split('-')[0];
+  return FIR_ALIASES[base] || base;
+}
+
 function getFirsForPoint(lat, lon) {
   const results = [];
+  const seen = new Set();
   for (const f of firFeatures) {
     const geom = f.geometry;
     if (!geom) continue;
     const polys = geom.type === 'MultiPolygon' ? geom.coordinates : geom.type === 'Polygon' ? [geom.coordinates] : [];
     for (const poly of polys) {
       if (poly[0] && pointInPolygon(lat, lon, poly[0])) {
-        results.push(f.properties?.id || 'Unknown');
+        const base = baseFirCode(f.properties?.id);
+        if (!seen.has(base)) { seen.add(base); results.push(base); }
         break;
       }
     }
@@ -72,6 +84,67 @@ function loadNavFixes() {
     }
   }
   console.log('[NAV] Loaded ' + count + ' fixes (' + navFixes.size + ' unique names) from earth_fix.dat');
+
+  // Load navaids (VOR, NDB, DME) from earth_nav.dat
+  const navFile = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata', 'earth_nav.dat');
+  if (fs.existsSync(navFile)) {
+    const navLines = fs.readFileSync(navFile, 'utf-8').split('\n');
+    let navCount = 0;
+    for (const line of navLines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('I') || trimmed.startsWith('9') || trimmed.indexOf('Version') !== -1) continue;
+      const parts = trimmed.split(/\s+/);
+      // Format: type lat lon elev freq range ? ident ...
+      // Types: 2=NDB, 3=VOR, 12=DME, 13=VORDME
+      if (parts.length >= 8) {
+        const type = parseInt(parts[0]);
+        if (type === 2 || type === 3 || type === 12 || type === 13) {
+          const lat = parseFloat(parts[1]);
+          const lon = parseFloat(parts[2]);
+          const name = parts[7];
+          if (name && !isNaN(lat) && !isNaN(lon)) {
+            if (!navFixes.has(name)) navFixes.set(name, []);
+            const existing = navFixes.get(name);
+            const isDupe = existing.some(e => Math.abs(e.lat - lat) < 0.01 && Math.abs(e.lon - lon) < 0.01);
+            if (!isDupe) { existing.push({ lat, lon }); navCount++; }
+          }
+        }
+      }
+    }
+    console.log('[NAV] Loaded ' + navCount + ' navaids from earth_nav.dat (' + navFixes.size + ' total unique names)');
+  }
+
+  // Also load waypoints from earth_awy.dat if XP700 format (has inline coordinates)
+  const awyFile = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata', 'earth_awy.dat');
+  if (fs.existsSync(awyFile)) {
+    const header = fs.readFileSync(awyFile, 'utf-8').slice(0, 200);
+    if (header.includes('XP700') || header.includes('640')) {
+      const awyLines = fs.readFileSync(awyFile, 'utf-8').split('\n');
+      let awyCount = 0;
+      for (const line of awyLines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('I') || trimmed.startsWith('9') || trimmed.indexOf('Version') !== -1) continue;
+        const parts = trimmed.split(/\s+/);
+        if (parts.length >= 6) {
+          const pairs = [
+            { name: parts[0], lat: parseFloat(parts[1]), lon: parseFloat(parts[2]) },
+            { name: parts[3], lat: parseFloat(parts[4]), lon: parseFloat(parts[5]) }
+          ];
+          for (const p of pairs) {
+            if (p.name && !isNaN(p.lat) && !isNaN(p.lon) && Math.abs(p.lat) <= 90 && Math.abs(p.lon) <= 180) {
+              if (!navFixes.has(p.name)) navFixes.set(p.name, []);
+              const existing = navFixes.get(p.name);
+              const isDupe = existing.some(e => Math.abs(e.lat - p.lat) < 0.01 && Math.abs(e.lon - p.lon) < 0.01);
+              if (!isDupe) { existing.push({ lat: p.lat, lon: p.lon }); awyCount++; }
+            }
+          }
+        }
+      }
+      console.log('[NAV] Loaded ' + awyCount + ' additional fixes from earth_awy.dat (XP700)');
+    }
+  }
+
+  console.log('[NAV] Total: ' + navFixes.size + ' unique waypoint/navaid names');
 }
 
 function closestFix(name, refLat, refLon) {
@@ -325,7 +398,7 @@ io.use((socket, next) => {
 
 
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace'];
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
 async function loadPageVisibility() {
@@ -1928,6 +2001,20 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
 
         <p class="suggest-signoff">Happy flying &mdash; and thank you for your continued support.</p>
       </div>
+
+      <a href="/previous-destinations" class="prev-dest-banner">
+        <span>📍</span>
+        <span>View all previous WorldFlight destinations &rarr;</span>
+      </a>
+    </section>
+
+    <div>
+    <section class="card" style="margin-bottom:16px;">
+      <h2>Recent Suggestions</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">Latest airports the community wants WorldFlight to visit</p>
+      <div id="recentVisitList" class="suggestion-list suggestion-scroll">
+        <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
+      </div>
     </section>
 
     <section class="card suggest-form-card">
@@ -2000,6 +2087,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
         </div>
       </form>
     </section>
+    </div>
 
   </div>
 
@@ -2008,7 +2096,11 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 24px;
-      align-items: start;
+      align-items: stretch;
+    }
+    .suggest-layout > .card {
+      display: flex;
+      flex-direction: column;
     }
     @media (max-width: 900px) {
       .suggest-layout { grid-template-columns: 1fr; }
@@ -2024,6 +2116,15 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     .suggest-contact a { color: var(--accent); text-decoration: none; font-weight: 600; }
     .suggest-contact a:hover { text-decoration: underline; }
     .suggest-signoff { color: var(--text) !important; font-weight: 600; font-style: italic; text-align: center; margin-top: 20px; }
+    .prev-dest-banner {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-top: 20px; padding: 12px 16px;
+      background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.15);
+      border-radius: 8px; text-decoration: none;
+      color: var(--accent); font-size: 13px; font-weight: 600;
+      transition: background .15s, border-color .15s;
+    }
+    .prev-dest-banner:hover { background: rgba(56,189,248,0.12); border-color: rgba(56,189,248,0.3); }
 
     .suggest-form-card label { display: block; font-size: 13px; margin-top: 12px; font-weight: 600; }
     .suggest-form-card input,
@@ -2312,6 +2413,80 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
   });
   })();
   </script>
+
+
+  <style>
+    .suggestions-view {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      align-items: stretch;
+    }
+    .suggestions-view > .card {
+      display: flex;
+      flex-direction: column;
+    }
+    .suggestions-view .suggestion-list { flex: 1; }
+    .suggestion-scroll {
+      max-height: 138px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.08) transparent;
+    }
+    .suggestion-scroll::-webkit-scrollbar { width: 4px; }
+    .suggestion-scroll::-webkit-scrollbar-track { background: transparent; }
+    .suggestion-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+    @media (max-width: 900px) {
+      .suggestions-view { grid-template-columns: 1fr; }
+    }
+    .suggestion-list { display: flex; flex-direction: column; gap: 4px; }
+    .suggestion-rank {
+      display: flex; align-items: center; padding: 12px 16px;
+      border-radius: 8px; background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border); transition: background .15s;
+    }
+    .suggestion-rank:hover { background: rgba(255,255,255,0.04); }
+    .rank-icao { font-family: monospace; font-size: 15px; font-weight: 700; color: var(--accent); min-width: 56px; }
+    .rank-name { flex: 1; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 8px; }
+    .rank-time { text-align: right; flex-shrink: 0; margin-left: 12px; font-size: 12px; color: var(--muted2); white-space: nowrap; }
+  </style>
+
+  <script>
+  (async function() {
+    var res = await fetch('/api/suggestion-stats');
+    var data = await res.json();
+
+    function timeAgo(dateStr) {
+      var diff = Date.now() - new Date(dateStr).getTime();
+      var mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      var hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      var days = Math.floor(hrs / 24);
+      if (days < 30) return days + 'd ago';
+      return Math.floor(days / 30) + 'mo ago';
+    }
+
+    function renderList(containerId, items) {
+      var el = document.getElementById(containerId);
+      if (!items || !items.length) {
+        el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No suggestions yet.</div>';
+        return;
+      }
+      el.innerHTML = items.map(function(item) {
+        return '<div class="suggestion-rank">'
+          + '<span class="rank-icao">' + item.icao + '</span>'
+          + (item.name ? '<span class="rank-name">' + item.name + '</span>' : '')
+          + '<span class="rank-time">' + timeAgo(item.createdAt) + '</span>'
+          + '</div>';
+      }).join('');
+    }
+
+    renderList('recentVisitList', data.recentVisit);
+    renderList('recentAvoidList', data.recentAvoid);
+  })();
+  </script>
   `;
 
   res.send(renderLayout({
@@ -2512,138 +2687,9 @@ app.get('/api/suggestion-stats', async (req, res) => {
   });
 });
 
-app.get('/view-suggestions', requirePageEnabled('suggest-airport'), (req, res) => {
-  const user = req.session?.user?.data || null;
-  const cid = Number(user?.cid) || null;
-  const isAdmin = cid && ADMIN_CIDS.includes(cid);
-
-  const content = `
-  <div class="suggestions-view">
-
-    <section class="card">
-      <h2>Recent Suggestions</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Latest airports the community wants WorldFlight to visit</p>
-      <div id="recentVisitList" class="suggestion-list">
-        <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>Recent Avoids</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Latest airports the community has suggested we avoid</p>
-      <div id="recentAvoidList" class="suggestion-list">
-        <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
-      </div>
-    </section>
-
-  </div>
-
-  <style>
-    .suggestions-view {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 24px;
-      align-items: start;
-    }
-    @media (max-width: 900px) {
-      .suggestions-view { grid-template-columns: 1fr; }
-    }
-
-    .suggestion-list { display: flex; flex-direction: column; gap: 4px; }
-
-    .suggestion-rank {
-      display: flex;
-      align-items: center;
-      padding: 12px 16px;
-      border-radius: 8px;
-      background: rgba(255,255,255,0.02);
-      border: 1px solid var(--border);
-      transition: background .15s;
-    }
-    .suggestion-rank:hover { background: rgba(255,255,255,0.04); }
-
-    .rank-icao {
-      font-family: monospace;
-      font-size: 15px;
-      font-weight: 700;
-      color: var(--accent);
-      min-width: 56px;
-    }
-
-    .rank-name {
-      flex: 1;
-      font-size: 13px;
-      color: var(--text);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      margin-left: 8px;
-    }
-
-    .rank-time {
-      text-align: right;
-      flex-shrink: 0;
-      margin-left: 12px;
-      font-size: 12px;
-      color: var(--muted2);
-      white-space: nowrap;
-    }
-
-    .suggestion-empty {
-      padding: 32px;
-      text-align: center;
-      color: var(--muted);
-      font-size: 14px;
-    }
-  </style>
-
-  <script>
-  (async function() {
-    var res = await fetch('/api/suggestion-stats');
-    var data = await res.json();
-
-    function timeAgo(dateStr) {
-      var diff = Date.now() - new Date(dateStr).getTime();
-      var mins = Math.floor(diff / 60000);
-      if (mins < 1) return 'just now';
-      if (mins < 60) return mins + 'm ago';
-      var hrs = Math.floor(mins / 60);
-      if (hrs < 24) return hrs + 'h ago';
-      var days = Math.floor(hrs / 24);
-      if (days < 30) return days + 'd ago';
-      var months = Math.floor(days / 30);
-      return months + 'mo ago';
-    }
-
-    function renderList(containerId, items, dotClass) {
-      var el = document.getElementById(containerId);
-      if (!items.length) {
-        el.innerHTML = '<div class="suggestion-empty">No suggestions yet. Be the first to <a href="/suggest-airport" style="color:var(--accent);">suggest an airport</a>!</div>';
-        return;
-      }
-
-      el.innerHTML = items.map(function(item) {
-        return '<div class="suggestion-rank">' +
-          '<span class="rank-icao">' + item.icao + '</span>' +
-          (item.name ? '<span class="rank-name">' + item.name + '</span>' : '') +
-          '<span class="rank-time">' + timeAgo(item.createdAt) + '</span>' +
-        '</div>';
-      }).join('');
-    }
-
-    renderList('recentVisitList', data.recentVisit, 'visit');
-    renderList('recentAvoidList', data.recentAvoid, 'avoid');
-  })();
-  </script>
-  `;
-
-  res.send(renderLayout({
-    title: 'View Suggestions',
-    user,
-    isAdmin,
-    content,
-    layoutClass: 'dashboard-full'
-  }));
+// Redirect old view-suggestions URL to suggest-airport
+app.get('/view-suggestions', (req, res) => {
+  res.redirect(301, '/suggest-airport');
 });
 
 bootstrap().catch(err => {
@@ -3855,8 +3901,8 @@ app.get('/', (req, res) => {
     { title: 'Route Map',          desc: 'Interactive map showing all WorldFlight routes and airports.',                   icon: '🗺️', href: '/wf/world-map',        public: false, visKey: 'world-map' },
     { title: 'Airport Portal',     desc: 'Look up airport information, charts, scenery, and documentation.',              icon: '🛫', href: '/airport-portal',      public: true },
     { title: 'Suggest Airport',    desc: 'Submit your airport suggestions for upcoming WorldFlight events.',              icon: '💡', href: '/suggest-airport',     public: true,  visKey: 'suggest-airport' },
-    { title: 'View Suggestions',   desc: 'Browse and vote on community airport suggestions.',                             icon: '📊', href: '/view-suggestions',    public: true,  visKey: 'suggest-airport' },
     { title: 'Previous Destinations', desc: 'Explore every airport WorldFlight has visited over the years.',                icon: '📍', href: '/previous-destinations', public: true },
+    { title: 'Airspace Management', desc: 'View FIR staffing requirements and timelines for the active schedule.',        icon: '🌐', href: '/airspace',             public: true, visKey: 'airspace' },
     { title: 'My Slots / Bookings',desc: 'Manage your booked departure and arrival slots.',                               icon: '✈️', href: '/my-slots',            public: false, visKey: 'my-slots' },
     { title: 'WF Slot Management', desc: 'Controller tools for managing WorldFlight ATC slots.',                          icon: '🎧', href: '/atc',                 public: false, visKey: 'atc' },
     { title: 'Admin Panel',        desc: 'Manage settings, page visibility, and site configuration.',                    icon: '🛠️', href: '/admin/control-panel', public: false, adminOnly: true },
@@ -4024,7 +4070,7 @@ app.get('/', (req, res) => {
     </style>`;
 
   return res.send(renderLayout({
-    title: 'WorldFlight CDM',
+    title: 'WorldFlight Planning',
     user,
     isAdmin,
     content,
@@ -5867,7 +5913,7 @@ function buildAccessEmail({ userName, isDeny, permissions, deniedPattern, existi
           <tr>
             <td style="background:#080d17;padding:16px 32px;text-align:center;">
               <p style="color:#475569;font-size:11px;margin:0;">
-                This is an automated message from the WorldFlight CDM system.
+                This is an automated message from the WorldFlight Planning system.
               </p>
             </td>
           </tr>
@@ -9780,7 +9826,7 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
           L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 18 }).addTo(legMap);
 
           // Load FIR boundaries
-          fetch('/fir-boundaries.geojson').then(function(r) { return r.json(); }).then(function(geojson) {
+          fetch('/api/fir-merged.geojson').then(function(r) { return r.json(); }).then(function(geojson) {
             var firLayer = L.geoJSON(geojson, {
               interactive: false,
               style: { color: '#334155', weight: 1, opacity: 0.4, fillColor: 'transparent', fillOpacity: 0 }
@@ -9788,13 +9834,17 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
 
             // FIR name labels — show when zoomed in
             var firLabels = L.layerGroup();
+            var seenLabels = {};
             geojson.features.forEach(function(f) {
               if (!f.properties?.id || !f.properties?.label_lat) return;
+              var base = f.properties.id.split('-')[0];
+              if (seenLabels[base]) return;
+              seenLabels[base] = true;
               var label = L.marker(
                 [parseFloat(f.properties.label_lat), parseFloat(f.properties.label_lon)],
                 { icon: L.divIcon({
                   className: 'fir-label',
-                  html: '<span>' + f.properties.id + '</span>',
+                  html: '<span>' + base + '</span>',
                   iconSize: [60, 16],
                   iconAnchor: [30, 8]
                 })}
@@ -10534,6 +10584,43 @@ res.send(
 
 });
 
+app.get('/api/fir-merged.geojson', (req, res) => {
+  const merged = {};
+
+  for (const f of firFeatures) {
+    const rawId = f.properties?.id;
+    if (!rawId) continue;
+    const base = rawId.split('-')[0];
+
+    if (!merged[base]) {
+      merged[base] = {
+        type: 'Feature',
+        properties: {
+          id: base,
+          region: f.properties?.region || '',
+          division: f.properties?.division || '',
+          label_lat: f.properties?.label_lat,
+          label_lon: f.properties?.label_lon
+        },
+        geometry: { type: 'MultiPolygon', coordinates: [] }
+      };
+    }
+
+    const geom = f.geometry;
+    if (!geom) continue;
+    if (geom.type === 'MultiPolygon') {
+      for (const poly of geom.coordinates) merged[base].geometry.coordinates.push(poly);
+    } else if (geom.type === 'Polygon') {
+      merged[base].geometry.coordinates.push(geom.coordinates);
+    }
+  }
+
+  res.json({
+    type: 'FeatureCollection',
+    features: Object.values(merged)
+  });
+});
+
 app.get('/api/airport-coords/:icao', async (req, res) => {
   const icao = req.params.icao?.toUpperCase();
   if (!icao || !/^[A-Z]{4}$/.test(icao)) return res.status(400).json({ error: 'Invalid' });
@@ -10588,7 +10675,14 @@ app.get('/api/resolve-route', async (req, res) => {
   const cleaned = [];
   for (const p of points) {
     const prev = cleaned[cleaned.length - 1];
-    if (!prev || prev.lat !== p.lat || prev.lon !== p.lon) cleaned.push(p);
+    if (!prev || prev.lat !== p.lat || prev.lon !== p.lon) cleaned.push({ ...p });
+  }
+
+  // Fix antimeridian crossings — adjust longitudes so no segment jumps >180°
+  for (let i = 1; i < cleaned.length; i++) {
+    const diff = cleaned[i].lon - cleaned[i - 1].lon;
+    if (diff > 180) cleaned[i].lon -= 360;
+    else if (diff < -180) cleaned[i].lon += 360;
   }
 
   // Calculate cumulative distances between route points (in nm)
@@ -10657,8 +10751,8 @@ app.get('/api/resolve-route', async (req, res) => {
     if (depMins !== null && blockMins !== null && blockMins > 0) {
       const entryMins = depMins + seg.entryFrac * blockMins;
       const exitMins = depMins + seg.exitFrac * blockMins;
-      const staffStart = entryMins - 60;
-      const staffEnd = exitMins + 60;
+      const staffStart = Math.floor((entryMins - 60) / 5) * 5;
+      const staffEnd = Math.ceil((exitMins + 60) / 5) * 5;
 
       result.staffStart = String(Math.floor(((staffStart % 1440) + 1440) % 1440 / 60)).padStart(2, '0') + ':' + String(Math.floor(((staffStart % 1440) + 1440) % 1440 % 60)).padStart(2, '0');
       result.staffEnd = String(Math.floor(((staffEnd % 1440) + 1440) % 1440 / 60)).padStart(2, '0') + ':' + String(Math.floor(((staffEnd % 1440) + 1440) % 1440 % 60)).padStart(2, '0');
@@ -10745,6 +10839,13 @@ async function _buildFirAnalysisInner() {
 
     if (points.length < 2) continue;
 
+    // Fix antimeridian crossings
+    for (let k = 1; k < points.length; k++) {
+      const diff = points[k].lon - points[k - 1].lon;
+      if (diff > 180) points[k].lon -= 360;
+      else if (diff < -180) points[k].lon += 360;
+    }
+
     // Calculate cumulative distances
     const toRad = Math.PI / 180;
     function haversineNm(lat1, lon1, lat2, lon2) {
@@ -10799,8 +10900,8 @@ async function _buildFirAnalysisInner() {
 
     for (const seg of legFirSegments) {
       if (!firMap[seg.fir]) {
-        // Look up FIR metadata
-        const firFeature = firFeatures.find(f => f.properties?.id === seg.fir);
+        // Look up FIR metadata (match base code)
+        const firFeature = firFeatures.find(f => f.properties?.id && f.properties.id.split('-')[0] === seg.fir);
         firMap[seg.fir] = {
           fir: seg.fir,
           region: firFeature?.properties?.region || '',
@@ -10824,14 +10925,22 @@ async function _buildFirAnalysisInner() {
       if (depMins !== null && blockMins !== null && blockMins > 0) {
         const entryMins = depMins + seg.entryFrac * blockMins;
         const exitMins = depMins + seg.exitFrac * blockMins;
-        const staffStart = entryMins - 60;
-        const staffEnd = exitMins + 60;
+        const staffStart = Math.floor((entryMins - 60) / 5) * 5;
+        const staffEnd = Math.ceil((exitMins + 60) / 5) * 5;
         const fmt = m => String(Math.floor(((m % 1440) + 1440) % 1440 / 60)).padStart(2, '0') + ':' + String(Math.floor(((m % 1440) + 1440) % 1440 % 60)).padStart(2, '0');
         legEntry.entryTime = fmt(entryMins);
         legEntry.exitTime = fmt(exitMins);
         legEntry.staffStart = fmt(staffStart);
         legEntry.staffEnd = fmt(staffEnd);
         legEntry.staffMins = Math.round((staffEnd - staffStart));
+
+        // Absolute timestamps for weekly timeline
+        const dateObj = parseServerDate(leg.date_utc);
+        if (dateObj) {
+          const dayBase = dateObj.getTime();
+          legEntry.staffStartAbs = dayBase + staffStart * 60000;
+          legEntry.staffEndAbs = dayBase + staffEnd * 60000;
+        }
       }
 
       firMap[seg.fir].legs.push(legEntry);
@@ -10875,7 +10984,7 @@ async function _buildFirAnalysisInner() {
   return result;
 }
 
-app.get('/api/airspace-management', requireLogin, async (req, res) => {
+app.get('/api/airspace-management', async (req, res) => {
   try {
     const allFirs = await buildFirAnalysis();
     const fir = (req.query.fir || '').toUpperCase().trim();
@@ -11334,7 +11443,8 @@ function parseAiracHeader(filePath) {
   try {
     if (!fs.existsSync(filePath)) return null;
     const head = fs.readFileSync(filePath, 'utf-8').split('\n').slice(0, 3).join(' ');
-    const m = head.match(/data cycle (\d{4}),\s*build (\d{8})/);
+    let m = head.match(/data cycle (\d{4}),\s*build (\d{8})/);
+    if (!m) m = head.match(/AIRAC Cycle (\d{4})\s+Rev\.\s*\d+,\s*parsed on (\d{8})/);
     if (!m) return { exists: true, cycle: 'Unknown', buildDate: 'Unknown', valid: false };
 
     const cycle = m[1];
@@ -11425,12 +11535,18 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
             <div style="font-size:12px;color:var(--muted2);margin-top:4px;">
               Fixes loaded: <strong style="color:var(--text);">${navFixes.size.toLocaleString()}</strong> unique waypoints
             </div>
+            <div style="font-size:12px;color:var(--muted2);margin-top:6px;">
+              Download <strong>X-Plane 10 Native</strong> format from
+              <a href="https://navigraph.com/downloads" target="_blank" style="color:var(--accent);">navigraph.com/downloads</a>
+              and upload the .dat files below.
+            </div>
           </div>
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
         ${fileCard('Waypoints / Fixes (earth_fix.dat)', fixInfo, 'earth_fix')}
+        ${fileCard('Navaids (earth_nav.dat)', parseAiracHeader(path.join(navDir, 'earth_nav.dat')), 'earth_nav')}
         ${fileCard('Airways (earth_awy.dat)', awyInfo, 'earth_awy')}
         ${(() => {
           const firPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public', 'fir-boundaries.geojson');
@@ -11502,7 +11618,7 @@ app.post('/admin/api/airac/upload', requireAdmin, multer({
 }).single('navfile'), async (req, res) => {
   const { fileType } = req.body;
   const isFir = fileType === 'fir_boundaries';
-  const allowed = { earth_fix: 'earth_fix.dat', earth_awy: 'earth_awy.dat' };
+  const allowed = { earth_fix: 'earth_fix.dat', earth_awy: 'earth_awy.dat', earth_nav: 'earth_nav.dat' };
   const targetName = isFir ? 'fir-boundaries.geojson' : allowed[fileType];
 
   if (!targetName || !req.file) {
@@ -11524,7 +11640,7 @@ app.post('/admin/api/airac/upload', requireAdmin, multer({
       }
     } else {
       // Validate it's a valid navdata file
-      if (!content.includes('data cycle')) {
+      if (!content.includes('data cycle') && !content.includes('AIRAC Cycle') && !content.includes('Version')) {
         fs.unlinkSync(req.file.path);
         return res.status(400).send('Invalid file — does not contain AIRAC data header');
       }
@@ -11535,7 +11651,7 @@ app.post('/admin/api/airac/upload', requireAdmin, multer({
     fs.unlinkSync(req.file.path);
 
     // Reload data
-    if (fileType === 'earth_fix') {
+    if (fileType === 'earth_fix' || fileType === 'earth_nav') {
       navFixes.clear();
       loadNavFixes();
     }
@@ -11562,6 +11678,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
     { key: 'my-slots',        label: 'My Slots / Bookings', icon: '✈️', desc: 'Personal slot and booking overview' },
     { key: 'atc',             label: 'WF Slot Management',  icon: '🎧', desc: 'Controller departure management view' },
     { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' },
+    { key: 'airspace',        label: 'Airspace Management',  icon: '🌐', desc: 'FIR staffing requirements and timelines' },
     { key: 'arrival-info',    label: 'Arrival Info',         icon: '🛬', desc: 'Arrival banner on airport portal pages' },
     { key: 'departure-info',  label: 'Departure Info',       icon: '🛫', desc: 'Departure banner on airport portal pages' },
     { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
@@ -13322,10 +13439,10 @@ app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
 });
 
 // ===== AIRSPACE MANAGEMENT PAGE =====
-app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) => {
-  const user = req.session.user?.data;
-  if (!user) return res.redirect('/');
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
+  const user = req.session?.user?.data || null;
+  const cid = Number(user?.cid) || null;
+  const isAdmin = cid && ADMIN_CIDS.includes(cid);
 
   const content = `
   <style>
@@ -13341,9 +13458,18 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
       padding: 8px 16px; background: var(--accent); color: #020617; border: none;
       border-radius: 6px; font-weight: 600; cursor: pointer;
     }
-    .airspace-filter-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; display: block; }
-    #airspaceFirMap { width: 100%; height: 340px; border-radius: 8px; margin-top: 12px; border: 1px solid var(--border); }
+    .airspace-filter-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+    .filter-btn-group { display: flex; flex-wrap: wrap; gap: 4px; }
+    .filter-btn {
+      padding: 4px 12px; font-size: 12px; font-weight: 500;
+      background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--muted); cursor: pointer; transition: all .15s;
+    }
+    .filter-btn:hover { border-color: var(--accent); color: var(--text); }
+    .filter-btn.active { background: var(--accent); color: #020617; border-color: var(--accent); font-weight: 600; }
+    #airspaceFirMap { width: 100%; height: 340px; border-radius: 8px; margin-top: 12px; border: 1px solid var(--border); background: #0b1220; }
     #airspaceFirMap path:focus { outline: none; }
+    #airspaceFirMap .leaflet-control-zoom a { background: #0b1220; color: var(--text); border-color: var(--border); }
     .fir-summary-grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
       gap: 8px; margin-top: 16px; max-height: 260px; overflow-y: auto;
@@ -13374,6 +13500,43 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
     .flow-badge.booking { background: rgba(251,146,60,0.15); color: #fb923c; }
     .fir-highlight { fill: rgba(56,189,248,0.2); stroke: var(--accent); stroke-width: 2; }
     .fir-timeline { margin-top: 16px; }
+
+    .tl-weekly { overflow-x: auto; min-width: 100%; }
+    .tl-header { position: relative; height: 28px; border-bottom: 1px solid var(--border); margin-bottom: 0; min-width: 800px; margin-left: 68px; }
+    .tl-day-header {
+      position: absolute; top: 0; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600; color: var(--text);
+      border-right: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+    }
+    .tl-body { position: relative; min-width: 800px; }
+    .tl-grid { position: absolute; top: 0; bottom: 0; left: 68px; right: 0; pointer-events: none; }
+    .tl-gridline {
+      position: absolute; top: 0; bottom: 0;
+      border-left: 1px solid rgba(255,255,255,0.04);
+    }
+    .tl-gridline span {
+      position: absolute; top: -14px;
+      font-size: 9px; color: var(--muted2);
+      transform: translateX(-50%);
+    }
+    .tl-row { display: flex; align-items: center; min-height: 30px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .tl-row-label {
+      flex: 0 0 60px; font-size: 11px; font-weight: 600; color: var(--accent);
+      font-family: monospace; padding-right: 8px; text-align: right;
+    }
+    .tl-row-bar { flex: 1; position: relative; min-height: 24px; }
+    .tl-seg {
+      position: absolute; height: 18px;
+      background: rgba(56,189,248,0.3); border: 1px solid rgba(56,189,248,0.5);
+      border-radius: 3px; font-size: 9px; color: #fff; font-weight: 600;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden; white-space: nowrap; cursor: default;
+      transition: background .15s;
+    }
+    .tl-seg:hover { background: rgba(56,189,248,0.5); }
+
     .fir-timeline-bar {
       position: relative; height: 32px; background: rgba(255,255,255,0.03);
       border-radius: 4px; margin-bottom: 4px; border: 1px solid var(--border);
@@ -13428,20 +13591,27 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
       <h2>Airspace Management</h2>
       <p style="color:var(--muted);margin-bottom:12px;">Enter an FIR code or click one on the map to view staffing requirements for the active schedule.</p>
 
-      <div class="airspace-search-row">
+      <div class="airspace-search-row" style="margin-bottom:12px;">
         <div>
           <label class="airspace-filter-label">FIR Code</label>
           <input type="text" id="firSearchInput" placeholder="e.g. EGTT" maxlength="10" />
         </div>
         <button id="firSearchBtn" style="align-self:flex-end;">Load FIR</button>
-        <div style="border-left:1px solid var(--border);height:36px;align-self:flex-end;"></div>
-        <div>
-          <label class="airspace-filter-label">Region</label>
-          <select id="firFilterRegion"><option value="">All Regions</option></select>
+      </div>
+
+      <!-- Hidden selects for JS compat -->
+      <select id="firFilterRegion" style="display:none;"><option value="">All Regions</option></select>
+      <select id="firFilterDivision" style="display:none;"><option value="">All Divisions</option></select>
+
+      <div style="margin-bottom:12px;">
+        <label class="airspace-filter-label" style="margin-bottom:6px;display:block;">Region</label>
+        <div id="regionBtns" class="filter-btn-group">
         </div>
-        <div>
-          <label class="airspace-filter-label">Division</label>
-          <select id="firFilterDivision"><option value="">All Divisions</option></select>
+      </div>
+
+      <div style="margin-bottom:12px;">
+        <label class="airspace-filter-label" style="margin-bottom:6px;display:block;">Division</label>
+        <div id="divisionBtns" class="filter-btn-group">
         </div>
       </div>
 
@@ -13464,6 +13634,16 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
       </div>
 
       <!-- Timeline -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px;" id="tlToggleRow" class="hidden">
+        <span style="font-size:13px;font-weight:600;">Staffing Timeline</span>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div class="filter-btn-group" id="tlDaySelector" style="display:none;"></div>
+          <div class="filter-btn-group">
+            <button class="filter-btn active" data-view="weekly" id="tlWeeklyBtn">Weekly</button>
+            <button class="filter-btn" data-view="daily" id="tlDailyBtn">Daily</button>
+          </div>
+        </div>
+      </div>
       <div class="fir-timeline" id="firTimeline"></div>
 
       <!-- Legs table -->
@@ -13472,6 +13652,7 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
           <thead>
             <tr>
               <th>WF</th>
+              <th>FIR</th>
               <th>From</th>
               <th>To</th>
               <th>Date</th>
@@ -13494,6 +13675,196 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
     var map = null;
     var firGeoLayer = null;
     var highlightLayer = null;
+    var currentTlView = 'weekly';
+    var currentTlDay = 0; // index into event days
+    var currentTlData = null;
+    var eventDays = []; // [{ start, label }]
+
+    function buildEventDays(legs) {
+      var dayMs = 86400000;
+      var dNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+      var mNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+      var absMin = Infinity, absMax = -Infinity;
+      legs.forEach(function(l) {
+        if (l.staffStartAbs) absMin = Math.min(absMin, l.staffStartAbs);
+        if (l.staffEndAbs) absMax = Math.max(absMax, l.staffEndAbs);
+      });
+      if (!isFinite(absMin)) return [];
+
+      var start = Math.floor(absMin / dayMs) * dayMs;
+      var end = Math.ceil(absMax / dayMs) * dayMs;
+      var days = [];
+      for (var t = start; t < end; t += dayMs) {
+        var dt = new Date(t);
+        days.push({
+          start: t,
+          label: dNames[dt.getUTCDay()] + ' ' + dt.getUTCDate() + ' ' + mNames[dt.getUTCMonth()]
+        });
+      }
+      return days;
+    }
+
+    function renderDaySelector() {
+      var sel = document.getElementById('tlDaySelector');
+      if (currentTlView !== 'daily' || !eventDays.length) {
+        sel.style.display = 'none';
+        return;
+      }
+      sel.style.display = '';
+      sel.innerHTML = eventDays.map(function(d, i) {
+        return '<button class="filter-btn' + (i === currentTlDay ? ' active' : '') + '" data-day="' + i + '">' + d.label + '</button>';
+      }).join('');
+    }
+
+    function renderTimeline(legs, mode, view) {
+      var timeline = document.getElementById('firTimeline');
+      var toggleRow = document.getElementById('tlToggleRow');
+      var hasAbs = legs.some(function(l) { return l.staffStartAbs && l.staffEndAbs; });
+
+      if (!legs.length || !hasAbs) {
+        timeline.innerHTML = '';
+        toggleRow.classList.add('hidden');
+        return;
+      }
+
+      toggleRow.classList.remove('hidden');
+      document.getElementById('tlWeeklyBtn').classList.toggle('active', view === 'weekly');
+      document.getElementById('tlDailyBtn').classList.toggle('active', view === 'daily');
+
+      eventDays = buildEventDays(legs);
+      if (currentTlDay >= eventDays.length) currentTlDay = 0;
+      renderDaySelector();
+
+      var dayMs = 86400000;
+      var dNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+      var mNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+      var rangeStart, rangeEnd, totalRange;
+
+      if (view === 'daily' && eventDays.length) {
+        // Single day view
+        rangeStart = eventDays[currentTlDay].start;
+        rangeEnd = rangeStart + dayMs;
+        totalRange = dayMs;
+      } else {
+        // Full event range
+        var absMin = Infinity, absMax = -Infinity;
+        legs.forEach(function(l) {
+          if (l.staffStartAbs) absMin = Math.min(absMin, l.staffStartAbs);
+          if (l.staffEndAbs) absMax = Math.max(absMax, l.staffEndAbs);
+        });
+        rangeStart = Math.floor(absMin / dayMs) * dayMs;
+        rangeEnd = Math.ceil(absMax / dayMs) * dayMs;
+        totalRange = rangeEnd - rangeStart || dayMs;
+      }
+
+      var html = '<div class="tl-weekly">';
+
+      if (view === 'weekly') {
+        var numDays = Math.ceil(totalRange / dayMs);
+        var dateHeaders = '';
+        for (var d = 0; d < numDays; d++) {
+          var dt = new Date(rangeStart + d * dayMs);
+          var dayLabel = dNames[dt.getUTCDay()] + ' ' + dt.getUTCDate() + ' ' + mNames[dt.getUTCMonth()];
+          dateHeaders += '<div class="tl-day-header" style="left:' + (d * dayMs / totalRange * 100) + '%;width:' + (dayMs / totalRange * 100) + '%;">' + dayLabel + '</div>';
+        }
+        html += '<div class="tl-header">' + dateHeaders + '</div>';
+        html += '<div class="tl-body">';
+      } else {
+        // Daily: hour gridlines every 1 hour
+        var gridLines = '';
+        for (var h = 0; h < dayMs; h += 3600000) {
+          var hourLabel = String(Math.floor(h / 3600000)).padStart(2, '0') + ':00';
+          gridLines += '<div class="tl-gridline" style="left:' + (h / dayMs * 100) + '%;"><span>' + hourLabel + '</span></div>';
+        }
+        html += '<div style="text-align:center;font-size:12px;font-weight:600;color:var(--text);padding:4px 0;">' + eventDays[currentTlDay].label + ' (UTC)</div>';
+        html += '<div class="tl-header" style="height:20px;"></div>';
+        html += '<div class="tl-body"><div class="tl-grid">' + gridLines + '</div>';
+      }
+
+      // Filter legs for daily view (only those overlapping the selected day)
+      var visibleLegs = legs;
+      if (view === 'daily') {
+        visibleLegs = legs.filter(function(l) {
+          return l.staffStartAbs && l.staffEndAbs && l.staffEndAbs > rangeStart && l.staffStartAbs < rangeEnd;
+        });
+      }
+
+      // Assign vertical lanes to overlapping segments
+      function assignLanes(segs) {
+        var lanes = [];
+        segs.forEach(function(s) {
+          var sStart = Math.max(s.staffStartAbs || 0, rangeStart);
+          s._lane = 0;
+          for (var i = 0; i < lanes.length; i++) {
+            if (sStart >= lanes[i]) { s._lane = i; lanes[i] = s.staffEndAbs || 0; return; }
+          }
+          s._lane = lanes.length;
+          lanes.push(s.staffEndAbs || 0);
+        });
+        return lanes.length;
+      }
+
+      if (mode === 'grouped') {
+        var firGroups = {};
+        visibleLegs.forEach(function(l) {
+          var fir = l._fir || l.fir || 'Unknown';
+          if (!firGroups[fir]) firGroups[fir] = [];
+          firGroups[fir].push(l);
+        });
+        Object.keys(firGroups).sort().forEach(function(fir) {
+          var segs = firGroups[fir].filter(function(l) { return l.staffStartAbs && l.staffEndAbs; });
+          segs.sort(function(a, b) { return a.staffStartAbs - b.staffStartAbs; });
+          var numLanes = assignLanes(segs);
+          var rowH = Math.max(24, numLanes * 20 + 4);
+          html += '<div class="tl-row"><div class="tl-row-label">' + fir + '</div><div class="tl-row-bar" style="height:' + rowH + 'px;">';
+          segs.forEach(function(l) {
+            var sClamp = Math.max(l.staffStartAbs, rangeStart);
+            var eClamp = Math.min(l.staffEndAbs, rangeEnd);
+            var left = ((sClamp - rangeStart) / totalRange * 100);
+            var width = ((eClamp - sClamp) / totalRange * 100);
+            var top = l._lane * 20 + 2;
+            html += '<div class="tl-seg" style="left:' + left + '%;width:' + Math.max(width, 0.3) + '%;top:' + top + 'px;" title="' + l.wf + ' ' + l.from + '-' + l.to + '\\nStaff: ' + l.staffStart + ' - ' + l.staffEnd + '">' + l.wf + '</div>';
+          });
+          html += '</div></div>';
+        });
+      } else {
+        visibleLegs.forEach(function(l) {
+          if (!l.staffStartAbs || !l.staffEndAbs) return;
+          var sClamp = Math.max(l.staffStartAbs, rangeStart);
+          var eClamp = Math.min(l.staffEndAbs, rangeEnd);
+          var left = ((sClamp - rangeStart) / totalRange * 100);
+          var width = ((eClamp - sClamp) / totalRange * 100);
+          html += '<div class="tl-row"><div class="tl-row-label">' + l.wf + '</div><div class="tl-row-bar">';
+          html += '<div class="tl-seg" style="left:' + left + '%;width:' + Math.max(width, 0.3) + '%;top:2px;" title="' + l.wf + ' ' + l.from + '-' + l.to + '\\nStaff: ' + l.staffStart + ' - ' + l.staffEnd + '">' + l.from + '-' + l.to + '</div>';
+          html += '</div></div>';
+        });
+      }
+
+      if (!visibleLegs.length && view === 'daily') {
+        html += '<div style="padding:16px;text-align:center;color:var(--muted);font-size:13px;">No FIR transits on this day</div>';
+      }
+
+      html += '</div></div>';
+      timeline.innerHTML = html;
+    }
+
+    // Toggle handlers
+    document.getElementById('tlWeeklyBtn').addEventListener('click', function() {
+      currentTlView = 'weekly';
+      if (currentTlData) renderTimeline(currentTlData.legs, currentTlData.mode, 'weekly');
+    });
+    document.getElementById('tlDailyBtn').addEventListener('click', function() {
+      currentTlView = 'daily';
+      if (currentTlData) renderTimeline(currentTlData.legs, currentTlData.mode, 'daily');
+    });
+    document.getElementById('tlDaySelector').addEventListener('click', function(e) {
+      var btn = e.target.closest('.filter-btn');
+      if (!btn || !btn.dataset.day) return;
+      currentTlDay = Number(btn.dataset.day);
+      if (currentTlData) renderTimeline(currentTlData.legs, currentTlData.mode, 'daily');
+    });
 
     // Init map
     map = L.map('airspaceFirMap', { zoomControl: true }).setView([30, 0], 2);
@@ -13505,23 +13876,71 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
     // FIR metadata lookup (populated from geojson)
     var firMeta = {}; // firId -> { region, division }
     var allFirSummary = []; // stored for filtering
+    var activeRegions = new Set();
+    var activeDivisions = new Set();
+    var btnsPopulated = false;
+    var summaryLoaded = false;
+
+    function disableInactiveBtns() {
+      if (!btnsPopulated || !summaryLoaded) return;
+
+      // Rebuild active sets from firMeta + allFirSummary
+      activeRegions.clear();
+      activeDivisions.clear();
+      allFirSummary.forEach(function(f) {
+        var meta = firMeta[f.fir] || {};
+        if (meta.region) activeRegions.add(meta.region);
+        if (meta.division) activeDivisions.add(meta.division);
+      });
+
+      document.querySelectorAll('#regionBtns .filter-btn').forEach(function(btn) {
+        if (btn.dataset.value && !activeRegions.has(btn.dataset.value)) {
+          btn.disabled = true;
+          btn.style.opacity = '0.3';
+          btn.style.cursor = 'not-allowed';
+        }
+      });
+      document.querySelectorAll('#divisionBtns .filter-btn').forEach(function(btn) {
+        if (btn.dataset.value && !activeDivisions.has(btn.dataset.value)) {
+          btn.disabled = true;
+          btn.style.opacity = '0.3';
+          btn.style.cursor = 'not-allowed';
+        }
+      });
+    }
 
     // Load FIR boundaries onto map
-    fetch('/fir-boundaries.geojson')
+    fetch('/api/fir-merged.geojson')
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var defaultStyle = { color: 'rgba(255,255,255,0.12)', weight: 1, fillOpacity: 0 };
         var hoverStyle = { color: '#38bdf8', weight: 2, fillColor: 'rgba(56,189,248,0.15)', fillOpacity: 0.25 };
 
-        // Build metadata + populate dropdowns
+        // Build metadata + populate dropdowns (use base FIR codes)
         var regions = new Set(), divisions = new Set();
         data.features.forEach(function(f) {
           var p = f.properties || {};
-          if (p.id) firMeta[p.id] = { region: p.region || '', division: p.division || '' };
+          if (p.id) {
+            var base = p.id.split('-')[0];
+            if (!firMeta[base]) firMeta[base] = { region: p.region || '', division: p.division || '' };
+          }
           if (p.region) regions.add(p.region);
           if (p.division) divisions.add(p.division);
         });
 
+        // Populate region buttons
+        var regionBtns = document.getElementById('regionBtns');
+        Array.from(regions).sort().forEach(function(r) {
+          regionBtns.innerHTML += '<button class="filter-btn" data-value="' + r + '">' + r + '</button>';
+        });
+
+        // Populate division buttons
+        var divBtns = document.getElementById('divisionBtns');
+        Array.from(divisions).sort().forEach(function(d) {
+          divBtns.innerHTML += '<button class="filter-btn" data-value="' + d + '">' + d + '</button>';
+        });
+
+        // Also populate hidden selects for backward compat
         var regionSel = document.getElementById('firFilterRegion');
         Array.from(regions).sort().forEach(function(r) {
           regionSel.innerHTML += '<option value="' + r + '">' + r + '</option>';
@@ -13531,10 +13950,42 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
           divSel.innerHTML += '<option value="' + d + '">' + d + '</option>';
         });
 
+        // Button click handlers
+        // Region buttons — load grouped view for that region
+        regionBtns.addEventListener('click', function(e) {
+          var btn = e.target.closest('.filter-btn');
+          if (!btn) return;
+          regionBtns.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+          divBtns.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+          btn.classList.add('active');
+          var val = btn.dataset.value;
+          if (!val) return;
+          var matching = allFirSummary.filter(function(f) {
+            return (firMeta[f.fir] || {}).region === val;
+          });
+          if (matching.length) loadGroupDetail(matching, val, '');
+        });
+
+        // Division buttons — load grouped view for that division
+        divBtns.addEventListener('click', function(e) {
+          var btn = e.target.closest('.filter-btn');
+          if (!btn) return;
+          divBtns.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+          regionBtns.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+          btn.classList.add('active');
+          var val = btn.dataset.value;
+          if (!val) return;
+          var matching = allFirSummary.filter(function(f) {
+            return (firMeta[f.fir] || {}).division === val;
+          });
+          if (matching.length) loadGroupDetail(matching, '', val);
+        });
+
         firGeoLayer = L.geoJSON(data, {
           style: defaultStyle,
           onEachFeature: function(feature, layer) {
-            var firId = feature.properties && feature.properties.id;
+            var rawId = feature.properties && feature.properties.id;
+            var firId = rawId ? rawId.split('-')[0] : null;
             if (firId) {
               layer._firId = firId;
               layer._firRegion = (feature.properties.region || '');
@@ -13552,29 +14003,9 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
           }
         }).addTo(map);
 
-        // Filter handlers
-        regionSel.addEventListener('change', applyFilters);
-        divSel.addEventListener('change', applyFilters);
+        btnsPopulated = true;
+        disableInactiveBtns();
       });
-
-    function applyFilters() {
-      var region = document.getElementById('firFilterRegion').value;
-      var division = document.getElementById('firFilterDivision').value;
-      if (!region && !division) return;
-
-      // Collect all matching FIRs that are on the active schedule
-      var matchingFirs = allFirSummary.filter(function(f) {
-        var meta = firMeta[f.fir] || {};
-        var matchR = !region || meta.region === region;
-        var matchD = !division || meta.division === division;
-        return matchR && matchD;
-      });
-
-      if (!matchingFirs.length) return;
-
-      // Load grouped detail view
-      loadGroupDetail(matchingFirs, region, division);
-    }
 
     // Load summary
     fetch('/api/airspace-management', { credentials: 'same-origin' })
@@ -13599,6 +14030,9 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
             loadFirDetail(chip.dataset.fir);
           });
         });
+
+        summaryLoaded = true;
+        disableInactiveBtns();
       });
 
     // Search
@@ -13622,6 +14056,7 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
       if (highlightLayer) { map.removeLayer(highlightLayer); highlightLayer = null; }
     });
 
+    window.loadFirDetailFn = loadFirDetail;
     function loadFirDetail(firId) {
       fetch('/api/airspace-management?fir=' + encodeURIComponent(firId), { credentials: 'same-origin' })
         .then(function(r) { return r.json(); })
@@ -13649,53 +14084,9 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
             });
           }
 
-          // Build timeline
-          var timeline = document.getElementById('firTimeline');
-          if (data.legs.length && data.legs[0].staffStart) {
-            var allMins = [];
-            data.legs.forEach(function(l) {
-              if (l.staffStart && l.staffEnd) {
-                var sParts = l.staffStart.split(':');
-                var eParts = l.staffEnd.split(':');
-                allMins.push(Number(sParts[0]) * 60 + Number(sParts[1]));
-                var end = Number(eParts[0]) * 60 + Number(eParts[1]);
-                if (end < allMins[allMins.length - 1]) end += 1440;
-                allMins.push(end);
-              }
-            });
-            var minTime = Math.min.apply(null, allMins);
-            var maxTime = Math.max.apply(null, allMins);
-            var range = maxTime - minTime || 1;
-
-            // Group by date
-            var dateGroups = {};
-            data.legs.forEach(function(l) {
-              var d = l.date || 'Unknown';
-              if (!dateGroups[d]) dateGroups[d] = [];
-              dateGroups[d].push(l);
-            });
-
-            var html = '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Staffing Timeline</div>';
-            Object.keys(dateGroups).forEach(function(date) {
-              html += '<div class="fir-timeline-label">' + date + '</div>';
-              html += '<div class="fir-timeline-bar">';
-              dateGroups[date].forEach(function(l) {
-                if (!l.staffStart || !l.staffEnd) return;
-                var sp = l.staffStart.split(':');
-                var ep = l.staffEnd.split(':');
-                var s = Number(sp[0]) * 60 + Number(sp[1]);
-                var e = Number(ep[0]) * 60 + Number(ep[1]);
-                if (e < s) e += 1440;
-                var left = ((s - minTime) / range * 100);
-                var width = ((e - s) / range * 100);
-                html += '<div class="fir-timeline-segment" style="left:' + left + '%;width:' + Math.max(width, 2) + '%;" title="' + l.wf + ' ' + l.from + '-' + l.to + '\\nStaff: ' + l.staffStart + '-' + l.staffEnd + '">' + l.wf + '</div>';
-              });
-              html += '</div>';
-            });
-            timeline.innerHTML = html;
-          } else {
-            timeline.innerHTML = '<div style="color:var(--muted);font-size:12px;">No timing data available (schedule needs departure times and block times).</div>';
-          }
+          // Build timeline for single FIR
+          currentTlData = { legs: data.legs, mode: 'single' };
+          renderTimeline(data.legs, 'single', currentTlView);
 
           // Build table
           var tbody = document.getElementById('firDetailBody');
@@ -13712,6 +14103,7 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
             var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
             return '<tr>'
               + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
+              + '<td style="font-family:monospace;font-weight:600;color:var(--accent);">' + data.fir + '</td>'
               + '<td>' + l.from + '</td>'
               + '<td>' + l.to + '</td>'
               + '<td>' + (l.date || '-') + '</td>'
@@ -13776,48 +14168,8 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
         });
 
         // Build timeline grouped by FIR
-        var timeline = document.getElementById('firTimeline');
-        if (allLegs.length && allLegs[0].staffStart) {
-          var allMins = [];
-          allLegs.forEach(function(l) {
-            if (l.staffStart && l.staffEnd) {
-              var sp = l.staffStart.split(':'), ep = l.staffEnd.split(':');
-              var s = Number(sp[0]) * 60 + Number(sp[1]);
-              var e = Number(ep[0]) * 60 + Number(ep[1]);
-              if (e < s) e += 1440;
-              allMins.push(s, e);
-            }
-          });
-          var minTime = Math.min.apply(null, allMins);
-          var maxTime = Math.max.apply(null, allMins);
-          var range = maxTime - minTime || 1;
-
-          var firGroups = {};
-          allLegs.forEach(function(l) {
-            if (!firGroups[l._fir]) firGroups[l._fir] = [];
-            firGroups[l._fir].push(l);
-          });
-
-          var html = '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Staffing Timeline by FIR</div>';
-          Object.keys(firGroups).sort().forEach(function(fir) {
-            html += '<div class="fir-timeline-label">' + fir + '</div>';
-            html += '<div class="fir-timeline-bar">';
-            firGroups[fir].forEach(function(l) {
-              if (!l.staffStart || !l.staffEnd) return;
-              var sp = l.staffStart.split(':'), ep = l.staffEnd.split(':');
-              var s = Number(sp[0]) * 60 + Number(sp[1]);
-              var e = Number(ep[0]) * 60 + Number(ep[1]);
-              if (e < s) e += 1440;
-              var left = ((s - minTime) / range * 100);
-              var width = ((e - s) / range * 100);
-              html += '<div class="fir-timeline-segment" style="left:' + left + '%;width:' + Math.max(width, 2) + '%;" title="' + l.wf + ' ' + l.from + '-' + l.to + '\\nStaff: ' + l.staffStart + '-' + l.staffEnd + '">' + l.wf + '</div>';
-            });
-            html += '</div>';
-          });
-          timeline.innerHTML = html;
-        } else {
-          timeline.innerHTML = '';
-        }
+        currentTlData = { legs: allLegs, mode: 'grouped' };
+        renderTimeline(allLegs, 'grouped', currentTlView);
 
         // Build table
         window._firLegs = allLegs;
@@ -13829,6 +14181,7 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
           var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
           return '<tr>'
             + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
+            + '<td><span style="font-family:monospace;font-weight:600;color:var(--accent);">' + l._fir + '</span></td>'
             + '<td>' + l.from + '</td>'
             + '<td>' + l.to + '</td>'
             + '<td>' + (l.date || '-') + '</td>'
@@ -13837,12 +14190,25 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
             + '<td class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
             + '<td>' + (l.depFlow || '-') + '</td>'
             + '<td><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
-            + '<td style="font-size:11px;color:var(--muted);">' + l._fir + '</td>'
+            + '<td style="white-space:nowrap;">'
+            + '<button class="fir-view-btn" data-group-leg-idx="' + idx + '" data-leg-fir="' + l._fir + '" style="font-size:11px;padding:3px 8px;margin-right:4px;">View</button>'
+            + '<button class="fir-view-btn" data-view-fir="' + l._fir + '" style="font-size:11px;padding:3px 8px;">Open ' + l._fir + '</button>'
+            + '</td>'
             + '</tr>';
         }).join('');
 
         tbody.querySelectorAll('.fir-route-col').forEach(function(td) {
           td.addEventListener('click', function() { this.classList.toggle('expanded'); });
+        });
+        tbody.querySelectorAll('.fir-view-btn[data-view-fir]').forEach(function(btn) {
+          btn.addEventListener('click', function() { loadFirDetail(btn.dataset.viewFir); });
+        });
+        tbody.querySelectorAll('.fir-view-btn[data-group-leg-idx]').forEach(function(btn) {
+          btn.addEventListener('click', function() {
+            var idx = Number(btn.dataset.groupLegIdx);
+            var fir = btn.dataset.legFir;
+            openFirRouteModal(window._firLegs[idx], fir);
+          });
         });
       });
     }
@@ -13870,19 +14236,46 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
 
       // Init map
       setTimeout(function() {
-        var modalMap = L.map('firRouteModalMap', { zoomControl: true }).setView([30, 0], 3);
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-          subdomains: 'abcd', maxZoom: 10, noWrap: true
-        }).addTo(modalMap);
+        var modalMap = L.map('firRouteModalMap', { zoomControl: true, worldCopyJump: true }).setView([30, 0], 3);
+
+        var darkTile = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 10 });
+        var lightTile = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 10 });
+        darkTile.addTo(modalMap);
+        var isDark = true;
+
+        // Add toggle button
+        var toggleDiv = document.createElement('div');
+        toggleDiv.style.cssText = 'position:absolute;top:10px;right:10px;z-index:1000;';
+        toggleDiv.innerHTML = '<button style="background:#0b1220;border:1px solid rgba(255,255,255,0.2);color:#e5e7eb;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;" id="mapThemeToggle">☀️ Light</button>';
+        document.getElementById('firRouteModalMap').appendChild(toggleDiv);
+
+        document.getElementById('mapThemeToggle').addEventListener('click', function() {
+          if (isDark) {
+            modalMap.removeLayer(darkTile);
+            lightTile.addTo(modalMap);
+            this.innerHTML = '🌙 Dark';
+            this.style.background = '#fff';
+            this.style.color = '#333';
+            this.style.borderColor = '#ccc';
+          } else {
+            modalMap.removeLayer(lightTile);
+            darkTile.addTo(modalMap);
+            this.innerHTML = '☀️ Light';
+            this.style.background = '#0b1220';
+            this.style.color = '#e5e7eb';
+            this.style.borderColor = 'rgba(255,255,255,0.2)';
+          }
+          isDark = !isDark;
+        });
 
         // Draw FIR boundary
-        fetch('/fir-boundaries.geojson')
+        fetch('/api/fir-merged.geojson')
           .then(function(r) { return r.json(); })
           .then(function(geoData) {
             var firFeature = geoData.features.find(function(f) { return f.properties && f.properties.id === firId; });
             if (firFeature) {
               var firLayer = L.geoJSON(firFeature, {
-                style: { color: '#38bdf8', weight: 2, fillColor: 'rgba(56,189,248,0.15)', fillOpacity: 0.3 }
+                style: { color: '#6366f1', weight: 2, fillColor: 'rgba(99,102,241,0.1)', fillOpacity: 0.2 }
               }).addTo(modalMap);
             }
 
@@ -13916,9 +14309,16 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
                   return { name: p.name, lat: p.lat, lon: p.lon, inFir: pointInFir(p.lat, p.lon) };
                 });
 
-                // Draw full route dim
+                // Draw full route dim (with antimeridian-aware wrapping)
                 var allCoords = pts.map(function(p) { return [p.lat, p.lon]; });
-                L.polyline(allCoords, { color: 'rgba(255,255,255,0.15)', weight: 1.5, dashArray: '4 4' }).addTo(modalMap);
+                var routeLine = L.polyline(allCoords, { color: '#60a5fa', weight: 2.5, opacity: 0.6 }).addTo(modalMap);
+
+                // If route crosses antimeridian, center map on the route midpoint
+                var hasWrapped = pts.some(function(p) { return p.lon > 180 || p.lon < -180; });
+                if (hasWrapped) {
+                  var midIdx = Math.floor(pts.length / 2);
+                  modalMap.setView([pts[midIdx].lat, pts[midIdx].lon], 3);
+                }
 
                 // Find boundary crossing point by binary search
                 function findCrossing(insidePt, outsidePt, steps) {
@@ -13934,13 +14334,28 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
                 for (var i = 0; i < pts.length - 1; i++) {
                   var a = pts[i], b = pts[i + 1];
                   if (a.inFir && b.inFir) {
-                    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: '#38bdf8', weight: 3 }).addTo(modalMap);
+                    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: '#f59e0b', weight: 3 }).addTo(modalMap);
                   } else if (a.inFir && !b.inFir) {
                     var cross = findCrossing(a, b);
-                    L.polyline([[a.lat, a.lon], cross], { color: '#38bdf8', weight: 3 }).addTo(modalMap);
+                    L.polyline([[a.lat, a.lon], cross], { color: '#f59e0b', weight: 3 }).addTo(modalMap);
                   } else if (!a.inFir && b.inFir) {
                     var cross = findCrossing(b, a);
-                    L.polyline([cross, [b.lat, b.lon]], { color: '#38bdf8', weight: 3 }).addTo(modalMap);
+                    L.polyline([cross, [b.lat, b.lon]], { color: '#f59e0b', weight: 3 }).addTo(modalMap);
+                  } else {
+                    // Both outside — check if segment passes through FIR by sampling
+                    var found = false;
+                    for (var s = 1; s <= 20; s++) {
+                      var frac = s / 21;
+                      var mLat = a.lat + (b.lat - a.lat) * frac;
+                      var mLon = a.lon + (b.lon - a.lon) * frac;
+                      if (pointInFir(mLat, mLon)) { found = true; break; }
+                    }
+                    if (found) {
+                      // Find entry and exit crossings
+                      var entry = findCrossing({ lat: mLat, lon: mLon }, a);
+                      var exit = findCrossing({ lat: mLat, lon: mLon }, b);
+                      L.polyline([entry, exit], { color: '#f59e0b', weight: 3 }).addTo(modalMap);
+                    }
                   }
                 }
 
@@ -13956,9 +14371,9 @@ app.get('/airspace', requireLogin, requirePageEnabled('atc'), async (req, res) =
                 });
               });
 
-            // Fit to FIR bounds
-            if (firFeature) {
-              modalMap.fitBounds(firLayer.getBounds(), { padding: [20, 20] });
+            // Fit to FIR bounds (centered on the FIR in question)
+            if (firFeature && firLayer) {
+              modalMap.fitBounds(firLayer.getBounds(), { padding: [30, 30] });
             }
           });
       }, 100);
@@ -14650,5 +15065,5 @@ app.get('/logout', (req, res) => {
 
 /* ===== SERVER START ===== */
 httpServer.listen(port, '0.0.0.0', () => {
-  console.log(`WorldFlight CDM is running on ${port}`);
+  console.log(`WorldFlight Planning is running on ${port}`);
 });
