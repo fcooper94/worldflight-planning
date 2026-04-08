@@ -4649,6 +4649,8 @@ html[data-map-theme="light"] .ac-label {
     -ms-overflow-style: none;
   }
   .schedule-page .card::-webkit-scrollbar { display: none; }
+  .schedule-page .table-scroll { overflow-x: visible !important; }
+  .schedule-page .book-pill { font-size: 10px; padding: 2px 6px; white-space: nowrap; }
 }
 
 /* ----- Table base ----- */
