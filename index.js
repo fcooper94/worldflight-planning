@@ -13487,7 +13487,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     .fir-detail-header h2 { margin: 0; }
     .fir-detail-meta { font-size: 13px; color: var(--muted); }
     .fir-detail-header .back-link { color: var(--accent); text-decoration: none; font-size: 13px; }
-    #firDetailTable { width: max-content; min-width: 100%; }
+    #firDetailTable { border-collapse: collapse; }
     #firDetailTable th, #firDetailTable td { padding: 6px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
     #firDetailTable th { font-size: 13px; font-weight: 600; color: var(--muted); }
     #firDetailTable td { font-size: 13px; }
@@ -13584,21 +13584,39 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     }
     .fir-route-modal-map { height: 400px; width: 100%; }
 
+    /* Mobile cards layout */
+    .fir-leg-cards { display: none; }
+    .fir-leg-cards { box-sizing: border-box; }
+    .fir-leg-card {
+      background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+      overflow: hidden; word-break: break-word;
+    }
+    .fir-leg-card-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .fir-leg-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .fir-leg-card-header .wf { font-weight: 700; color: var(--accent); font-size: 14px; }
+    .fir-leg-card-header .fir { font-family: monospace; color: var(--accent); font-size: 12px; }
+    .fir-leg-card-route { font-size: 11px; color: var(--muted); display: flex; gap: 4px; }
+    .fir-leg-card-row { font-size: 12px; padding: 2px 0; }
+
     @media (max-width: 900px) {
-      .airspace-page { padding: 0 4px; }
-      .airspace-page .card { padding: 12px 10px; }
+      .airspace-page { padding: 0; margin: 0; width: 100vw; box-sizing: border-box; }
+      .airspace-page .card { padding: 10px 8px; margin: 8px 4px; width: calc(100vw - 8px); box-sizing: border-box; }
       .airspace-search-row { flex-direction: column; align-items: stretch; gap: 8px; }
       .airspace-search-row input, .airspace-search-row select { width: 100%; min-width: 0; box-sizing: border-box; }
       .airspace-search-row > div[style*="border-left"] { display: none; }
       #firSearchBtn { width: 100%; }
       #airspaceFirMap { height: 220px; }
       .fir-summary-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); max-height: 180px; }
-      #firDetailTable th, #firDetailTable td { padding: 4px 5px; font-size: 11px; }
       .fir-timeline-segment { font-size: 8px; }
       .fir-route-modal { width: 95vw; max-height: 90vh; }
       .fir-route-modal-map { height: 250px; }
       .fir-detail-header h2 { font-size: 16px; }
       .fir-detail-meta { font-size: 11px; }
+
+      /* Hide table, show cards */
+      .fir-desktop-table { display: none !important; }
+      .fir-leg-cards { display: block !important; }
     }
   </style>
 
@@ -13661,29 +13679,32 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           </div>
         </div>
       </div>
-      <div class="table-scroll">
       <div class="fir-timeline" id="firTimeline"></div>
 
-      <!-- Legs table -->
-        <table id="firDetailTable" style="margin-top:16px;">
+      <!-- Desktop table -->
+      <div class="fir-desktop-table" style="overflow-x:auto;margin-top:16px;">
+        <table id="firDetailTable">
           <thead>
             <tr>
               <th>WF</th>
-              <th class="">FIR</th>
+              <th>FIR</th>
               <th>From</th>
               <th>To</th>
               <th>Date</th>
               <th>Staff Window</th>
-              <th class="">Staff Duration</th>
-              <th class="">ATC Route</th>
-              <th class="">Dep Flow</th>
-              <th class="">Flow Type</th>
-              <th class=""></th>
+              <th>Staff Duration</th>
+              <th>ATC Route</th>
+              <th>Dep Flow</th>
+              <th>Flow Type</th>
+              <th></th>
             </tr>
           </thead>
           <tbody id="firDetailBody"></tbody>
         </table>
       </div>
+
+      <!-- Mobile cards -->
+      <div class="fir-leg-cards" id="firDetailCards"></div>
     </section>
   </main>
 
@@ -14144,6 +14165,29 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           tbody.querySelectorAll('.fir-route-col').forEach(function(td) {
             td.addEventListener('click', function() { this.classList.toggle('expanded'); });
           });
+
+          // Mobile cards
+          var cards = document.getElementById('firDetailCards');
+          if (cards) {
+            cards.innerHTML = data.legs.map(function(l) {
+              var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
+              var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
+              return '<div class="fir-leg-card">'
+                + '<div class="fir-leg-card-header"><span class="wf">' + l.wf + '</span><span class="fir">' + data.fir + '</span></div>'
+                + '<div class="fir-leg-card-route"><span>' + l.from + '</span><span>→</span><span>' + l.to + '</span></div>'
+                + '<div class="fir-leg-card-row">Date: <b>' + (l.date || '-') + '</b></div>'
+                + '<div class="fir-leg-card-row">Staff Window: <b>' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</b></div>'
+                + '<div class="fir-leg-card-row">Duration: <b>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</b></div>'
+                + '<div class="fir-leg-card-row">Flow: <b>' + flowLabel + '</b></div>'
+                + '<div class="fir-leg-card-actions"><button class="fir-view-btn" data-card-idx="' + idx + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">View on Map</button></div>'
+                + '</div>';
+            }).join('');
+            cards.querySelectorAll('.fir-view-btn[data-card-idx]').forEach(function(btn) {
+              btn.addEventListener('click', function() {
+                openFirRouteModal(window._firLegs[Number(btn.dataset.cardIdx)], window._firId);
+              });
+            });
+          }
         })
         .catch(function(err) {
           console.error('Failed to load FIR detail:', err);
@@ -14227,6 +14271,35 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             openFirRouteModal(window._firLegs[idx], fir);
           });
         });
+
+        // Mobile cards
+        var cards = document.getElementById('firDetailCards');
+        if (cards) {
+          cards.innerHTML = allLegs.map(function(l, idx) {
+            var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
+            var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
+            return '<div class="fir-leg-card">'
+              + '<div class="fir-leg-card-header"><span class="wf">' + l.wf + '</span><span class="fir">' + (l._fir || '') + '</span></div>'
+              + '<div class="fir-leg-card-route"><span>' + l.from + '</span><span>→</span><span>' + l.to + '</span></div>'
+              + '<div class="fir-leg-card-row">Date: <b>' + (l.date || '-') + '</b></div>'
+              + '<div class="fir-leg-card-row">Staff Window: <b>' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</b></div>'
+              + '<div class="fir-leg-card-row">Duration: <b>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</b></div>'
+              + '<div class="fir-leg-card-row">Flow: <b>' + flowLabel + '</b></div>'
+              + '<div class="fir-leg-card-actions">'
+              + '<button class="fir-view-btn" data-card-grp-idx="' + idx + '" data-card-fir="' + (l._fir || '') + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">View</button>'
+              + '<button class="fir-open-btn" data-open-fir="' + (l._fir || '') + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">Open ' + (l._fir || '') + '</button>'
+              + '</div>'
+              + '</div>';
+          }).join('');
+          cards.querySelectorAll('.fir-view-btn[data-card-grp-idx]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+              openFirRouteModal(window._firLegs[Number(btn.dataset.cardGrpIdx)], btn.dataset.cardFir);
+            });
+          });
+          cards.querySelectorAll('.fir-open-btn[data-open-fir]').forEach(function(btn) {
+            btn.addEventListener('click', function() { loadFirDetail(btn.dataset.openFir); });
+          });
+        }
       });
     }
 

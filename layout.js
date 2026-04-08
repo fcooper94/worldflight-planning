@@ -517,13 +517,15 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       document.body.classList.toggle('sidebar-collapsed', collapsed);
       localStorage.setItem('sidebarCollapsed', collapsed);
 
-      // Mobile: toggle slide-in class and backdrop
+      // Mobile: toggle slide-in class, backdrop, and body scroll lock
       if (isMobile()) {
         sidebar.classList.toggle('mobile-open', !collapsed);
         backdrop.classList.toggle('visible', !collapsed);
+        document.body.classList.toggle('sidebar-open', !collapsed);
       } else {
         sidebar.classList.remove('mobile-open');
         backdrop.classList.remove('visible');
+        document.body.classList.remove('sidebar-open');
       }
 
       window.dispatchEvent(new Event('sidebar:toggle'));
