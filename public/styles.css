@@ -6138,15 +6138,17 @@ main.dashboard.map-layout {
   }
   .sidebar.mobile-open {
     transform: translateX(0);
-    overflow-y: auto !important;
+    height: 100dvh;
+    height: -webkit-fill-available;
+    overflow-y: scroll !important;
     -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: contain;
     touch-action: pan-y;
+    -ms-touch-action: pan-y;
   }
   body.sidebar-open {
     overflow: hidden !important;
-    position: fixed;
-    width: 100%;
+    touch-action: none;
   }
   /* Show labels in mobile slide-out */
   .sidebar.mobile-open .label,

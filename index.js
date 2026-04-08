@@ -13446,7 +13446,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
   const content = `
   <style>
-    .airspace-page { max-width: 1400px; margin: 0 auto; }
+    .airspace-page { }
     .airspace-search-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
     .airspace-search-row input, .airspace-search-row select {
       padding: 8px 12px; background: var(--panel); border: 1px solid var(--border);
@@ -13487,7 +13487,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     .fir-detail-header h2 { margin: 0; }
     .fir-detail-meta { font-size: 13px; color: var(--muted); }
     .fir-detail-header .back-link { color: var(--accent); text-decoration: none; font-size: 13px; }
-    #firDetailTable { border-collapse: collapse; }
+    #firDetailTable { border-collapse: collapse; width: 100%; }
     #firDetailTable th, #firDetailTable td { padding: 6px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
     #firDetailTable th { font-size: 13px; font-weight: 600; color: var(--muted); }
     #firDetailTable td { font-size: 13px; }
@@ -13499,7 +13499,10 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     .flow-badge.slotted { background: rgba(34,197,94,0.15); color: #4ade80; }
     .flow-badge.booking { background: rgba(251,146,60,0.15); color: #fb923c; }
     .fir-highlight { fill: rgba(56,189,248,0.2); stroke: var(--accent); stroke-width: 2; }
-    .fir-timeline { margin-top: 16px; }
+    .fir-timeline {
+      margin-top: 16px; padding: 12px; background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border); border-radius: 8px;
+    }
 
     .tl-weekly { overflow-x: auto; min-width: 100%; }
     .tl-header { position: relative; height: 28px; border-bottom: 1px solid var(--border); margin-bottom: 0; min-width: 800px; margin-left: 68px; }
@@ -13601,13 +13604,14 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
     @media (max-width: 900px) {
       .airspace-page { padding: 0; margin: 0; width: 100vw; box-sizing: border-box; }
-      .airspace-page .card { padding: 10px 8px; margin: 8px 4px; width: calc(100vw - 8px); box-sizing: border-box; }
+      .airspace-page .card { padding: 10px 8px; margin: 8px 4px; width: calc(100vw - 44px); box-sizing: border-box; }
       .airspace-search-row { flex-direction: column; align-items: stretch; gap: 8px; }
       .airspace-search-row input, .airspace-search-row select { width: 100%; min-width: 0; box-sizing: border-box; }
       .airspace-search-row > div[style*="border-left"] { display: none; }
       #firSearchBtn { width: 100%; }
       #airspaceFirMap { height: 220px; }
       .fir-summary-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); max-height: 180px; }
+      .fir-timeline, #tlToggleRow { display: none !important; }
       .fir-timeline-segment { font-size: 8px; }
       .fir-route-modal { width: 95vw; max-height: 90vh; }
       .fir-route-modal-map { height: 250px; }
@@ -13954,17 +13958,33 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
         var defaultStyle = { color: 'rgba(255,255,255,0.12)', weight: 1, fillOpacity: 0 };
         var hoverStyle = { color: '#38bdf8', weight: 2, fillColor: 'rgba(56,189,248,0.15)', fillOpacity: 0.25 };
 
+        // FIRs that belong to additional divisions beyond what's in the geojson
+        var extraDivisions = {
+          'EGGX': ['NATFSS'],
+          'CZQX': ['NATFSS'],
+          'CZQO': ['NATFSS'],
+          'BIRD': ['NATFSS'],
+          'LPPO': ['NATFSS'],
+          'ENOB': ['NATFSS']
+        };
+
         // Build metadata + populate dropdowns (use base FIR codes)
         var regions = new Set(), divisions = new Set();
         data.features.forEach(function(f) {
           var p = f.properties || {};
           if (p.id) {
             var base = p.id.split('-')[0];
-            if (!firMeta[base]) firMeta[base] = { region: p.region || '', division: p.division || '' };
+            if (!firMeta[base]) {
+              var divs = [p.division || ''];
+              if (extraDivisions[base]) divs = divs.concat(extraDivisions[base]);
+              firMeta[base] = { region: p.region || '', division: p.division || '', divisions: divs };
+            }
           }
           if (p.region) regions.add(p.region);
           if (p.division) divisions.add(p.division);
         });
+        // Add extra divisions to the dropdown set
+        Object.values(extraDivisions).forEach(function(arr) { arr.forEach(function(d) { divisions.add(d); }); });
 
         // Populate region buttons
         var regionBtns = document.getElementById('regionBtns');
@@ -14014,7 +14034,8 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           var val = btn.dataset.value;
           if (!val) return;
           var matching = allFirSummary.filter(function(f) {
-            return (firMeta[f.fir] || {}).division === val;
+            var meta = firMeta[f.fir] || {};
+            return meta.divisions ? meta.divisions.indexOf(val) !== -1 : meta.division === val;
           });
           if (matching.length) loadGroupDetail(matching, '', val);
         });
