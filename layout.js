@@ -63,6 +63,10 @@ export default function renderLayout({
         <span class="icon">🎧</span>
         <span class="label">WF Slot Management</span>
       </a>` : ''}
+      ${pv('atc') ? `<a href="/airport-flow" class="nav-item" data-tooltip="Airport Flow">
+        <span class="icon">🛫</span>
+        <span class="label">Airport Flow</span>
+      </a>` : ''}
       ${pv('airspace') ? `<a href="/airspace" class="nav-item" data-tooltip="Airspace Management">
         <span class="icon">🌐</span>
         <span class="label">Airspace Management</span>
@@ -883,7 +887,26 @@ window.location.href = '/icao/' + icao;
 <script>
 async function openFlightPlanModal(callsign) {
   const res = await fetch('/api/atc/flight/' + callsign);
-  if (!res.ok) return;
+  if (!res.ok) {
+    const modal = document.getElementById('flightPlanModal');
+    const strip = modal.querySelector('.fp-strip');
+    const origHtml = strip.innerHTML;
+    strip.innerHTML = '<div style="text-align:center;padding:48px 24px;">'
+      + '<div style="font-size:18px;font-weight:700;color:var(--text);margin-bottom:4px;">' + callsign + '</div>'
+      + '<p style="color:var(--muted);font-size:14px;margin:12px 0 24px;">No data received from VATSIM</p>'
+      + '<button id="fpNoDataClose" style="padding:8px 24px;background:var(--accent);color:#020617;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:14px;">Close</button>'
+      + '</div>';
+    modal.classList.remove('hidden');
+    document.getElementById('fpNoDataClose').addEventListener('click', function() {
+      modal.classList.add('hidden');
+      strip.innerHTML = origHtml;
+    });
+    modal.querySelector('.modal-backdrop').addEventListener('click', function() {
+      modal.classList.add('hidden');
+      strip.innerHTML = origHtml;
+    }, { once: true });
+    return;
+  }
 
   const d = await res.json();
 

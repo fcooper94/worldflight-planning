@@ -12490,114 +12490,88 @@ let primaryStatusHtml = '';
 
 
  const content = `
-  <section class="card dashboard-wide">
+    <section class="card departures-page">
 
-    <section class="card">
+      <div class="dep-page-header">
+        <div class="dep-icao-badge">${pageIcao}</div>
+        <div class="dep-header-info">
+          <h2>Ground Departures</h2>
+          <span class="dep-header-count" id="depCount"></span>
+        </div>
+      </div>
 
-    <!-- TOP ROW HEADERS (aligned horizontally) -->
-<div class="tsat-wrapper">    
+      ${!isAerodromeController ? `
+        <div class="icao-warning">
+          ${canEdit
+            ? `Not connected as ${pageIcao}_ — editing enabled (Admin)`
+            : `Not connected as ${pageIcao}_ — read-only view`}
+        </div>
+      ` : ''}
 
-${!isAerodromeController ? `
-  <div class="icao-warning">
-    ${canEdit ? `
-      You are not connected as an ${pageIcao}_ position, but you can edit because you are an Admin.
-    ` : `
-      You are not connected as an ${pageIcao}_ position and therefore the following information is read-only.
-    `}
-  </div>
-` : ``}
-<div class="tsat-top-row three-cols">
+      <div class="tsat-wrapper" style="padding-top:0;">
+        <div class="tsat-top-row three-cols">
+          <div class="tsat-col tsat-panel">
+            <div class="tsat-panel-header">
+              <h3>Upcoming Start</h3>
+            </div>
+            <div class="table-scroll">
+              <table class="departures-table" id="tsatQueueTable">
+                <thead><tr><th>Callsign</th><th>TSAT</th><th>Started</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
 
-  <!-- UPCOMING TSATs -->
-  <div class="tsat-col">
-    <h3 class="tsat-header">Upcoming Start</h3>
-    <div class="table-scroll">
-      <table class="departures-table" id="tsatQueueTable">
-        <thead>
-          <tr>
-            <th>Callsign</th>
-            <th>TSAT</th>
-            <th>Started</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
+          <div class="tsat-col tsat-panel">
+            <div class="tsat-panel-header">
+              <h3>Recently Started</h3>
+            </div>
+            <div class="table-scroll">
+              <table class="departures-table" id="recentlyStartedTable">
+                <thead><tr><th>Callsign</th><th>Started At</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
 
-  <!-- RECENTLY STARTED -->
-  <div class="tsat-col">
-    <h3 class="tsat-header">Recently Started</h3>
-    <div class="table-scroll">
-      <table class="departures-table" id="recentlyStartedTable">
-        <thead>
-          <tr>
-            <th>Callsign</th>
-            <th>Started At</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
+          <div class="tsat-col tsat-panel">
+            <div class="tsat-panel-header">
+              <h3>Available WF TOBTs</h3>
+            </div>
+            <div class="table-scroll">
+              <table class="departures-table" id="unassignedTobtTable">
+                <thead><tr><th>TOBT</th><th>Dest</th><th>TOBT</th><th>Dest</th></tr></thead>
+                <tbody><tr><td colspan="4" style="text-align:center;padding:20px 0;color:var(--muted);font-size:12px;">No TOBTs available</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
 
-  <!-- UNASSIGNED TOBTs -->
-  <div class="tsat-col">
-    <h3 class="tsat-header">Available WF TOBT's</h3>
-    <div class="table-scroll">
-      <table class="departures-table" id="unassignedTobtTable">
-  <thead>
-    <tr>
-      <th>TOBT</th>
-      <th>Dest</th>
-      <th>TOBT</th>
-      <th>Dest</th>
-    </tr>
-  </thead>
+      <div class="dep-main-section">
+        <div class="dep-search-bar">
+          <input id="callsignSearch" placeholder="Search by callsign..." />
+        </div>
+        <div class="table-scroll">
+          <table class="departures-table" id="mainDeparturesTable">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Callsign</th>
+                <th>Aircraft</th>
+                <th>Dest</th>
+                <th>WF TOBT</th>
+                <th class="col-toggle">READY?</th>
+                <th>TSAT</th>
+                <th class="col-route">ATC Route</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      </div>
 
-        <tbody>
-          <tr>
-            <td colspan="4"><em>None Available</em></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-</div>
-
-
-</div>
-    </div>
-    <!-- END TSAT TOP ROW -->
-
-
-    <!-- SEARCH + TIMER + MAIN TABLE -->
-    <input id="callsignSearch" placeholder="Search by callsign..." />
-    
-    <div class="table-scroll">
-      <table class="departures-table" id="mainDeparturesTable">
-        <thead>
-          <tr>
-            <th>Status</th>
-            <th>Callsign</th>
-            <th>Aircraft</th>
-            <th>Dest</th>
-            <th>WF TOBT</th>
-            <th class="col-toggle">READY?</th>
-            <th>TSAT</th>
-            <th class="col-route">ATC Route</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rowsHtml}
-        </tbody>
-      </table>
-    </div>
-
-  </section>
-</section>
+    </section>
 
 
   <!-- ALL scripts stay exactly the same -->
@@ -12747,7 +12721,7 @@ function renderUnassignedTobtTable(data) {
 
   if (!visible.length) {
     tbody.innerHTML =
-      '<tr><td colspan="4"><em>None Available</em></td></tr>';
+      '<tr><td colspan="4" style="text-align:center;padding:20px 0;color:var(--muted);font-size:12px;">No TOBTs available</td></tr>';
     return;
   }
 
@@ -13430,6 +13404,45 @@ app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
   res.send(
     renderLayout({
       title: 'ATC Slot Management',
+      user,
+      isAdmin,
+      layoutClass: 'dashboard-full',
+      content
+    })
+  );
+});
+
+// ===== AIRPORT FLOW PAGE =====
+app.get('/airport-flow', requireLogin, requirePageEnabled('atc'), (req, res) => {
+  if (!req.session.user || !req.session.user.data) {
+    return res.redirect('/');
+  }
+
+  const user = req.session.user.data;
+  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+
+  const content = `
+    <section class="card">
+      <h2>Airport Flow</h2>
+      <p>Select an airport to manage departure flow and ground operations.</p>
+
+      <form action="/departures" method="GET" class="icao-search">
+        <input type="hidden" name="mode" value="flow" />
+        <input
+          type="text"
+          name="icao"
+          placeholder="Enter ICAO (e.g. EGLL)"
+          maxlength="4"
+          required
+        />
+        <button type="submit">Load Airport</button>
+      </form>
+    </section>
+  `;
+
+  res.send(
+    renderLayout({
+      title: 'Airport Flow',
       user,
       isAdmin,
       layoutClass: 'dashboard-full',
@@ -14548,11 +14561,18 @@ app.get('/book', (req, res) => {
 
 
   <section class="card card-full tobt-card">
-
+      <div style="margin-bottom:12px;">
+        <a href="#" onclick="history.back();return false;" style="color:var(--accent);text-decoration:none;font-size:13px;">&larr; Back</a>
+      </div>
       <h2>Make a Booking</h2>
 <div class="tobt-controls">
-  <label for="depSelect">Departure</label>
-  <select id="depSelect" class="tobt-select">
+  ${preselectedKey ? (() => {
+    const ps = adminSheetCache.find(s => `${s.from}-${s.to}-${s.dep_time_utc}` === preselectedKey);
+    return ps
+      ? `<div style="font-size:15px;font-weight:600;color:var(--text);padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;">${ps.number} | ${ps.from} – ${ps.to} <span style="color:var(--muted);font-size:12px;margin-left:8px;">${ps.date_utc}</span></div>`
+      : `<div style="color:var(--muted);">Unknown departure</div>`;
+  })() : `<div style="color:var(--muted);">No departure selected. <a href="/schedule" style="color:var(--accent);">Go to schedule</a></div>`}
+  <select id="depSelect" class="tobt-select" style="display:none;">
         <option value="">Select a departure</option>
         ${adminSheetCache.map(s => {
   const value = `${s.from}-${s.to}-${s.dep_time_utc}`;

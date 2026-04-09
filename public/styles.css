@@ -636,15 +636,22 @@ select{ cursor:pointer; }
 /* Main operations table */
 .departures-table{
   width:100%;
-  min-width:0;          /* VERY important */
+  min-width:0;
   table-layout:fixed;
+  border-collapse: collapse;
 }
 
 .departures-table th,
 .departures-table td{
   padding:2px;
   text-align:left;
-  border-top:1px solid var(--border);
+  border: none;
+}
+.departures-table tbody tr {
+  border-top: 1px solid var(--border);
+}
+.departures-table thead tr {
+  border-bottom: 1px solid var(--border);
 }
 .departures-table thead th{
   font-size:14px;
@@ -726,27 +733,13 @@ select{ cursor:pointer; }
 .route-expanded{ display:none; margin-top:6px; }
 
 /* Callsign search */
-#callsignSearch{
-  margin-bottom:16px;
-  width:260px;
+#callsignSearch {
+  margin-bottom: 16px;
+  width: 280px;
 }
 
 /* User toggle buttons */
-.col-toggle{ width:70px; text-align:center; }
-.toggle-btn{
-  background:transparent;
-  border:1px solid var(--border);
-  color: var(--text);
-  border-radius:10px;
-  padding:6px 10px;
-  cursor:pointer;
-  font-size:14px;
-}
-.toggle-btn.active{
-  background: var(--wf-green);
-  border-color:var(--wf-green);
-   box-shadow: 0 0 5px var(--wf-green-glow);
-}
+.col-toggle { width: 70px; text-align: center; }
 
 /* Dep flow input */
 .dep-flow-input{
@@ -801,248 +794,264 @@ select{ cursor:pointer; }
 }
 
 /* =========================
-   TSAT controls / tables
+   TSAT / Slot Management
    ========================= */
-.tsat-refresh{
-  margin-left:10px;
-  border:none;
-  cursor:pointer;
-  font-size:16px;
-  background: linear-gradient(
-    180deg,
-    var(--wf-green),
-    var(--wf-green-dark)
-  );
-  color:#fff;
-  border-radius:8px;
-  padding:6px 10px;
+
+/* --- Layout --- */
+.tsat-layout-card { display: block; }
+.tsat-wrapper { width: 100%; overflow: visible; }
+.tsat-top-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  align-items: start;
+  margin-bottom: 24px;
+}
+.tsat-top-row > div { min-width: 0; }
+.tsat-top-row.three-cols {
+  grid-template-columns: repeat(3, 1fr);
+  align-items: stretch;
+}
+.tsat-col {
+  display: flex;
+  flex-direction: column;
+  height: 320px;
+  min-height: 0;
+}
+.tsat-col .table-scroll table { height: 100%; }
+
+@media (max-width: 900px) {
+  .tsat-top-row { grid-template-columns: 1fr; }
+  .tsat-top-right { display: none; }
+}
+
+/* --- ICAO warning banner --- */
+.icao-warning {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  background: rgba(245,158,11,0.1);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: 8px;
+  color: #fde68a;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* --- Refresh button --- */
+.tsat-refresh {
+  margin-left: 10px;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  background: linear-gradient(180deg, var(--wf-green), var(--wf-green-dark));
+  color: #fff;
+  border-radius: 8px;
+  padding: 6px 10px;
   box-shadow: 0 0 8px var(--wf-green-glow);
   transition: transform .15s ease, box-shadow .15s ease;
 }
-.tsat-refresh:hover{
-  transform: rotate(90deg) scale(1.05);
-  box-shadow: 0 0 14px rgba(24,199,126,0.9);
-}
-.tsat-refresh:active{ transform: scale(.95); }
-.tsat-refresh.hidden{ display:none; }
+.tsat-refresh:hover { transform: rotate(90deg) scale(1.05); box-shadow: 0 0 14px rgba(24,199,126,0.9); }
+.tsat-refresh:active { transform: scale(.95); }
+.tsat-refresh.hidden { display: none; }
 
-/* Started checkbox */
-.tsat-started-check{
-  appearance:none;
-  width:22px; height:22px;
-  border-radius:6px;
-  border:2px solid rgba(255,255,255,0.25);
+/* --- Started checkbox --- */
+.tsat-started-check {
+  appearance: none;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  border: 2px solid rgba(255,255,255,0.25);
   background: linear-gradient(145deg, #0b0f1a, #070a14);
-  cursor:pointer;
-  position:relative;
+  cursor: pointer;
+  position: relative;
   transition: all .18s ease;
 }
-.tsat-started-check:hover{
-  border-color:#3ba4ff;
-  box-shadow: 0 0 6px rgba(59,164,255,0.45);
-}
-.tsat-started-check:checked{
+.tsat-started-check:hover { border-color: #3ba4ff; box-shadow: 0 0 6px rgba(59,164,255,0.45); }
+.tsat-started-check:checked {
   background: linear-gradient(145deg, #2cff88, #18b96a);
-  border-color:#2cff88;
+  border-color: #2cff88;
   box-shadow: 0 0 10px rgba(44,255,136,0.6);
 }
-.tsat-started-check:checked::after{
-  content:'✔';
-  color:#04150c;
-  font-size:14px;
-  font-weight:900;
-  position:absolute;
-  top:50%; left:50%;
-  transform: translate(-50%,-52%);
+.tsat-started-check:checked::after {
+  content: '✔'; color: #04150c;
+  font-size: 14px; font-weight: 900;
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -52%);
 }
 
-/* TSAT layout */
-.tsat-layout-card{ display:block; }
-.tsat-top-row{
-  display:grid;
-  grid-template-columns: 1fr 1fr;
-  gap:24px;
-  align-items:start;
-  margin-bottom:24px;
+/* --- TSAT tables --- */
+#tsatQueueTable, #recentlyStartedTable, #unassignedTobtTable {
+  min-width: 0 !important;
+  width: 100% !important;
+  table-layout: fixed;
 }
-.tsat-top-row > div{ min-width:0; }
-@media (max-width:900px){
-  .tsat-top-row{ grid-template-columns: 1fr; }
-  .tsat-top-right{ display:none; }
-}
-
-/* TSAT tables should not inherit large min-width */
-#tsatQueueTable, #recentlyStartedTable, #unassignedTobtTable{
-  min-width:0 !important;
-  width:100% !important;
-  table-layout:fixed;
-}
-
-
-/* Compact TSAT tables: slightly looser padding for readability */
 #tsatQueueTable th, #tsatQueueTable td,
 #recentlyStartedTable th, #recentlyStartedTable td,
-#unassignedTobtTable th, #unassignedTobtTable td{
-  padding: 0px 8px;
+#unassignedTobtTable th, #unassignedTobtTable td {
+  padding: 0 8px;
 }
-/* Action buttons */
-.action-btn{
-  background:#0b0f1a;
-  border:1px solid #1a2333;
-  border-radius:10px;
-  height:32px;
-  padding:0 12px;
-  cursor:pointer;
-  color:#cbd5e1;
-  font-size:.85rem;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  gap:6px;
-  line-height:1;
-  transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease, color .15s ease;
-}
-.action-btn:hover{ transform: scale(1.05); }
+.tsat-panel .departures-table { border-collapse: collapse; }
+.tsat-panel .departures-table th,
+.tsat-panel .departures-table td { border: none; }
+.tsat-panel .departures-table thead tr { border: none; }
+.tsat-panel .departures-table tbody tr { border: none; }
 
-/* Reduce vertical size of action buttons */
-.action-btn,
-.book-slot-btn,
-.plan-btn {
-  height: 36px;              /* was effectively ~44–48px */
-  padding: 0 14px;           /* removes vertical padding inflation */
-  line-height: 1;
+/* --- Action buttons --- */
+.action-btn, .book-slot-btn, .plan-btn {
+  background: #0b0f1a;
+  border: 1px solid #1a2333;
+  border-radius: 10px;
+  height: 36px;
+  padding: 0 14px;
+  cursor: pointer;
+  color: #cbd5e1;
   font-size: 14px;
-}
-
-.action-btn,
-.book-slot-btn,
-.plan-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
+  line-height: 1;
+  transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease, color .15s ease;
 }
+.action-btn:hover { transform: scale(1.05); }
 
-
-/* Actions column alignment */
-#recentlyStartedTable td:last-child {
-  text-align: center;
-  white-space: nowrap;
-}
-.send-back-btn,
-.delete-started-btn {
+.send-back-btn, .delete-started-btn {
   height: 28px;
   padding: 0 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
+.send-back-btn:hover { border-color: #18c77e; color: #fff; box-shadow: 0 0 10px rgba(24,199,126,0.45); }
+.delete-started-btn { padding: 0 8px !important; height: 28px !important; border-radius: 8px; }
+.delete-started-btn:hover { border-color: #ff6b6b; color: #ff6b6b; box-shadow: 0 0 10px rgba(255,107,107,0.45); }
+.delete-started-btn .trash-icon { stroke: currentColor; display: block; pointer-events: none; }
 
-/* Ensure Callsign column absorbs remaining width */
+/* --- Recently Started table columns --- */
 #recentlyStartedTable th:nth-child(1),
-#recentlyStartedTable td:nth-child(1) {
-  width: auto;
-}
-
-
+#recentlyStartedTable td:nth-child(1) { width: auto; }
 #recentlyStartedTable th:nth-child(2),
-#recentlyStartedTable td:nth-child(2) {
-  width: 72px;              /* Started At (HH:MM) */
-  text-align: center;
-  white-space: nowrap;
-}
-
-/* Actions column must remain a table cell */
+#recentlyStartedTable td:nth-child(2) { width: 72px; text-align: center; white-space: nowrap; }
 #recentlyStartedTable th:nth-child(3),
-#recentlyStartedTable td:nth-child(3) {
-  width: 130px;
-  white-space: nowrap;
-  text-align: center;
-  display: table-cell;   /* ✅ critical */
-}
-/* Flex layout INSIDE the actions cell */
-#recentlyStartedTable td:nth-child(3) .action-btn,
-#recentlyStartedTable td:nth-child(3) .send-back-btn,
-#recentlyStartedTable td:nth-child(3) .delete-started-btn {
-  display: inline-flex;
-}
+#recentlyStartedTable td:nth-child(3) { width: 130px; white-space: nowrap; text-align: center; display: table-cell; padding: 0 6px; }
+#recentlyStartedTable td:last-child { text-align: center; white-space: nowrap; }
 
-#recentlyStartedTable td:nth-child(3) {
-  padding-left: 6px;
-  padding-right: 6px;
-}
-
-/* Ensure TSAT tables fill available vertical space */
-.tsat-col .table-scroll table {
-  height: 100%;
-}
-
-.send-back-btn:hover{
-  border-color:#18c77e;
-  color:#fff;
-  box-shadow: 0 0 10px rgba(24,199,126,0.45);
-}
-.delete-started-btn{
-  padding:0 8px !important;
-  height:28px !important;
-  border-radius:8px;
-}
-.delete-started-btn:hover{
-  border-color:#ff6b6b;
-  color:#ff6b6b;
-  box-shadow: 0 0 10px rgba(255,107,107,0.45);
-}
-.delete-started-btn .trash-icon{
-  stroke: currentColor;
-  display:block;
-  pointer-events:none;
-}
-
-/* TSAT row colouring */
-.row-green{ background-color:#0F3D2E !important; color:#C6F6D5 !important; }
-.row-amber{ background-color:#4A3A12 !important; color:#F3E7B3 !important; }
-.row-red{ background-color:#4A1515 !important; color:#F6C6C6 !important; }
-
-/* ICAO warning banner */
-.tsat-wrapper {
-  width: 100%;
-  overflow: visible;   /* 🔑 critical */
-}
-.tsat-top-row.three-cols {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 24px;
-
-  align-items: stretch;   /* 🔑 */
-}
-.tsat-col {
+/* --- Departures page header --- */
+.dep-page-header {
   display: flex;
-  height: 320px; /* pick the height that matches the other panels */
-  flex-direction: column;
-  min-height: 0;   /* 🔑 allow shrink/grow */
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.dep-icao-badge {
+  font-size: 28px;
+  font-weight: 800;
+  font-family: monospace;
+  color: #fff;
+  background: linear-gradient(135deg, rgba(56,189,248,0.15), rgba(59,130,246,0.15));
+  border: 1px solid rgba(56,189,248,0.3);
+  border-radius: 10px;
+  padding: 8px 16px;
+  letter-spacing: 2px;
+}
+.dep-page-header h2 { margin: 0; font-size: 20px; color: var(--text); }
+.dep-header-count { font-size: 13px; color: var(--muted); }
+
+/* --- TSAT panels --- */
+.tsat-panel {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+.tsat-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.tsat-panel-header h3 {
+  margin: 0 !important;
+  padding: 6px 0 !important;
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff !important;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+.tsat-panel-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
-
-
-.tsat-wrapper{ position:relative; padding-top:56px; }
-.icao-warning{
-  position:absolute;
-  top:0; left:0; right:0;
-  height:40px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-
-  background: linear-gradient(160deg, #450a0a, #1f0505);
-  border:1px solid #7f1d1d;
-  border-radius:12px;
-
-  color:#fecaca;
-  font-weight:700;
-  font-size:14px;
-
-  box-shadow: 0 0 18px rgba(239,68,68,.35);
-  z-index:5;
+/* --- Search bar --- */
+.dep-search-bar {
+  margin-bottom: 12px;
 }
+.dep-search-bar input {
+  width: 280px;
+  padding: 8px 14px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  transition: border-color .2s;
+}
+.dep-search-bar input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.dep-main-section { margin-top: 24px; }
+
+/* --- Row colouring --- */
+.row-green { background: linear-gradient(90deg, rgba(34,197,94,0.1), rgba(34,197,94,0.05)) !important; }
+.row-green td { color: #bbf7d0 !important; }
+.row-amber { background: linear-gradient(90deg, rgba(245,158,11,0.1), rgba(245,158,11,0.05)) !important; }
+.row-amber td { color: #fde68a !important; }
+.row-red { background: linear-gradient(90deg, rgba(239,68,68,0.1), rgba(239,68,68,0.05)) !important; }
+.row-red td { color: #fecaca !important; }
+
+/* --- Toggle / Ready checkbox --- */
+.toggle-btn {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  border: 2px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.03);
+  cursor: pointer;
+  transition: all .15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.toggle-btn:hover { border-color: rgba(56,189,248,0.5); }
+.toggle-btn.active {
+  background: linear-gradient(135deg, #059669, #10b981);
+  border-color: #34d399;
+  box-shadow: 0 0 8px rgba(52,211,153,0.4);
+}
+
+/* --- TSAT assign/refresh buttons --- */
+.tsat-assign-btn {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: transform .15s, box-shadow .15s;
+  box-shadow: 0 0 6px rgba(56,189,248,0.3);
+}
+.tsat-assign-btn:hover { transform: scale(1.1); box-shadow: 0 0 12px rgba(56,189,248,0.5); }
 
 /* =========================
    TOBT booking table
@@ -2371,9 +2380,10 @@ tr:hover .row-actions {
   display: none !important;
 }
 .status-pill {
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  letter-spacing: 0.3px;
   font-weight: 700;
   letter-spacing: .4px;
   display: inline-block;
