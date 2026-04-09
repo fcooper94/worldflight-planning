@@ -59,13 +59,9 @@ export default function renderLayout({
 
     ${pv('atc') || pv('airspace') ? `<div class="nav-section">
       <div class="nav-title">Controllers</div>
-      ${pv('atc') ? `<a href="/atc" class="nav-item" data-tooltip="WF Slot Management">
+      ${pv('atc') ? `<a href="/atc" class="nav-item" data-tooltip="WF Flow Control">
         <span class="icon">🎧</span>
-        <span class="label">WF Slot Management</span>
-      </a>` : ''}
-      ${pv('atc') ? `<a href="/airport-flow" class="nav-item" data-tooltip="Airport Flow">
-        <span class="icon">🛫</span>
-        <span class="label">Airport Flow</span>
+        <span class="label">WF Flow Control</span>
       </a>` : ''}
       ${pv('airspace') ? `<a href="/airspace" class="nav-item" data-tooltip="Airspace Management">
         <span class="icon">🌐</span>

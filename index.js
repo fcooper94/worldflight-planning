@@ -8,6 +8,57 @@ import path from 'path';
 
 const prisma = new PrismaClient();
 
+/* ===== ICAO WAKE TURBULENCE CATEGORIES ===== */
+const WAKE_CAT = {
+  // Super
+  A388: 'J', A225: 'J',
+  // Heavy
+  A124: 'H', A306: 'H', A30B: 'H', A310: 'H', A332: 'H', A333: 'H', A339: 'H',
+  A340: 'H', A342: 'H', A343: 'H', A345: 'H', A346: 'H', A359: 'H', A35K: 'H',
+  AN24: 'H', B38M: 'H',
+  B742: 'H', B743: 'H', B744: 'H', B748: 'H', B752: 'H', B753: 'H',
+  B762: 'H', B763: 'H', B764: 'H', B772: 'H', B77L: 'H', B773: 'H', B77W: 'H',
+  B778: 'H', B779: 'H', B788: 'H', B789: 'H', B78X: 'H',
+  C17: 'H', C5M: 'H', DC10: 'H', IL76: 'H', IL96: 'H', K35R: 'H',
+  MD11: 'H', T154: 'H', T204: 'H', A400: 'H',
+  // Medium
+  A10: 'M', A148: 'M', A158: 'M', A19N: 'M', A20N: 'M', A21N: 'M',
+  A318: 'M', A319: 'M', A320: 'M', A321: 'M',
+  AT43: 'M', AT45: 'M', AT72: 'M', AT75: 'M', AT76: 'M',
+  B461: 'M', B462: 'M', B463: 'M',
+  B712: 'M', B731: 'M', B732: 'M', B733: 'M', B734: 'M', B735: 'M',
+  B736: 'M', B737: 'M', B738: 'M', B739: 'M', B37M: 'M', B39M: 'M',
+  BCS1: 'M', BCS3: 'M',
+  C130: 'M', CL60: 'M', CRJ1: 'M', CRJ2: 'M', CRJ7: 'M', CRJ9: 'M', CRJX: 'M',
+  DH8A: 'M', DH8B: 'M', DH8C: 'M', DH8D: 'M',
+  E135: 'M', E145: 'M', E170: 'M', E175: 'M', E190: 'M', E195: 'M', E290: 'M', E295: 'M',
+  F100: 'M', F70: 'M', F900: 'M',
+  GLF4: 'M', GLF5: 'M', GLF6: 'M',
+  MD80: 'M', MD81: 'M', MD82: 'M', MD83: 'M', MD87: 'M', MD88: 'M', MD90: 'M',
+  RJ85: 'M', SU95: 'M', T134: 'M',
+  // Light
+  B350: 'L', BE20: 'L', BE40: 'L', BE9L: 'L', C172: 'L', C182: 'L', C208: 'L', C210: 'L',
+  C25A: 'L', C25B: 'L', C510: 'L', C525: 'L', C550: 'L', C560: 'L', C56X: 'L',
+  C680: 'L', C750: 'L', DA40: 'L', DA42: 'L', DA62: 'L',
+  E50P: 'L', E55P: 'L', FA50: 'L', FA7X: 'L', G150: 'L',
+  H25B: 'L', LJ35: 'L', LJ45: 'L', LJ60: 'L',
+  P28A: 'L', P46T: 'L', PA34: 'L', PC12: 'L', PC24: 'L',
+  SF34: 'L', SR22: 'L', TBM8: 'L', TBM9: 'L'
+};
+
+function getWakeCat(acType) {
+  if (!acType) return '';
+  // Strip FAA wake prefix (H/, J/, L/, M/, S/) then extract type code
+  const cleaned = acType.replace(/^[HJLMS]\//, '').trim();
+  const type = cleaned.split('/')[0].toUpperCase();
+  return WAKE_CAT[type] || '';
+}
+
+function cleanAcType(acType) {
+  if (!acType) return 'N/A';
+  return acType.replace(/^[HJLMS]\//, '').split('/')[0].trim();
+}
+
 /* ===== NAVDATA: WAYPOINT LOOKUP ===== */
 const navFixes = new Map(); // name -> [{ lat, lon }, { lat, lon }, ...]
 
@@ -328,11 +379,138 @@ async function refreshPilots() {
       'https://data.vatsim.net/v3/vatsim-data.json'
     );
     cachedPilots = res.data.pilots || [];
-    console.log('[VATSIM] Pilots refreshed:', cachedPilots.length);
+
+    if (isPageEnabled('fake-pilots')) {
+      try {
+        const fakes = generateFakeTestPilots();
+        console.log('[VATSIM] Fake enabled. Generated:', fakes.length, 'Schedule legs:', adminSheetCache.length);
+        cachedPilots = fakes;
+      } catch (err) {
+        console.error('[FAKE] Error generating test pilots:', err.message, err.stack);
+        // Fall back to real data
+      }
+    } else {
+      console.log('[VATSIM] Pilots refreshed:', cachedPilots.length);
+    }
   } catch (err) {
     console.error('[VATSIM] Failed to refresh pilots:', err.message);
     cachedPilots = [];
   }
+}
+
+/* ===== FAKE TEST PILOT GENERATOR ===== */
+const FAKE_AIRLINES = ['BAW','DLH','AFR','KLM','SAS','UAE','QFA','AAL','DAL','UAL','SWR','ACA','THY','SIA','CPA','ANZ','IBE','TAP','AZA','LOT'];
+const FAKE_ACTYPES = ['B738','A320','A321','B77W','A339','B789','A388','B744','E190','CRJ9','DH8D','A20N','A21N','B39M','B763'];
+const FAKE_RANDOM_DEST = ['EDDF','LFPG','EHAM','LIRF','LEBL','LSZH','LOWW','EKBI','ENGM','ESSA','EPWA','LKPR','LHBP','LGAV','LTFM','OMDB','VHHH','RJTT','WSSS','YSSY'];
+
+function generateFakeTestPilots() {
+  const fakes = [];
+  const legs = adminSheetCache.filter(r => r.from && r.to);
+  if (!legs.length) return fakes;
+
+  let fakeCid = 1303571;
+
+  // Seeded pseudo-random for deterministic output
+  let seed = 42;
+  function seededRandom() {
+    seed = (seed * 16807 + 0) % 2147483647;
+    return (seed - 1) / 2147483646;
+  }
+
+  for (let legIdx = 0; legIdx < legs.length; legIdx++) {
+    const leg = legs[legIdx];
+    const depIcao = leg.from;
+    const wfDest = leg.to;
+    const numPilots = 15 + Math.floor(seededRandom() * 10); // 15-24 pilots
+
+    for (let i = 0; i < numPilots; i++) {
+      const isWfFlight = seededRandom() < 0.8;
+      const dest = isWfFlight ? wfDest : FAKE_RANDOM_DEST[Math.floor(seededRandom() * FAKE_RANDOM_DEST.length)];
+      const airline = FAKE_AIRLINES[Math.floor(seededRandom() * FAKE_AIRLINES.length)];
+      const flightNum = String(Math.floor(seededRandom() * 9000) + 100);
+      const callsign = airline + flightNum;
+      const acType = FAKE_ACTYPES[Math.floor(seededRandom() * FAKE_ACTYPES.length)];
+      const cid = fakeCid++;
+      const wake = getWakeCat(acType);
+
+      // Generate fake booking for 70% of WF flights at airports with flow restrictions
+      const sectorKey = depIcao + '-' + wfDest;
+      const flowType = sharedFlowTypes[sectorKey] || 'NONE';
+      if (isWfFlight && flowType !== 'NONE' && seededRandom() < 0.7) {
+        // Create a booking
+        const bookingSlotKey = flowType === 'SLOTTED'
+          ? sectorKey + '|' + (leg.date_utc || '') + '|' + (leg.dep_time_utc || '') + '|' + generateFakeTobt(leg.dep_time_utc)
+          : sectorKey + '|' + (leg.date_utc || '') + '|' + (leg.dep_time_utc || '') + '|BOOKING_ONLY';
+        const bk = cid + ':' + bookingSlotKey;
+        if (!tobtBookingsByKey[bk]) {
+          const tobt = flowType === 'SLOTTED' ? generateFakeTobt(leg.dep_time_utc) : null;
+          tobtBookingsByKey[bk] = {
+            bookingKey: bk,
+            slotKey: bookingSlotKey,
+            cid: cid,
+            callsign: callsign,
+            from: depIcao,
+            to: wfDest,
+            dateUtc: leg.date_utc || '',
+            depTimeUtc: leg.dep_time_utc || '',
+            tobtTimeUtc: tobt,
+            createdAtISO: new Date().toISOString(),
+            _fake: true
+          };
+          if (!tobtBookingsByCid[cid]) tobtBookingsByCid[cid] = new Set();
+          tobtBookingsByCid[cid].add(bk);
+        }
+      }
+
+      fakes.push({
+        cid: cid,
+        callsign: callsign,
+        latitude: 0,
+        longitude: 0,
+        altitude: 0,
+        groundspeed: 0,
+        transponder: '2000',
+        heading: 0,
+        qnh_i_hg: 29.92,
+        qnh_mb: 1013,
+        flight_plan: {
+          flight_rules: 'I',
+          aircraft_faa: acType + '/' + (wake || 'M'),
+          aircraft_short: acType,
+          departure: depIcao,
+          arrival: dest,
+          alternate: '',
+          cruise_tas: String(400 + Math.floor(seededRandom() * 100)),
+          altitude: String(Math.floor(seededRandom() * 10 + 30) * 1000),
+          route: 'DCT',
+          remarks: '/v/ FAKE TEST PILOT',
+          deptime: (leg.dep_time_utc || '00:00').replace(':', ''),
+          enroute_time: '0200',
+          fuel_time: '0400',
+          assigned_transponder: '2000',
+          revision_id: 1
+        },
+        logon_time: new Date().toISOString(),
+        last_updated: new Date().toISOString(),
+        name: 'Test Pilot ' + (i + 1),
+        pilot_rating: 1,
+        military_rating: 0,
+        server: 'FAKE'
+      });
+    }
+  }
+
+  console.log('[FAKE] Generated ' + fakes.length + ' test pilots across ' + legs.length + ' airports');
+  return fakes;
+}
+
+function generateFakeTobt(depTimeUtc) {
+  if (!depTimeUtc) return '12:00';
+  const parts = depTimeUtc.split(':');
+  const baseMins = Number(parts[0]) * 60 + Number(parts[1]);
+  const offset = Math.floor(Math.random() * 120) - 30; // -30 to +90 mins from dep (non-seeded OK here, called once per booking)
+  const tobtMins = ((baseMins + offset) % 1440 + 1440) % 1440;
+  return String(Math.floor(tobtMins / 60)).padStart(2, '0') + ':' + String(tobtMins % 60).padStart(2, '0');
 }
 
 async function loadTobtBookingsFromDb() {
@@ -354,6 +532,7 @@ async function loadTobtBookingsFromDb() {
     dateUtc: b.dateUtc,
     depTimeUtc: b.depTimeUtc,
     tobtTimeUtc: b.tobtTimeUtc,
+    manual: !!b.manual,
     createdAtISO: b.createdAt.toISOString()
   };
 
@@ -398,7 +577,7 @@ io.use((socket, next) => {
 
 
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots'];
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
 async function loadPageVisibility() {
@@ -541,7 +720,22 @@ function getTobtBookingForCallsign(callsign, icao) {
       booking.callsign === cs &&
       booking.from === icao
     ) {
-      return booking; // includes tobtTimeUtc
+      return booking;
+    }
+  }
+  return null;
+}
+
+function getTobtBookingForCid(cid, icao) {
+  if (!cid) return null;
+  const cidNum = Number(cid);
+
+  for (const booking of Object.values(tobtBookingsByKey)) {
+    if (
+      Number(booking.cid) === cidNum &&
+      booking.from === icao
+    ) {
+      return booking;
     }
   }
   return null;
@@ -1167,6 +1361,7 @@ function buildUnassignedTobtsForICAO(icao) {
       );
     })
     .map(([key, slot]) => ({
+      slotKey: key,
       tobt: slot.tobt,
       to: slot.to
     }))
@@ -1230,8 +1425,12 @@ function assignTSAT(sectorKey, callsign) {
   // Determine FROM ICAO from sector (FROM-TO)
   const fromIcao = sector.split('-')[0];
 
-  // Look up TOBT for this aircraft
-  const tobtBooking = getTobtBookingForCallsign(callsign, fromIcao);
+  // Look up TOBT for this aircraft (by CID first, then callsign)
+  const pilotCid = (() => {
+    const pilot = cachedPilots.find(p => p.callsign === callsign);
+    return pilot?.cid || null;
+  })();
+  const tobtBooking = getTobtBookingForCid(pilotCid, fromIcao) || getTobtBookingForCallsign(callsign, fromIcao);
 
   if (tobtBooking?.tobtTimeUtc) {
     const [hh, mm] = tobtBooking.tobtTimeUtc.split(':').map(Number);
@@ -1310,9 +1509,9 @@ tobtLowerBound = tobtDate;
   tsatQueues[sector] = queue;
 
   const tsatStr =
-    candidate.getHours().toString().padStart(2, '0') +
+    candidate.getUTCHours().toString().padStart(2, '0') +
     ':' +
-    candidate.getMinutes().toString().padStart(2, '0');
+    candidate.getUTCMinutes().toString().padStart(2, '0');
 
   // Store TSAT as an object
   sharedTSAT[callsign] = {
@@ -1344,13 +1543,14 @@ function clearTSAT(sectorKey, callsign) {
 async function bootstrap() {
   loadNavFixes();
   loadFirData();
-  await refreshPilots();
   await loadPageVisibility();
   await loadSiteBanner();
 
   await refreshAdminSheet();   // 🔑 sets activeEventId + loads schedule rows
   await loadDepFlowsFromDb();  // needs activeEventId
   await loadTobtBookingsFromDb();
+
+  await refreshPilots();       // needs adminSheetCache + sharedFlowTypes for fake pilots
   wfWorldMapCache.clear();
 
 // Warm default map cache once per server start (no overrides)
@@ -1369,6 +1569,38 @@ await (async () => {
   buildFirAnalysis().then(() => console.log('[AIRSPACE] FIR analysis cache warmed')).catch(() => {});
 
   setInterval(refreshPilots, 60000);
+
+  // Cleanup stale pilot state every 2 minutes
+  setInterval(() => {
+    const activeCallsigns = new Set(cachedPilots.map(p => p.callsign));
+    let cleaned = 0;
+
+    // Clean sharedToggles
+    for (const cs of Object.keys(sharedToggles)) {
+      if (!activeCallsigns.has(cs)) { delete sharedToggles[cs]; cleaned++; }
+    }
+
+    // Clean sharedTSAT
+    for (const cs of Object.keys(sharedTSAT)) {
+      if (!activeCallsigns.has(cs)) { delete sharedTSAT[cs]; cleaned++; }
+    }
+
+    // Clean startedAircraft
+    for (const cs of Object.keys(startedAircraft)) {
+      if (!activeCallsigns.has(cs)) { delete startedAircraft[cs]; cleaned++; }
+    }
+
+    // Clean recentlyStarted (disconnected OR taxiing GS > 10)
+    for (const cs of Object.keys(recentlyStarted)) {
+      if (!activeCallsigns.has(cs)) { delete recentlyStarted[cs]; delete startedAircraft[cs]; cleaned++; continue; }
+      const pilot = cachedPilots.find(p => p.callsign === cs);
+      if (pilot && pilot.groundspeed > 10) { delete recentlyStarted[cs]; delete startedAircraft[cs]; cleaned++; }
+    }
+
+    if (cleaned > 0) {
+      console.log('[CLEANUP] Removed ' + cleaned + ' stale entries for disconnected pilots');
+    }
+  }, 120000);
 }
 
 
@@ -2692,7 +2924,14 @@ app.get('/view-suggestions', (req, res) => {
   res.redirect(301, '/suggest-airport');
 });
 
-bootstrap().catch(err => {
+httpServer.listen(port, '0.0.0.0', () => {
+  console.log('WorldFlight Planning starting on ' + port + ' (loading...)');
+});
+
+bootstrap().then(() => {
+  bootstrapComplete = true;
+  console.log('WorldFlight Planning is ready on ' + port);
+}).catch(err => {
   console.error('Startup failed:', err);
   process.exit(1);
 });
@@ -2736,7 +2975,7 @@ io.on('connection', async socket => {
   console.log('Client connected:', socket.id);
 
   const user = socket.request.session?.user?.data || null;
-const icaoFromQuery = socket.handshake.query?.icao || null;
+const icaoFromQuery = socket.handshake.query?.icao?.toUpperCase() || null;
 if (icaoFromQuery) {
   const room = `icao:${icaoFromQuery.toUpperCase()}`;
   socket.join(room);
@@ -2760,7 +2999,18 @@ socket.emit(
 
 // ✅ IMPORTANT: emit a string map, not objects (fixes [object Object])
 socket.emit('syncTSAT', extractTSATMap());
+socket.emit('upcomingTSATUpdate', buildUpcomingTSATsForICAO(icaoFromQuery, cachedPilots));
 
+socket.on('requestUpcomingTSAT', () => {
+  const data = buildUpcomingTSATsForICAO(icaoFromQuery, cachedPilots);
+  socket.emit('upcomingTSATUpdate', data);
+});
+
+socket.on('requestRecentlyStarted', () => {
+  if (icaoFromQuery) {
+    socket.emit('recentlyStartedUpdate', buildRecentlyStartedForICAO(icaoFromQuery));
+  }
+});
 socket.emit('tsatStartedUpdated', startedAircraft);
 
 if (icaoFromQuery) {
@@ -3077,11 +3327,7 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
   if (!sector || !enteredCid) return;
   if (!user || !user.cid) return;
 
-  // Verify CID matches logged-in user
-  if (String(enteredCid).trim() !== String(user.cid)) {
-    socket.emit('bookingError', { error: 'CID does not match your logged-in account.' });
-    return;
-  }
+  // CID check skipped — ATC/admin on departures page can assign to any pilot
 
   const [leg, dateUtc, depTimeUtc] = sector.split('|');
   if (!leg || !dateUtc || !depTimeUtc) return;
@@ -3763,6 +4009,75 @@ const aircraft = cachedPilots
 
 
 
+// Loading page while bootstrap is running
+let bootstrapComplete = false;
+app.use((req, res, next) => {
+  if (req.path === '/api/health') return res.json({ ready: bootstrapComplete });
+  if (bootstrapComplete) return next();
+  if (req.path.match(/\.(css|js|png|jpg|ico|svg|woff2?)$/)) return next();
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WorldFlight Planning — Starting</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      min-height:100vh; background:#020617; color:#e5e7eb;
+      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+      display:flex; align-items:center; justify-content:center; flex-direction:column;
+    }
+    .loader-card {
+      text-align:center; padding:48px 56px; max-width:460px;
+      background:linear-gradient(160deg,#0b1220,#0f172a);
+      border:1px solid #1e293b; border-radius:16px;
+      box-shadow:0 20px 40px rgba(0,0,0,.5);
+    }
+    .loader-card img { width:80px; height:80px; border-radius:50%; margin-bottom:20px; }
+    .loader-card h1 { font-size:20px; color:#38bdf8; margin-bottom:8px; }
+    .loader-card p { font-size:14px; color:#94a3b8; margin-bottom:24px; line-height:1.6; }
+    .spinner {
+      width:40px; height:40px; margin:0 auto 16px;
+      border:3px solid rgba(255,255,255,0.1);
+      border-top-color:#38bdf8;
+      border-radius:50%;
+      animation:spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .dots { color:#64748b; font-size:12px; }
+    .dots::after {
+      content:''; animation:dots 1.5s steps(4,end) infinite;
+    }
+    @keyframes dots {
+      0% { content:''; }
+      25% { content:'.'; }
+      50% { content:'..'; }
+      75% { content:'...'; }
+    }
+  </style>
+</head>
+<body>
+  <div class="loader-card">
+    <img src="/logo.png" alt="WorldFlight" />
+    <div class="spinner"></div>
+    <h1>WorldFlight Planning</h1>
+    <p>Loading schedule data, navigation database, and flight information.</p>
+    <div class="dots">Please wait</div>
+  </div>
+  <script>
+    (function check() {
+      fetch('/api/health').then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ready) window.location.reload();
+        else setTimeout(check, 1500);
+      }).catch(function() { setTimeout(check, 1500); });
+    })();
+  </script>
+</body>
+</html>`);
+});
+
 app.use(express.static('public', { index: false }));
 function parseUtcDateTime(dateUtc, timeUtc) {
   let year = new Date().getUTCFullYear();
@@ -3904,7 +4219,7 @@ app.get('/', (req, res) => {
     { title: 'Previous Destinations', desc: 'Explore every airport WorldFlight has visited over the years.',                icon: '📍', href: '/previous-destinations', public: true },
     { title: 'Airspace Management', desc: 'View FIR staffing requirements and timelines for the active schedule.',        icon: '🌐', href: '/airspace',             public: true, visKey: 'airspace' },
     { title: 'My Slots / Bookings',desc: 'Manage your booked departure and arrival slots.',                               icon: '✈️', href: '/my-slots',            public: false, visKey: 'my-slots' },
-    { title: 'WF Slot Management', desc: 'Controller tools for managing WorldFlight ATC slots.',                          icon: '🎧', href: '/atc',                 public: false, visKey: 'atc' },
+    { title: 'WF Flow Control', desc: 'Controller tools for managing WorldFlight ATC slots.',                          icon: '🎧', href: '/atc',                 public: false, visKey: 'atc' },
     { title: 'Admin Panel',        desc: 'Manage settings, page visibility, and site configuration.',                    icon: '🛠️', href: '/admin/control-panel', public: false, adminOnly: true },
   ];
 
@@ -7759,8 +8074,8 @@ app.post('/api/tobt/book', requireLogin, async (req, res) => {
     const userData = req.session.user.data;
     const cid = Number(userData.cid);
 
-    // Verify CID matches logged-in user
-    if (String(enteredCid).trim() !== String(cid)) {
+    // Verify CID matches logged-in user, unless it's a manual ATC assignment
+    if (!manual && String(enteredCid).trim() !== String(cid)) {
       return res.status(403).json({ error: 'CID does not match your logged-in account.' });
     }
 
@@ -7819,32 +8134,30 @@ const wantsManual = !isBookingOnly && manual === true;
       return res.status(409).json({ error: 'Slot already booked' });
     }
 
-    // 6️⃣ Use CID as identifier
-    const normalizedCallsign = String(cid);
+    // 6️⃣ Determine target CID (pilot's CID for manual assignment, logged-in CID otherwise)
+    const targetCid = manual ? Number(enteredCid) : cid;
 
     // 8️⃣ Prevent duplicate sector + callsign
     const sectorKey = parts.slice(0, 3).join('|');
 
     // block duplicates per-user per-sector (MODEL 2)
 for (const existing of Object.values(tobtBookingsByKey)) {
-  if (existing.cid !== cid) continue;
+  if (existing.cid !== targetCid) continue;
 
   const existingSectorKey = `${existing.from}-${existing.to}|${existing.dateUtc}|${existing.depTimeUtc}`;
   if (existingSectorKey === sectorKey) {
     return res.status(409).json({
-      error: 'You already have a booking for this sector.'
+      error: 'This pilot already has a booking for this sector.'
     });
   }
 }
 
 
-    // 9️⃣ Persist to DB
-    // Manual assignment => cid NULL
-    // Pilot booking     => cid user's CID
-    const storedCid = wantsManual && canEditIcao(userData, fromIcao)
-  ? null
-  : cid;
+    // 9️⃣ Persist to DB — always store the target pilot's CID
+    const storedCid = targetCid;
 
+
+    const normalizedCallsign = String(targetCid);
 
     await prisma.tobtBooking.create({
       data: {
@@ -7855,7 +8168,8 @@ for (const existing of Object.values(tobtBookingsByKey)) {
         to: to.toUpperCase(),
         dateUtc,
         depTimeUtc,
-        tobtTimeUtc
+        tobtTimeUtc,
+        manual: wantsManual
       }
     });
 
@@ -7868,7 +8182,8 @@ for (const existing of Object.values(tobtBookingsByKey)) {
       to: to.toUpperCase(),
       dateUtc,
       depTimeUtc,
-      tobtTimeUtc
+      tobtTimeUtc,
+      manual: wantsManual
     };
 
     const bookingKey = `${storedCid}:${slotKey}`;
@@ -7882,7 +8197,8 @@ tobtBookingsByKey[bookingKey] = {
   to: to.toUpperCase(),
   dateUtc,
   depTimeUtc,
-  tobtTimeUtc
+  tobtTimeUtc,
+  manual: wantsManual
 };
 
 if (!tobtBookingsByCid[storedCid]) {
@@ -7898,8 +8214,8 @@ tobtBookingsByCid[storedCid].add(bookingKey);
     return res.json({ success: true });
 
   } catch (err) {
-    console.error('[TOBT] Booking failed:', err);
-    return res.status(500).json({ error: 'Failed to book TOBT slot' });
+    console.error('[TOBT] Booking failed:', err.message || err);
+    return res.status(500).json({ error: 'Failed to book TOBT slot: ' + (err.message || 'Unknown error') });
   }
 });
 
@@ -11676,12 +11992,13 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
     { key: 'schedule',        label: 'WF Schedule',         icon: '🏠', desc: 'Main event schedule with slot booking' },
     { key: 'world-map',       label: 'Route Map',           icon: '🗺️', desc: 'Interactive world map with live flights' },
     { key: 'my-slots',        label: 'My Slots / Bookings', icon: '✈️', desc: 'Personal slot and booking overview' },
-    { key: 'atc',             label: 'WF Slot Management',  icon: '🎧', desc: 'Controller departure management view' },
+    { key: 'atc',             label: 'WF Flow Control',  icon: '🎧', desc: 'Controller departure management view' },
     { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' },
     { key: 'airspace',        label: 'Airspace Management',  icon: '🌐', desc: 'FIR staffing requirements and timelines' },
     { key: 'arrival-info',    label: 'Arrival Info',         icon: '🛬', desc: 'Arrival banner on airport portal pages' },
     { key: 'departure-info',  label: 'Departure Info',       icon: '🛫', desc: 'Departure banner on airport portal pages' },
-    { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
+    { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' },
+    { key: 'fake-pilots',     label: 'Test Pilot Data',      icon: '🧪', desc: 'Generate fake pilot departures at WF airports for testing' }
   ];
 
   const toggleRows = pages.map(p => {
@@ -11955,6 +12272,22 @@ app.post('/api/admin/page-visibility', requireAdmin, async (req, res) => {
   });
 
   pageVisibility[key] = enabled;
+
+  // Clean up fake data when fake-pilots is disabled
+  if (key === 'fake-pilots' && !enabled) {
+    // Remove fake bookings
+    for (const bk of Object.keys(tobtBookingsByKey)) {
+      if (tobtBookingsByKey[bk]._fake) {
+        const cid = tobtBookingsByKey[bk].cid;
+        delete tobtBookingsByKey[bk];
+        if (tobtBookingsByCid[cid]) delete tobtBookingsByCid[cid];
+      }
+    }
+    // Remove fake pilots from cache
+    cachedPilots = cachedPilots.filter(p => p.server !== 'FAKE');
+    console.log('[FAKE] Disabled — cleared fake pilots and bookings');
+  }
+
   res.json({ ok: true });
 });
 
@@ -12270,9 +12603,8 @@ app.get('/departures', async (req, res) => {
   const canEdit = isAdmin || isAerodromeController;
   const disabledAttr = canEdit ? '' : 'disabled';
 
-  // 4️⃣ Fetch VATSIM data
-  const response = await axios.get('https://data.vatsim.net/v3/vatsim-data.json');
-  const pilots = response.data.pilots;
+  // 4️⃣ Use cached VATSIM data (includes fake pilots when enabled)
+  const pilots = cachedPilots;
 
   // 5️⃣ Use pageIcao everywhere
   const departures = pilots.filter(
@@ -12293,6 +12625,12 @@ app.get('/departures', async (req, res) => {
 
   
   const CAN_EDIT = canEdit;
+
+  // Determine the flow mode for this ICAO (use the highest restriction)
+  const _depFlows = adminSheetCache.filter(r => r.from === pageIcao && r.to);
+  const hasSlotted = _depFlows.some(r => (sharedFlowTypes[r.from + '-' + r.to] || 'NONE') === 'SLOTTED');
+  const hasBookingOnly = _depFlows.some(r => (sharedFlowTypes[r.from + '-' + r.to] || 'NONE') === 'BOOKING_ONLY');
+  const pageFlowMode = hasSlotted ? 'SLOTTED' : hasBookingOnly ? 'BOOKING_ONLY' : 'NONE';
 
 
   
@@ -12318,10 +12656,10 @@ app.get('/departures', async (req, res) => {
   const wfStatus = getWorldFlightStatus(p);
 const isEventFlight = wfStatus.isWF;
 
-// Look up booking BY PILOT CALLSIGN
-const tobtBooking = getTobtBookingForCallsign(p.callsign, pageIcao);
+// Look up booking BY CID first, then fall back to callsign
+const tobtBooking = getTobtBookingForCid(p.cid, pageIcao) || getTobtBookingForCallsign(p.callsign, pageIcao);
 const isBooked = !!tobtBooking;
-const isManualTobt = !!tobtBooking && tobtBooking.cid === null;
+const isManualTobt = !!tobtBooking && !!tobtBooking.manual;
 
 
 let tobtCellHtml = '';
@@ -12329,7 +12667,7 @@ let tobtCellHtml = '';
 if (isEventFlight) {
   if (tobtBooking) {
     // 🔴 ATC-assigned TOBT → removable
-    if (CAN_EDIT && tobtBooking.cid === null) {
+    if (CAN_EDIT && tobtBooking.manual) {
       tobtCellHtml = `
         <div class="tobt-assigned">
           <strong>${tobtBooking.tobtTimeUtc}</strong>
@@ -12376,7 +12714,7 @@ if (isEventFlight) {
     } else {
       tobtCellHtml = `
       <div class="tobt-select-wrapper">
-        <select class="tobt-select" data-callsign="${p.callsign}">
+        <select class="tobt-select" data-callsign="${p.cid}">
           <option value="">Select TOBT</option>
           ${availableTobts.map(s =>
             `<option value="${s.slotKey}">${s.tobt}</option>`
@@ -12405,31 +12743,39 @@ let primaryStatusHtml = '';
     </span>`;
 } else {
   if (isManualTobt) {
-  primaryStatusHtml = `
-    <span
-      class="status-pill manual"
-      title="TOBT manually assigned by ATC"
-    >
-      <span class="status-icon">!</span>
-      Manual
-    </span>`;
-} else if (isBooked) {
-  primaryStatusHtml = `
-    <span
-      class="status-pill booked"
-      title="Has an event booking"
-    >
-      Booked
-    </span>`;
-} else {
-  primaryStatusHtml = `
-    <span
-      class="status-pill non-booked"
-      title="Flying to WF destination without a booking"
-    >
-      Non-Booked
-    </span>`;
-}
+    primaryStatusHtml = `
+      <span
+        class="status-pill manual"
+        title="TOBT manually assigned by ATC"
+      >
+        <span class="status-icon">!</span>
+        Manual
+      </span>`;
+  } else if (pageFlowMode === 'NONE') {
+    primaryStatusHtml = `
+      <span
+        class="status-pill booked"
+        title="Flying to an event destination"
+      >
+        Event
+      </span>`;
+  } else if (isBooked) {
+    primaryStatusHtml = `
+      <span
+        class="status-pill booked"
+        title="Has an event booking"
+      >
+        ${pageFlowMode === 'SLOTTED' ? 'Slotted' : 'Booked'}
+      </span>`;
+  } else {
+    primaryStatusHtml = `
+      <span
+        class="status-pill non-booked"
+        title="Flying to WF destination without a booking"
+      >
+        Non-Booked
+      </span>`;
+  }
 
   showRouteWarning = !wfStatus.routeMatch;
 }
@@ -12456,19 +12802,33 @@ let primaryStatusHtml = '';
   </td>
 
   <td class="callsign">
-  <span class="callsign-link" data-callsign="${p.callsign}">
+  <span class="callsign-link" data-callsign="${p.callsign}" data-cid="${p.cid}">
     ${p.callsign}
   </span>
 </td>
 
 
-  <td>${p.flight_plan.aircraft_faa || 'N/A'}</td>
+  <td>${(() => {
+    const raw = p.flight_plan.aircraft_faa || 'N/A';
+    const isUS = pageIcao.startsWith('K') || pageIcao.startsWith('PH') || pageIcao.startsWith('TJ');
+    const type = cleanAcType(raw);
+    if (isUS) return type;
+    const wake = getWakeCat(raw);
+    return wake ? type + '/' + wake : type;
+  })()}</td>
   <td>${p.flight_plan.arrival || 'N/A'}</td>
 
+  ${pageFlowMode === 'SLOTTED' ? `
   <td class="col-tobt">
-  ${tobtCellHtml}
-</td>
+    ${tobtCellHtml}
+  </td>
+  ` : pageFlowMode === 'BOOKING_ONLY' ? `
+  <td style="text-align:center;font-size:16px;font-weight:700;">
+    ${tobtBooking ? '<span style="color:#4ade80;">&#10003;</span>' : '<span style="color:#f87171;">&#10007;</span>'}
+  </td>
+  ` : ''}
 
+  ${pageFlowMode !== 'NONE' ? `
   <td class="col-toggle">
     <button
       class="toggle-btn"
@@ -12476,21 +12836,35 @@ let primaryStatusHtml = '';
       data-callsign="${p.callsign}"
       data-sector="${sectorKey}"
       ${disabledAttr}
-    >⬜</button>
+    ></button>
   </td>
+  ` : ''}
 
+  ${pageFlowMode === 'SLOTTED' ? `
   <td class="tsat-cell" data-callsign="${p.callsign}">
     <span class="tsat-time">-</span>
     ${CAN_EDIT ? `<button class="tsat-refresh" data-callsign="${p.callsign}" style="display:none;">⟳</button>` : ''}
   </td>
+  ` : ''}
 
   <td class="col-route">${routeHtml}</td>
 </tr>`;
 }).join('');
 
 
+  // Find flow restrictions for sectors departing from this ICAO
+  const depFlowBanners = adminSheetCache
+    .filter(r => r.from === pageIcao && r.to)
+    .map(r => {
+      const sector = r.from + '-' + r.to;
+      const ft = sharedFlowTypes[sector] || 'NONE';
+      const rate = sharedDepFlows[sector] || 0;
+      return { to: r.to, flowType: ft, rate, wf: r.number, atcRoute: r.atc_route || '', dateUtc: r.date_utc || '', depTimeUtc: r.dep_time_utc || '', arrTimeUtc: r.arr_time_utc || '' };
+    });
+
  const content = `
     <section class="card departures-page">
+      <a href="/atc" class="back-link">← Back to WF Flow Control</a>
 
       <div class="dep-page-header">
         <div class="dep-icao-badge">${pageIcao}</div>
@@ -12500,6 +12874,90 @@ let primaryStatusHtml = '';
         </div>
       </div>
 
+      ${depFlowBanners.length ? `
+        <div class="dep-flow-banners">
+          ${depFlowBanners.map(f => {
+            const label = f.flowType === 'BOOKING_ONLY' ? 'Booking Only'
+              : f.flowType === 'SLOTTED' ? 'Slotted'
+              : 'No Restrictions';
+            const cls = f.flowType === 'BOOKING_ONLY' ? 'dep-flow-banner-booking'
+              : f.flowType === 'SLOTTED' ? 'dep-flow-banner-slotted'
+              : 'dep-flow-banner-none';
+            return '<div class="dep-flow-banner ' + cls + '">'
+              + '<div class="dep-flow-banner-top">'
+              + '<span class="dep-flow-banner-route">' + pageIcao + ' → ' + f.to + '</span>'
+              + '<span class="dep-flow-banner-label">' + label + '</span>'
+              + (f.rate > 0 ? '<span class="dep-flow-banner-rate">' + f.rate + ' dep/hr</span>' : '')
+              + '</div>'
+              + (f.dateUtc || f.depTimeUtc ? '<div class="dep-flow-banner-time">' + f.dateUtc + (f.depTimeUtc ? (() => {
+                var pts = f.depTimeUtc.split(':');
+                if (pts.length < 2) return '';
+                var depMins = Number(pts[0]) * 60 + Number(pts[1]);
+                var fromMins = ((depMins - 60) % 1440 + 1440) % 1440;
+                var toMins = ((depMins + 60) % 1440 + 1440) % 1440;
+                var fmt = function(m) { return String(Math.floor(m / 60)).padStart(2,'0') + ':' + String(m % 60).padStart(2,'0'); };
+                return ' — Dep Window ' + fmt(fromMins) + ' - ' + fmt(toMins) + ' UTC';
+              })() : '') + '</div>' : '')
+              + (f.atcRoute ? '<div class="dep-flow-banner-atc">' + f.atcRoute + '</div>' : '')
+              + '</div>';
+          }).join('')}
+        </div>
+        <style>
+          .dep-flow-banners { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+          .dep-flow-banner {
+            padding: 10px 14px; border-radius: 8px; font-size: 13px;
+            border: 1px solid var(--border); flex: 1; min-width: 280px;
+          }
+          .dep-flow-banner-top { display: flex; align-items: center; gap: 10px; }
+          .dep-flow-banner-time {
+            margin-top: 4px; font-size: 12px; color: var(--text); font-weight: 500;
+          }
+          .dep-flow-banner-atc {
+            margin-top: 4px; font-family: monospace; font-size: 11px;
+            color: var(--muted); line-height: 1.5; word-break: break-word;
+          }
+          .dep-flow-banner-route { font-family: monospace; font-weight: 700; color: var(--text); }
+          .dep-flow-banner-label { font-weight: 600; }
+          .dep-flow-banner-rate { color: var(--muted); font-size: 12px; }
+          .dep-flow-banner-booking { border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.06); }
+          .dep-flow-banner-booking .dep-flow-banner-label { color: #fbbf24; }
+          .dep-flow-banner-slotted { border-color: rgba(34,197,94,0.3); background: rgba(34,197,94,0.06); }
+          .dep-flow-banner-slotted .dep-flow-banner-label { color: #4ade80; }
+          .dep-flow-banner-none { border-color: var(--border); }
+          .dep-flow-banner-none .dep-flow-banner-label { color: var(--muted2); }
+
+          .tobt-grid {
+            display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;
+            max-height: 280px; overflow-y: auto;
+            scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.08) transparent;
+          }
+          .tobt-grid::-webkit-scrollbar { width: 4px; }
+          .tobt-grid::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+          .tobt-chip {
+            display: flex; flex-direction: column; align-items: center;
+            padding: 8px 12px; border-radius: 8px;
+            background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.15);
+            min-width: 70px; transition: background .15s;
+          }
+          .tobt-chip:hover { background: rgba(56,189,248,0.12); }
+
+          .tobt-assign-list { display: flex; flex-direction: column; gap: 4px; max-height: 250px; overflow-y: auto; }
+          .tobt-assign-pilot {
+            display: flex; align-items: center; padding: 8px 12px;
+            background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+            border-radius: 6px; cursor: pointer; transition: all .15s;
+            color: var(--text);
+          }
+          .tobt-assign-pilot:hover { background: rgba(56,189,248,0.08); border-color: var(--accent); }
+          .tobt-chip-time {
+            font-family: monospace; font-size: 15px; font-weight: 700; color: var(--accent);
+          }
+          .tobt-chip-dest {
+            font-size: 11px; color: var(--muted); margin-top: 2px;
+          }
+        </style>
+      ` : ''}
+
       ${!isAerodromeController ? `
         <div class="icao-warning">
           ${canEdit
@@ -12508,15 +12966,15 @@ let primaryStatusHtml = '';
         </div>
       ` : ''}
 
-      <div class="tsat-wrapper" style="padding-top:0;">
-        <div class="tsat-top-row three-cols">
+      <div class="tsat-wrapper" style="padding-top:0;${pageFlowMode === 'NONE' ? 'display:none;' : ''}">
+        <div class="tsat-top-row ${pageFlowMode === 'SLOTTED' ? 'three-cols' : 'two-cols'}">
           <div class="tsat-col tsat-panel">
             <div class="tsat-panel-header">
               <h3>Upcoming Start</h3>
             </div>
             <div class="table-scroll">
               <table class="departures-table" id="tsatQueueTable">
-                <thead><tr><th>Callsign</th><th>TSAT</th><th>Started</th></tr></thead>
+                <thead><tr><th>Callsign</th><th>Target Start</th><th>Started</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
@@ -12528,22 +12986,24 @@ let primaryStatusHtml = '';
             </div>
             <div class="table-scroll">
               <table class="departures-table" id="recentlyStartedTable">
+                <colgroup><col style="width:35%"><col style="width:25%"><col style="width:40%"></colgroup>
                 <thead><tr><th>Callsign</th><th>Started At</th><th>Actions</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
           </div>
 
-          <div class="tsat-col tsat-panel">
+          <div class="tsat-col tsat-panel" ${pageFlowMode !== 'SLOTTED' ? 'style="display:none;"' : ''}>
             <div class="tsat-panel-header">
-              <h3>Available WF TOBTs</h3>
+              <h3 id="unassignedTobtHeading">Available WF TOBTs</h3>
             </div>
-            <div class="table-scroll">
-              <table class="departures-table" id="unassignedTobtTable">
-                <thead><tr><th>TOBT</th><th>Dest</th><th>TOBT</th><th>Dest</th></tr></thead>
-                <tbody><tr><td colspan="4" style="text-align:center;padding:20px 0;color:var(--muted);font-size:12px;">No TOBTs available</td></tr></tbody>
-              </table>
+            <div id="unassignedTobtGrid" class="tobt-grid">
+              <div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">No spare TOBTs available</div>
             </div>
+            <table class="departures-table" id="unassignedTobtTable" style="display:none;">
+              <thead><tr><th>TOBT</th><th>Dest</th><th>TOBT</th><th>Dest</th></tr></thead>
+              <tbody></tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -12552,17 +13012,36 @@ let primaryStatusHtml = '';
         <div class="dep-search-bar">
           <input id="callsignSearch" placeholder="Search by callsign..." />
         </div>
+        ${depFlowBanners.length ? '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;margin-bottom:8px;">'
+          + '<span style="font-size:11px;color:var(--muted);text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Filter:</span>'
+          + depFlowBanners.map(f =>
+            '<button class="dest-filter-btn dest-filter-cb" data-dest="' + f.to + '">Show ' + f.to + ' only</button>'
+          ).join('')
+          + '<span id="filterStatus" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>'
+          + '</div>'
+          + '<style>'
+          + '.dest-filter-btn {'
+          + '  padding:6px 14px; font-size:12px; font-weight:600; border-radius:6px;'
+          + '  border:1px solid var(--border); background:rgba(255,255,255,0.03);'
+          + '  color:var(--muted); cursor:pointer; transition:all .15s;'
+          + '}'
+          + '.dest-filter-btn:hover { border-color:var(--accent); color:var(--text); }'
+          + '.dest-filter-btn.active {'
+          + '  background:var(--accent); color:#020617; border-color:var(--accent);'
+          + '}'
+          + '</style>'
+          : ''}
         <div class="table-scroll">
           <table class="departures-table" id="mainDeparturesTable">
             <thead>
               <tr>
-                <th>Status</th>
-                <th>Callsign</th>
-                <th>Aircraft</th>
-                <th>Dest</th>
-                <th>WF TOBT</th>
-                <th class="col-toggle">READY?</th>
-                <th>TSAT</th>
+                <th class="sortable-th" data-col="0">Status <span class="sort-arrow"></span></th>
+                <th class="sortable-th" data-col="1">Callsign <span class="sort-arrow"></span></th>
+                <th class="sortable-th" data-col="2">A/C Type <span class="sort-arrow"></span></th>
+                <th class="sortable-th" data-col="3">Dest <span class="sort-arrow"></span></th>
+                ${pageFlowMode === 'SLOTTED' ? '<th class="sortable-th" data-col="4">WF TOBT <span class="sort-arrow"></span></th>' : pageFlowMode === 'BOOKING_ONLY' ? '<th class="sortable-th" data-col="4" style="text-align:center;">Has Booking? <span class="sort-arrow"></span></th>' : ''}
+                ${pageFlowMode !== 'NONE' ? '<th class="col-toggle">READY?</th>' : ''}
+                ${pageFlowMode === 'SLOTTED' ? '<th class="sortable-th" data-col="6">TSAT <span class="sort-arrow"></span></th>' : ''}
                 <th class="col-route">ATC Route</th>
               </tr>
             </thead>
@@ -12587,22 +13066,143 @@ let primaryStatusHtml = '';
 const searchInput = document.getElementById('callsignSearch');
 const savedFilter = localStorage.getItem('callsignFilter') || '';
 searchInput.value = savedFilter;
-applyFilter(savedFilter);
 
-function applyFilter(filter) {
-  const upper = filter.toUpperCase();
-  document.querySelectorAll('#mainDeparturesTable tbody tr').forEach(row => {
-
-    const txt = row.children[1].innerText.toUpperCase();
-    row.style.display = txt.includes(upper) ? '' : 'none';
+function applyFilter() {
+  const upper = (searchInput.value || '').toUpperCase();
+  var activeDests = [];
+  var visibleCount = 0, totalCount = 0;
+  document.querySelectorAll('.dest-filter-cb.active').forEach(function(btn) {
+    activeDests.push(btn.dataset.dest);
   });
+
+  document.querySelectorAll('#mainDeparturesTable tbody tr').forEach(row => {
+    const callsign = row.children[1].innerText.toUpperCase();
+    const dest = row.children[3]?.innerText?.toUpperCase() || '';
+
+    var matchSearch = !upper || callsign.includes(upper);
+    var matchDest = !activeDests.length || activeDests.some(function(d) { return dest === d; });
+
+    row.style.display = (matchSearch && matchDest) ? '' : 'none';
+    if (matchSearch && matchDest) visibleCount++;
+    totalCount++;
+  });
+
+  var statusEl = document.getElementById('filterStatus');
+  if (statusEl) {
+    if (activeDests.length || upper) {
+      statusEl.textContent = visibleCount + ' of ' + totalCount + ' shown';
+      statusEl.style.color = 'var(--accent)';
+    } else {
+      statusEl.textContent = '';
+    }
+  }
 }
 
 searchInput.addEventListener('input', function () {
-  const val = this.value;
-  localStorage.setItem('callsignFilter', val);
-  applyFilter(val);
+  localStorage.setItem('callsignFilter', this.value);
+  applyFilter();
 });
+
+// Restore saved dest filters
+var savedDests = JSON.parse(localStorage.getItem('destFilter') || '[]');
+document.querySelectorAll('.dest-filter-cb').forEach(function(btn) {
+  if (savedDests.indexOf(btn.dataset.dest) !== -1) btn.classList.add('active');
+  btn.addEventListener('click', function() {
+    btn.classList.toggle('active');
+    var active = [];
+    document.querySelectorAll('.dest-filter-cb.active').forEach(function(b) { active.push(b.dataset.dest); });
+    localStorage.setItem('destFilter', JSON.stringify(active));
+    applyFilter();
+  });
+});
+
+applyFilter();
+
+/* ----------------------------------------------------
+   TABLE SORTING
+---------------------------------------------------- */
+(function() {
+  var table = document.getElementById('mainDeparturesTable');
+  if (!table) return;
+  var currentCol = -1;
+  var currentDir = 'asc';
+  // Tag rows with original index for reset
+  Array.from(table.querySelector('tbody').children).forEach(function(r, i) {
+    r.dataset.origIdx = i;
+  });
+
+  // Add reset button (hidden initially)
+  var resetBtn = document.createElement('button');
+  resetBtn.className = 'dest-filter-btn';
+  resetBtn.textContent = 'Reset Sort';
+  resetBtn.style.display = 'none';
+
+  var filterRow = document.querySelector('[style*="FILTER"]')?.parentElement || table.closest('.dep-main-section')?.querySelectorAll('div')[1];
+  var filterContainer = document.querySelector('.dest-filter-btn')?.parentElement;
+  if (filterContainer) {
+    filterContainer.appendChild(resetBtn);
+  } else {
+    var searchBar = table.closest('.dep-main-section')?.querySelector('.dep-search-bar');
+    if (searchBar) searchBar.appendChild(resetBtn);
+  }
+
+  resetBtn.addEventListener('click', function() {
+    currentCol = -1;
+    table.querySelectorAll('.sort-arrow').forEach(function(a) { a.className = 'sort-arrow'; });
+    var tbody = table.querySelector('tbody');
+    var rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort(function(a, b) { return (Number(a.dataset.origIdx) || 0) - (Number(b.dataset.origIdx) || 0); });
+    rows.forEach(function(r) { tbody.appendChild(r); });
+    resetBtn.style.display = 'none';
+
+    // Clear search and dest filters
+    var searchInput = document.getElementById('callsignSearch');
+    if (searchInput) { searchInput.value = ''; localStorage.removeItem('callsignFilter'); }
+    document.querySelectorAll('.dest-filter-cb.active').forEach(function(b) { b.classList.remove('active'); });
+    localStorage.removeItem('destFilter');
+    applyFilter();
+  });
+
+  table.querySelectorAll('.sortable-th').forEach(function(th) {
+    th.addEventListener('click', function() {
+      var col = Number(th.dataset.col);
+
+      if (currentCol === col) {
+        currentDir = currentDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        currentCol = col;
+        currentDir = 'asc';
+      }
+
+      table.querySelectorAll('.sort-arrow').forEach(function(a) { a.className = 'sort-arrow'; });
+      th.querySelector('.sort-arrow').classList.add(currentDir);
+
+      var tbody = table.querySelector('tbody');
+      var rows = Array.from(tbody.querySelectorAll('tr'));
+
+      rows.sort(function(a, b) {
+        var cellA = a.children[col];
+        var cellB = b.children[col];
+        if (!cellA || !cellB) return 0;
+
+        var va = (cellA.innerText || cellA.textContent || '').trim();
+        var vb = (cellB.innerText || cellB.textContent || '').trim();
+
+        var na = parseFloat(va.replace(':', '.'));
+        var nb = parseFloat(vb.replace(':', '.'));
+        if (!isNaN(na) && !isNaN(nb)) {
+          return currentDir === 'asc' ? na - nb : nb - na;
+        }
+
+        var cmp = va.localeCompare(vb);
+        return currentDir === 'asc' ? cmp : -cmp;
+      });
+
+      rows.forEach(function(r) { tbody.appendChild(r); });
+      resetBtn.style.display = '';
+    });
+  });
+})();
 
 /* ----------------------------------------------------
    ROUTE EXPAND/COLLAPSE
@@ -12709,33 +13309,135 @@ const socket = io({
 
 
 function renderUnassignedTobtTable(data) {
+  const grid = document.getElementById('unassignedTobtGrid');
+  if (!grid) return;
+
+  var heading = document.getElementById('unassignedTobtHeading');
+  if (heading) {
+    heading.textContent = data.length
+      ? 'Available WF TOBTs (Click to Assign)'
+      : 'Available WF TOBTs';
+  }
+
+  if (!data.length) {
+    grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">No spare TOBTs available</div>';
+    return;
+  }
+
+  grid.innerHTML = data.slice(0, 20).map(function(s) {
+    return '<div class="tobt-chip" data-slotkey="' + s.slotKey + '" data-tobt="' + s.tobt + '" data-to="' + s.to + '" style="cursor:pointer;">'
+      + '<span class="tobt-chip-time">' + s.tobt + '</span>'
+      + '<span class="tobt-chip-dest">' + s.to + '</span>'
+      + '</div>';
+  }).join('');
+
+  // Click chip to assign to a non-booked pilot
+  grid.querySelectorAll('.tobt-chip').forEach(function(chip) {
+    chip.addEventListener('click', function() {
+      var slotKey = chip.dataset.slotkey;
+      var tobt = chip.dataset.tobt;
+      var dest = chip.dataset.to;
+
+      // Find non-booked pilots going to this destination
+      var rows = Array.from(document.querySelectorAll('#mainDeparturesTable tbody tr'));
+      var nonBooked = [];
+      rows.forEach(function(row) {
+        var statusCell = row.children[0];
+        if (!statusCell) return;
+        var hasNonBooked = statusCell.querySelector('.non-booked');
+        if (!hasNonBooked) return;
+        var destCell = row.children[3];
+        if (!destCell || destCell.textContent.trim() !== dest) return;
+        var csEl = row.querySelector('.callsign-link');
+        var callsign = csEl ? csEl.textContent.trim() : row.children[1]?.textContent?.trim();
+        var cid = csEl ? (csEl.dataset.cid || '') : '';
+        if (callsign && cid) nonBooked.push({ callsign: callsign, cid: cid });
+      });
+
+      if (!nonBooked.length) {
+        var overlay = document.createElement('div');
+        overlay.className = 'modal';
+        overlay.innerHTML = '<div class="modal-backdrop"></div>'
+          + '<div class="modal-dialog" style="width:340px;padding:24px;text-align:center;">'
+          + '<div style="font-size:28px;margin-bottom:12px;">✈️</div>'
+          + '<h3 style="margin:0 0 8px;">No Pilots Available</h3>'
+          + '<p style="color:var(--muted);font-size:13px;margin:0 0 16px;">No non-booked pilots flying to <strong style="color:var(--accent);">' + dest + '</strong></p>'
+          + '<button class="modal-btn modal-btn-cancel" style="width:100%;">OK</button>'
+          + '</div>';
+        document.body.appendChild(overlay);
+        overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+        overlay.querySelector('.modal-btn').addEventListener('click', function() { overlay.remove(); });
+        return;
+      }
+
+      // Build modal
+      var overlay = document.createElement('div');
+      overlay.className = 'modal';
+      overlay.innerHTML = '<div class="modal-backdrop"></div>'
+        + '<div class="modal-dialog" style="width:360px;padding:20px;">'
+        + '<h3 style="margin:0 0 8px;">Assign ' + tobt + ' TOBT</h3>'
+        + '<p style="color:var(--muted);font-size:12px;margin-bottom:12px;">Select a pilot to assign this slot to:</p>'
+        + '<div class="tobt-assign-list">'
+        + nonBooked.map(function(p) {
+            return '<button class="tobt-assign-pilot" data-cid="' + p.cid + '" data-slotkey="' + slotKey + '">'
+              + '<span style="font-family:monospace;font-weight:700;color:var(--accent);">' + p.callsign + '</span>'
+              + '<span style="font-size:11px;color:var(--muted);margin-left:8px;">→ ' + dest + '</span>'
+              + '</button>';
+          }).join('')
+        + '</div>'
+        + '<div class="modal-actions" style="margin-top:12px;">'
+        + '<button class="modal-btn modal-btn-cancel" id="closeTobtAssign">Cancel</button>'
+        + '</div></div>';
+      document.body.appendChild(overlay);
+
+      overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+      overlay.querySelector('#closeTobtAssign').addEventListener('click', function() { overlay.remove(); });
+
+      overlay.querySelectorAll('.tobt-assign-pilot').forEach(function(btn) {
+        btn.addEventListener('click', async function() {
+          var cid = btn.dataset.cid;
+          var sk = btn.dataset.slotkey;
+          btn.disabled = true;
+          btn.textContent = 'Assigning...';
+
+          var res = await fetch('/api/tobt/book', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ slotKey: sk, callsign: cid, manual: true })
+          });
+
+          if (res.ok) {
+            overlay.remove();
+            location.reload();
+          } else {
+            var data = await res.json().catch(function() { return {}; });
+            alert(data.error || 'Failed to assign');
+            btn.disabled = false;
+            btn.textContent = 'Retry';
+          }
+        });
+      });
+    });
+  });
+
+  // Keep old table hidden but functional for backward compat
   const tbody = document.querySelector('#unassignedTobtTable tbody');
   if (!tbody) return;
-
   tbody.innerHTML = '';
 
   const MAX_ROWS = 6;
   const MAX_ITEMS = MAX_ROWS * 2;
-
   const visible = data.slice(0, MAX_ITEMS);
-
-  if (!visible.length) {
-    tbody.innerHTML =
-      '<tr><td colspan="4" style="text-align:center;padding:20px 0;color:var(--muted);font-size:12px;">No TOBTs available</td></tr>';
-    return;
-  }
-
   const half = Math.ceil(visible.length / 2);
   const left = visible.slice(0, half);
   const right = visible.slice(half);
 
   for (let i = 0; i < MAX_ROWS; i++) {
     const tr = document.createElement('tr');
-
     const leftItem = left[i];
     const rightItem = right[i];
 
-    // Left column
     if (leftItem) {
       tr.innerHTML +=
         '<td>' + leftItem.tobt + '</td>' +
@@ -12744,7 +13446,6 @@ function renderUnassignedTobtTable(data) {
       tr.innerHTML += '<td></td><td></td>';
     }
 
-    // Right column
     if (rightItem) {
       tr.innerHTML +=
         '<td>' + rightItem.tobt + '</td>' +
@@ -12782,7 +13483,7 @@ const rowClass = getRowColorClass(tsatValue);
 if (rowClass) tr.classList.add(rowClass);
 
 tr.innerHTML =
-  '<td>' + item.callsign + '</td>' +
+  '<td><span class="callsign-link" data-callsign="' + item.callsign + '">' + item.callsign + '</span></td>' +
   '<td>' + tsatValue + '</td>' +
   '<td>' +
     '<input type="checkbox" class="tsat-started-check" data-callsign="' +
@@ -12819,6 +13520,12 @@ socket.on('upcomingTSATUpdate', data => {
 socket.on('recentlyStartedUpdate', data => {
   renderRecentlyStartedTable(data);
 });
+
+// Request fresh data after listeners are set up (delay to allow syncState to process first)
+setTimeout(function() {
+  socket.emit('requestUpcomingTSAT');
+  socket.emit('requestRecentlyStarted');
+}, 500);
 
 socket.on('unassignedTobtUpdate', data => {
   renderUnassignedTobtTable(data);
@@ -12959,7 +13666,7 @@ socket.on('syncState', state => {
     );
     if (!btn) return;
 
-    btn.innerText = '✅';
+    btn.innerHTML = '';
     btn.classList.add('active');
   });
 });
@@ -12974,7 +13681,8 @@ socket.on('toggleUpdated', ({ callsign, type, value }) => {
   );
   if (!btn) return;
 
-  btn.innerText = value ? '✅' : '⬜';
+  btn.innerHTML = '';
+  btn.classList.toggle('active', !!value);
   btn.classList.toggle('active', value);
 });
 
@@ -13025,7 +13733,8 @@ document.addEventListener('click', function (e) {
   const sector = btn.getAttribute('data-sector') || null;
 
   const isActive = btn.classList.toggle('active');
-  btn.innerText = isActive ? '✅' : '⬜';
+  btn.innerHTML = '';
+  btn.classList.toggle('active', isActive);
 
   socket.emit('updateToggle', { callsign, type, value: isActive, sector });
 
@@ -13080,7 +13789,7 @@ function renderRecentlyStartedTable(data) {
     const tr = document.createElement('tr');
 
     tr.innerHTML =
-  '<td>' + item.callsign + '</td>' +
+  '<td><span class="callsign-link" data-callsign="' + item.callsign + '">' + item.callsign + '</span></td>' +
   '<td>' + item.startedAt + '</td>' +
   '<td>' +
   '<button class="send-back-btn action-btn" data-callsign="' + item.callsign + '"' + disabledAttr + '>' +
@@ -13219,7 +13928,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 res.send(
   renderLayout({
-    title: 'ATC Slot Management',
+    title: 'WF Flow Control',
     user,
     isAdmin,
     layoutClass: 'dashboard-full',
@@ -13247,20 +13956,20 @@ app.post('/api/tobt/clear-manual', requireLogin, async (req, res) => {
   // 1) Identify matching manual bookings from in-memory cache (source of UI truth)
   const matchingSlotKeys = Object.keys(tobtBookingsByKey).filter(k => {
     const b = tobtBookingsByKey[k];
-    return b && b.from === from && b.callsign === cs && b.cid === null;
+    return b && b.from === from && b.callsign === cs && b.manual;
   });
 
   if (matchingSlotKeys.length === 0) {
     // Still attempt DB cleanup in case cache is stale, but tell client nothing was found in memory
     await prisma.tobtBooking.deleteMany({
-      where: { from, callsign: cs, cid: null }
+      where: { from, callsign: cs, manual: true }
     });
     return res.json({ success: true, removed: 0 });
   }
 
   // 2) Delete from DB (authoritative persistence)
   await prisma.tobtBooking.deleteMany({
-    where: { from, callsign: cs, cid: null }
+    where: { from, callsign: cs, manual: true }
   });
 
   // 3) Remove from in-memory cache so the UI updates
@@ -13383,9 +14092,36 @@ app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
 
   
 
+  // Build flow status from active schedule
+  const flowStatuses = adminSheetCache
+    .filter(r => r.from && r.to)
+    .map(r => {
+      const sector = r.from + '-' + r.to;
+      const rate = sharedDepFlows[sector] || 0;
+      const ft = sharedFlowTypes[sector] || 'NONE';
+      return { wf: r.number, from: r.from, to: r.to, rate, flowType: ft };
+    });
+
+  const activeFlows = flowStatuses.filter(f => f.flowType !== 'NONE');
+  const noRestrictions = flowStatuses.filter(f => f.flowType === 'NONE');
+
+  const flowCards = flowStatuses.map(f => {
+    const typeLabel = f.flowType === 'BOOKING_ONLY' ? 'Booking Only'
+      : f.flowType === 'SLOTTED' ? 'Slotted'
+      : 'No Restrictions';
+    const typeClass = f.flowType === 'BOOKING_ONLY' ? 'flow-status-booking'
+      : f.flowType === 'SLOTTED' ? 'flow-status-slotted'
+      : 'flow-status-none';
+    return '<div class="flow-status-card ' + typeClass + '">'
+      + '<div class="flow-status-sector">' + f.from + ' → ' + f.to + '</div>'
+      + '<div class="flow-status-type">' + typeLabel + '</div>'
+      + (f.rate > 0 ? '<div class="flow-status-rate">' + f.rate + '/hr</div>' : '')
+      + '</div>';
+  }).join('');
+
   const content = `
     <section class="card">
-      <h2>ATC Slot Management</h2>
+      <h2>WF Flow Control</h2>
       <p>Select an airport to manage ground departures.</p>
 
       <form action="/departures" method="GET" class="icao-search">
@@ -13399,50 +14135,57 @@ app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
         <button type="submit">Load Departures</button>
       </form>
     </section>
-  `;
 
-  res.send(
-    renderLayout({
-      title: 'ATC Slot Management',
-      user,
-      isAdmin,
-      layoutClass: 'dashboard-full',
-      content
-    })
-  );
-});
-
-// ===== AIRPORT FLOW PAGE =====
-app.get('/airport-flow', requireLogin, requirePageEnabled('atc'), (req, res) => {
-  if (!req.session.user || !req.session.user.data) {
-    return res.redirect('/');
-  }
-
-  const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
-
-  const content = `
-    <section class="card">
-      <h2>Airport Flow</h2>
-      <p>Select an airport to manage departure flow and ground operations.</p>
-
-      <form action="/departures" method="GET" class="icao-search">
-        <input type="hidden" name="mode" value="flow" />
-        <input
-          type="text"
-          name="icao"
-          placeholder="Enter ICAO (e.g. EGLL)"
-          maxlength="4"
-          required
-        />
-        <button type="submit">Load Airport</button>
-      </form>
+    <section class="card" style="margin-top:16px;">
+      <h2>Current Flow Restrictions</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">
+        ${activeFlows.length} sector${activeFlows.length !== 1 ? 's' : ''} with restrictions,
+        ${noRestrictions.length} with no restrictions
+      </p>
+      <div class="flow-status-grid">
+        ${flowCards || '<p style="color:var(--muted);">No sectors configured.</p>'}
+      </div>
     </section>
+
+    <style>
+      .flow-status-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 8px;
+      }
+      .flow-status-card {
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,0.02);
+      }
+      .flow-status-sector {
+        font-family: monospace;
+        font-weight: 700;
+        font-size: 14px;
+        color: var(--text);
+      }
+      .flow-status-type {
+        font-size: 12px;
+        font-weight: 600;
+        margin-top: 4px;
+      }
+      .flow-status-rate {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .flow-status-booking .flow-status-type { color: #f59e0b; }
+      .flow-status-slotted .flow-status-type { color: #4ade80; }
+      .flow-status-none .flow-status-type { color: var(--muted2); }
+      .flow-status-booking { border-color: rgba(245,158,11,0.2); }
+      .flow-status-slotted { border-color: rgba(34,197,94,0.2); }
+    </style>
   `;
 
   res.send(
     renderLayout({
-      title: 'Airport Flow',
+      title: 'WF Flow Control',
       user,
       isAdmin,
       layoutClass: 'dashboard-full',
@@ -15194,7 +15937,5 @@ app.get('/logout', (req, res) => {
 });
 
 
-/* ===== SERVER START ===== */
-httpServer.listen(port, '0.0.0.0', () => {
-  console.log(`WorldFlight Planning is running on ${port}`);
-});
+/* ===== SERVER START (after bootstrap) ===== */
+// Server starts only after all data is loaded

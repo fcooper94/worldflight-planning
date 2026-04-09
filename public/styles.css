@@ -42,6 +42,14 @@
 /* ===== Reset / base ===== */
 *{ box-sizing:border-box; }
 
+/* Sortable table headers */
+.sortable-th { cursor:pointer; user-select:none; }
+.sortable-th:hover { color:var(--accent); }
+.sort-arrow { font-size:10px; margin-left:3px; opacity:0.4; }
+.sort-arrow.asc::after { content:'▲'; opacity:1; }
+.sort-arrow.desc::after { content:'▼'; opacity:1; }
+.sortable-th:hover .sort-arrow { opacity:0.7; }
+
 /* Global scrollbar styling */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -447,6 +455,16 @@ body.sidebar-collapsed .topbar{ padding-left: var(--sidebar-collapsed); }
 /* =========================
    Dashboard layouts
    ========================= */
+.back-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+  display: inline-block;
+  margin-bottom: 8px;
+}
+.back-link:hover {
+  text-decoration: underline;
+}
 .dashboard{
   padding:48px;
   display:grid;
@@ -812,6 +830,10 @@ select{ cursor:pointer; }
   grid-template-columns: repeat(3, 1fr);
   align-items: stretch;
 }
+.tsat-top-row.two-cols {
+  grid-template-columns: repeat(2, 1fr);
+  align-items: stretch;
+}
 .tsat-col {
   display: flex;
   flex-direction: column;
@@ -842,16 +864,18 @@ select{ cursor:pointer; }
 
 /* --- Refresh button --- */
 .tsat-refresh {
-  margin-left: 10px;
+  margin-left: 6px;
   border: none;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 13px;
   background: linear-gradient(180deg, var(--wf-green), var(--wf-green-dark));
   color: #fff;
-  border-radius: 8px;
-  padding: 6px 10px;
-  box-shadow: 0 0 8px var(--wf-green-glow);
-  transition: transform .15s ease, box-shadow .15s ease;
+  border-radius: 6px;
+  padding: 2px 6px;
+  box-shadow: none;
+  transition: transform .15s ease;
+  vertical-align: middle;
+  line-height: 1;
 }
 .tsat-refresh:hover { transform: rotate(90deg) scale(1.05); box-shadow: 0 0 14px rgba(24,199,126,0.9); }
 .tsat-refresh:active { transform: scale(.95); }
@@ -890,13 +914,35 @@ select{ cursor:pointer; }
 #tsatQueueTable th, #tsatQueueTable td,
 #recentlyStartedTable th, #recentlyStartedTable td,
 #unassignedTobtTable th, #unassignedTobtTable td {
-  padding: 0 8px;
+  padding: 6px 10px;
 }
-.tsat-panel .departures-table { border-collapse: collapse; }
-.tsat-panel .departures-table th,
+.tsat-panel .departures-table { border-collapse: separate; border-spacing: 0 3px; }
+.tsat-panel .departures-table th { border: none; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
 .tsat-panel .departures-table td { border: none; }
 .tsat-panel .departures-table thead tr { border: none; }
-.tsat-panel .departures-table tbody tr { border: none; }
+.tsat-panel .departures-table tbody tr {
+  border: none;
+  background: rgba(255,255,255,0.02);
+  border-radius: 6px;
+  transition: background .15s;
+}
+.tsat-panel .departures-table tbody tr:hover { background: rgba(255,255,255,0.05); }
+
+/* Upcoming TSAT callsign styling */
+#tsatQueueTable td:first-child {
+  font-family: monospace; font-weight: 700; color: var(--accent); font-size: 14px;
+}
+#tsatQueueTable td:nth-child(2) {
+  font-family: monospace; font-weight: 600; font-size: 15px; color: var(--text);
+}
+
+/* Recently Started callsign styling */
+#recentlyStartedTable td:first-child {
+  font-family: monospace; font-weight: 700; color: #4ade80; font-size: 14px;
+}
+#recentlyStartedTable td:nth-child(2) {
+  font-family: monospace; font-size: 14px; color: var(--muted);
+}
 
 /* --- Action buttons --- */
 .action-btn, .book-slot-btn, .plan-btn {
@@ -918,25 +964,37 @@ select{ cursor:pointer; }
 .action-btn:hover { transform: scale(1.05); }
 
 .send-back-btn, .delete-started-btn {
-  height: 28px;
+  height: 24px;
   padding: 0 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
 }
-.send-back-btn:hover { border-color: #18c77e; color: #fff; box-shadow: 0 0 10px rgba(24,199,126,0.45); }
-.delete-started-btn { padding: 0 8px !important; height: 28px !important; border-radius: 8px; }
-.delete-started-btn:hover { border-color: #ff6b6b; color: #ff6b6b; box-shadow: 0 0 10px rgba(255,107,107,0.45); }
-.delete-started-btn .trash-icon { stroke: currentColor; display: block; pointer-events: none; }
+.send-back-btn {
+  background: rgba(56,189,248,0.08);
+  border-color: rgba(56,189,248,0.2);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.send-back-btn:hover { background: rgba(56,189,248,0.15); border-color: var(--accent); color: #fff; transform: none; }
+.delete-started-btn {
+  padding: 0 8px !important; height: 24px !important; border-radius: 6px;
+  background: rgba(239,68,68,0.08);
+  border-color: rgba(239,68,68,0.2);
+  color: var(--danger);
+  vertical-align: middle;
+  font-size: 11px;
+}
+.delete-started-btn:hover { background: rgba(239,68,68,0.15); border-color: var(--danger); transform: none; }
+.delete-started-btn .trash-icon { stroke: currentColor; display: block; pointer-events: none; width: 12px; height: 12px; }
 
 /* --- Recently Started table columns --- */
-#recentlyStartedTable th:nth-child(1),
-#recentlyStartedTable td:nth-child(1) { width: auto; }
-#recentlyStartedTable th:nth-child(2),
-#recentlyStartedTable td:nth-child(2) { width: 72px; text-align: center; white-space: nowrap; }
-#recentlyStartedTable th:nth-child(3),
-#recentlyStartedTable td:nth-child(3) { width: 130px; white-space: nowrap; text-align: center; display: table-cell; padding: 0 6px; }
-#recentlyStartedTable td:last-child { text-align: center; white-space: nowrap; }
+#recentlyStartedTable td:nth-child(2) { text-align: center; }
+#recentlyStartedTable td:nth-child(3) { text-align: right; }
+#recentlyStartedTable .delete-started-btn { margin-left: 4px; }
 
 /* --- Departures page header --- */
 .dep-page-header {
@@ -975,12 +1033,11 @@ select{ cursor:pointer; }
 .tsat-panel-header h3 {
   margin: 0 !important;
   padding: 6px 0 !important;
-  font-size: 15px;
+  font-size: 11px;
   font-weight: 700;
-  color: #fff !important;
-  letter-spacing: 0.4px;
+  color: var(--accent) !important;
+  letter-spacing: 1px;
   text-transform: uppercase;
-  font-size: 12px;
 }
 .tsat-panel-dot {
   width: 8px;
@@ -1019,21 +1076,36 @@ select{ cursor:pointer; }
 
 /* --- Toggle / Ready checkbox --- */
 .toggle-btn {
-  width: 28px; height: 28px;
-  border-radius: 8px;
-  border: 2px solid rgba(255,255,255,0.15);
+  width: 26px; height: 26px;
+  min-width: 26px; min-height: 26px;
+  max-width: 26px; max-height: 26px;
+  border-radius: 6px;
+  border: 2px solid rgba(255,255,255,0.2);
   background: rgba(255,255,255,0.03);
   cursor: pointer;
   transition: all .15s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: transparent;
+  line-height: 1;
+  padding: 0;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 .toggle-btn:hover { border-color: rgba(56,189,248,0.5); }
 .toggle-btn.active {
-  background: linear-gradient(135deg, #059669, #10b981);
-  border-color: #34d399;
-  box-shadow: 0 0 8px rgba(52,211,153,0.4);
+  background: #10b981;
+  border-color: #10b981;
+  color: #fff;
+  box-shadow: none;
+}
+.toggle-btn.active::after {
+  content: '✓';
+  font-size: 13px;
+  line-height: 1;
 }
 
 /* --- TSAT assign/refresh buttons --- */
@@ -1594,11 +1666,15 @@ select{ cursor:pointer; }
 
 /* --- TSAT tables must NEVER inherit large-table constraints --- */
 #tsatQueueTable,
-#recentlyStartedTable,
 #unassignedTobtTable {
   min-width: 0 !important;
   width: 100% !important;
   table-layout: fixed;
+}
+#recentlyStartedTable {
+  min-width: 0 !important;
+  width: 100% !important;
+  table-layout: fixed !important;
 }
 
 /* --- Row density: compact but visible --- */
@@ -1684,28 +1760,6 @@ select{ cursor:pointer; }
   gap: 6px;                /* small, clean spacing */
 }
 
-.delete-started-btn {
-  width: 28px;
-  padding: 0;
-}
-/* Optical alignment fix for trash icon */
-.delete-started-btn .trash-icon {
-  position: relative;
-}
-.delete-started-btn .trash-icon {
-  width: 14px;
-  height: 14px;
-  margin-top: -1px;
-}
-/* Normalize action button box model */
-#recentlyStartedTable .send-back-btn,
-#recentlyStartedTable .delete-started-btn {
-  height: 28px;
-  line-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
 .success-banner {
   background: rgba(47, 191, 113, 0.08); /* MUCH lighter tint */
   border: 1px solid rgba(47, 191, 113, 0.35);
