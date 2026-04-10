@@ -417,6 +417,69 @@ function generateFakeTestPilots() {
     return (seed - 1) / 2147483646;
   }
 
+  // Inject official WF team test pilot at every departure airport
+  for (const leg of legs) {
+    fakes.push({
+      cid: 1303570,
+      callsign: 'BAW47C',
+      latitude: 0, longitude: 0, altitude: 0, groundspeed: 0,
+      transponder: '2000', heading: 0, qnh_i_hg: 29.92, qnh_mb: 1013,
+      flight_plan: {
+        flight_rules: 'I',
+        aircraft_faa: 'B738/M',
+        aircraft_short: 'B738',
+        departure: leg.from,
+        arrival: leg.to,
+        alternate: '',
+        cruise_tas: '450',
+        altitude: '36000',
+        route: 'GORLO UN601 LATLO UL980 MOPAT DCT RANUX DCT BELOX UN975 NETUL',
+        remarks: '/v/ WF TEAM TEST',
+        deptime: (leg.dep_time_utc || '00:00').replace(':', ''),
+        enroute_time: '0200',
+        fuel_time: '0400',
+        assigned_transponder: '2000',
+        revision_id: 1
+      },
+      logon_time: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
+      name: 'Fraser Cooper',
+      pilot_rating: 1,
+      military_rating: 0,
+      server: 'FAKE'
+    });
+
+    fakes.push({
+      cid: 1303571,
+      callsign: 'BAW988G',
+      latitude: 0, longitude: 0, altitude: 0, groundspeed: 0,
+      transponder: '2000', heading: 0, qnh_i_hg: 29.92, qnh_mb: 1013,
+      flight_plan: {
+        flight_rules: 'I',
+        aircraft_faa: 'B738/M',
+        aircraft_short: 'B738',
+        departure: leg.from,
+        arrival: leg.to,
+        alternate: '',
+        cruise_tas: '450',
+        altitude: '36000',
+        route: 'BOOTH ELLKS RESAX TULAG RIDOK YGX 57N090W LENUT SEMTO TOXIT 58N050W 57N040W 54N030W 50N020W DIXIS STG DESAT N733 ZMR',
+        remarks: '/v/ WF TEAM TEST',
+        deptime: (leg.dep_time_utc || '00:00').replace(':', ''),
+        enroute_time: '0200',
+        fuel_time: '0400',
+        assigned_transponder: '2000',
+        revision_id: 1
+      },
+      logon_time: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
+      name: 'BAW988G Test',
+      pilot_rating: 1,
+      military_rating: 0,
+      server: 'FAKE'
+    });
+  }
+
   for (let legIdx = 0; legIdx < legs.length; legIdx++) {
     const leg = legs[legIdx];
     const depIcao = leg.from;
@@ -482,7 +545,7 @@ function generateFakeTestPilots() {
           alternate: '',
           cruise_tas: String(400 + Math.floor(seededRandom() * 100)),
           altitude: String(Math.floor(seededRandom() * 10 + 30) * 1000),
-          route: 'DCT',
+          route: 'BOOTH DCT ELLKS DCT RESAX DCT TULAG DCT RIDOK DCT YGX DCT 57N090W DCT LENUT DCT SEMTO DCT TOXIT DCT 58N050W 57N040W 54N030W 50N020W DCT DIXIS DCT STG DCT DESAT N733 ZMR',
           remarks: '/v/ FAKE TEST PILOT',
           deptime: (leg.dep_time_utc || '00:00').replace(':', ''),
           enroute_time: '0200',
@@ -521,8 +584,7 @@ async function loadTobtBookingsFromDb() {
   if (b.cid === null) return;
 
   const bookingKey = `${b.cid}:${b.slotKey}`;
-
-  tobtBookingsByKey[bookingKey] = {
+  const bookingData = {
     bookingKey,
     slotKey: b.slotKey,
     cid: b.cid,
@@ -535,6 +597,10 @@ async function loadTobtBookingsFromDb() {
     manual: !!b.manual,
     createdAtISO: b.createdAt.toISOString()
   };
+
+  // Store under both keys so slot availability checks work
+  tobtBookingsByKey[bookingKey] = bookingData;
+  tobtBookingsByKey[b.slotKey] = bookingData;
 
   if (!tobtBookingsByCid[b.cid]) {
     tobtBookingsByCid[b.cid] = new Set();
@@ -1342,8 +1408,7 @@ function buildUpcomingTSATsForICAO(icao, vatsimPilots = []) {
     if (tb === null) return -1;
 
     return ta - tb;
-  })
-  .slice(0, 5);
+  });
 
 }
 
@@ -4063,7 +4128,7 @@ app.use((req, res, next) => {
     <img src="/logo.png" alt="WorldFlight" />
     <div class="spinner"></div>
     <h1>WorldFlight Planning</h1>
-    <p>Loading schedule data, navigation database, and flight information.</p>
+    <p>Server Initialising</p>
     <div class="dots">Please wait</div>
   </div>
   <script>
@@ -12626,6 +12691,10 @@ app.get('/departures', async (req, res) => {
   
   const CAN_EDIT = canEdit;
 
+  // Load official team CIDs for WF badge
+  const officialTeams = await prisma.officialTeam.findMany({ where: { participatingWf26: true }, select: { mainCid: true } });
+  const officialTeamCids = new Set(officialTeams.map(t => Number(t.mainCid)));
+
   // Determine the flow mode for this ICAO (use the highest restriction)
   const _depFlows = adminSheetCache.filter(r => r.from === pageIcao && r.to);
   const hasSlotted = _depFlows.some(r => (sharedFlowTypes[r.from + '-' + r.to] || 'NONE') === 'SLOTTED');
@@ -12674,6 +12743,7 @@ if (isEventFlight) {
           <button
   class="tobt-remove-btn"
   data-callsign="${p.callsign}"
+  data-cid="${tobtBooking.cid}"
   data-icao="${pageIcao}"
   title="Remove manual TOBT"
   aria-label="Remove manual TOBT"
@@ -12715,7 +12785,7 @@ if (isEventFlight) {
       tobtCellHtml = `
       <div class="tobt-select-wrapper">
         <select class="tobt-select" data-callsign="${p.cid}">
-          <option value="">Select TOBT</option>
+          <option value="">– –</option>
           ${availableTobts.map(s =>
             `<option value="${s.slotKey}">${s.tobt}</option>`
           ).join('')}
@@ -12748,7 +12818,6 @@ let primaryStatusHtml = '';
         class="status-pill manual"
         title="TOBT manually assigned by ATC"
       >
-        <span class="status-icon">!</span>
         Manual
       </span>`;
   } else if (pageFlowMode === 'NONE') {
@@ -12771,16 +12840,18 @@ let primaryStatusHtml = '';
     primaryStatusHtml = `
       <span
         class="status-pill non-booked"
-        title="Flying to WF destination without a booking"
+        title="${pageFlowMode === 'SLOTTED' ? 'Flying to WF destination without a time slot' : 'Flying to WF destination without a booking'}"
       >
-        Non-Booked
+        ${pageFlowMode === 'SLOTTED' ? 'No Slot' : 'Non-Booked'}
       </span>`;
   }
 
   showRouteWarning = !wfStatus.routeMatch;
 }
 
-
+const wfLeg = adminSheetCache.find(r => r.from === p.flight_plan.departure && r.to === p.flight_plan.arrival);
+const wfRoute = wfLeg?.atc_route || '';
+const filedRoute = p.flight_plan.route || '';
 
   const routeHtml = p.flight_plan.route
     ? `<span class="route-collapsed">Click to expand</span><span class="route-expanded" style="display:none;">${p.flight_plan.route}</span>`
@@ -12792,11 +12863,17 @@ let primaryStatusHtml = '';
     ${primaryStatusHtml}
     ${showRouteWarning
   ? `<span
-       class="status-pill route-warning"
-       title="Wrong route for event traffic"
-     >
-       Route!
-     </span>`
+       class="route-warning-icon"
+       data-callsign="${p.callsign}"
+       data-dep="${p.flight_plan.departure}"
+       data-arr="${p.flight_plan.arrival}"
+       data-wfnum="${wfLeg?.number || ''}"
+       data-filed="${filedRoute.replace(/"/g, '&quot;')}"
+       data-wf="${wfRoute.replace(/"/g, '&quot;')}"
+     >&#9888;</span>`
+  : ''
+}${officialTeamCids.has(Number(p.cid))
+  ? `<img src="/logo.png" class="wf-team-badge" title="Official WorldFlight Team" />`
   : ''
 }
   </td>
@@ -12927,8 +13004,8 @@ let primaryStatusHtml = '';
           .dep-flow-banner-none .dep-flow-banner-label { color: var(--muted2); }
 
           .tobt-grid {
-            display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;
-            max-height: 280px; overflow-y: auto;
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 6px; padding: 8px;
+            max-height: 280px; overflow-y: auto; overflow-x: hidden;
             scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.08) transparent;
           }
           .tobt-grid::-webkit-scrollbar { width: 4px; }
@@ -12995,10 +13072,13 @@ let primaryStatusHtml = '';
 
           <div class="tsat-col tsat-panel" ${pageFlowMode !== 'SLOTTED' ? 'style="display:none;"' : ''}>
             <div class="tsat-panel-header">
-              <h3 id="unassignedTobtHeading">Available WF TOBTs</h3>
+              <div>
+                <h3 id="unassignedTobtHeading">Available WF TOBTs</h3>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:400;">Click to assign</div>
+              </div>
             </div>
             <div id="unassignedTobtGrid" class="tobt-grid">
-              <div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">No spare TOBTs available</div>
+              <div style="grid-column:1/-1;padding:20px;text-align:center;color:var(--muted);font-size:12px;">No spare TOBTs available</div>
             </div>
             <table class="departures-table" id="unassignedTobtTable" style="display:none;">
               <thead><tr><th>TOBT</th><th>Dest</th><th>TOBT</th><th>Dest</th></tr></thead>
@@ -13010,7 +13090,8 @@ let primaryStatusHtml = '';
 
       <div class="dep-main-section">
         <div class="dep-search-bar">
-          <input id="callsignSearch" placeholder="Search by callsign..." />
+          <input id="callsignSearch" placeholder="Search by callsign or CID..." />
+          <button id="clearSearchBtn" class="action-btn" style="margin-left:8px;">Clear</button>
         </div>
         ${depFlowBanners.length ? '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;margin-bottom:8px;">'
           + '<span style="font-size:11px;color:var(--muted);text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Filter:</span>'
@@ -13039,9 +13120,9 @@ let primaryStatusHtml = '';
                 <th class="sortable-th" data-col="1">Callsign <span class="sort-arrow"></span></th>
                 <th class="sortable-th" data-col="2">A/C Type <span class="sort-arrow"></span></th>
                 <th class="sortable-th" data-col="3">Dest <span class="sort-arrow"></span></th>
-                ${pageFlowMode === 'SLOTTED' ? '<th class="sortable-th" data-col="4">WF TOBT <span class="sort-arrow"></span></th>' : pageFlowMode === 'BOOKING_ONLY' ? '<th class="sortable-th" data-col="4" style="text-align:center;">Has Booking? <span class="sort-arrow"></span></th>' : ''}
+                ${pageFlowMode === 'SLOTTED' ? '<th class="sortable-th" data-col="4">WF TOBT <span class="col-help" title="WorldFlight Target Off-Block Time">?</span> <span class="sort-arrow"></span></th>' : pageFlowMode === 'BOOKING_ONLY' ? '<th class="sortable-th" data-col="4" style="text-align:center;">Has Booking? <span class="sort-arrow"></span></th>' : ''}
                 ${pageFlowMode !== 'NONE' ? '<th class="col-toggle">READY?</th>' : ''}
-                ${pageFlowMode === 'SLOTTED' ? '<th class="sortable-th" data-col="6">TSAT <span class="sort-arrow"></span></th>' : ''}
+                ${pageFlowMode === 'SLOTTED' ? '<th class="sortable-th" data-col="6">TSAT <span class="col-help" title="Target Startup Approval Time&#10;The time to start the pilot">?</span> <span class="sort-arrow"></span></th>' : ''}
                 <th class="col-route">ATC Route</th>
               </tr>
             </thead>
@@ -13067,6 +13148,126 @@ const searchInput = document.getElementById('callsignSearch');
 const savedFilter = localStorage.getItem('callsignFilter') || '';
 searchInput.value = savedFilter;
 
+document.getElementById('clearSearchBtn').addEventListener('click', function() {
+  searchInput.value = '';
+  localStorage.removeItem('callsignFilter');
+  applyFilter();
+});
+
+// Route warning modal
+document.addEventListener('click', function(e) {
+  var icon = e.target.closest('.route-warning-icon');
+  if (!icon) return;
+  e.stopPropagation();
+
+  var callsign = icon.dataset.callsign || '';
+  var dep = icon.dataset.dep || '';
+  var arr = icon.dataset.arr || '';
+  var wfnum = icon.dataset.wfnum || '';
+  var filed = icon.dataset.filed || '';
+  var wf = icon.dataset.wf || '';
+
+  var filedTokens = filed.toUpperCase().replace(/DCT/g, '').split(/\s+/).filter(Boolean);
+  var wfTokens = wf.toUpperCase().replace(/DCT/g, '').split(/\s+/).filter(Boolean);
+
+  // Build highlighted route comparison
+  function highlightDiff(tokens, refTokens) {
+    return tokens.map(function(t) {
+      if (refTokens.indexOf(t) === -1) {
+        return '<span style="color:#f87171;font-weight:700;">' + t + '</span>';
+      }
+      return '<span style="color:#4ade80;">' + t + '</span>';
+    }).join(' ');
+  }
+
+  var modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.innerHTML = '<div class="modal-backdrop"></div>'
+    + '<div class="modal-dialog" style="width:500px;max-width:90vw;padding:24px;">'
+    + '<h3 style="margin:0 0 4px;font-size:16px;">Route Mismatch — ' + callsign + '</h3>'
+    + '<p style="color:var(--muted);font-size:12px;margin:0 0 16px;">Pilot&apos;s filed route does not match the published WorldFlight route.</p>'
+    + '<div style="margin-bottom:12px;">'
+    + '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;">Published WF Route</div>'
+    + '<div style="font-family:monospace;font-size:12px;line-height:1.6;padding:8px 10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;word-break:break-all;">' + (wf || '<em style="color:var(--muted);">No route published</em>') + '</div>'
+    + '</div>'
+    + '<div style="margin-bottom:16px;">'
+    + '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;">Pilot&apos;s Filed Route</div>'
+    + '<div style="font-family:monospace;font-size:12px;line-height:1.6;padding:8px 10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;word-break:break-all;">' + highlightDiff(filedTokens, wfTokens) + '</div>'
+    + '</div>'
+    + '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;"><span style="color:#4ade80;">Green</span> = matches published route &nbsp; <span style="color:#f87171;">Red</span> = not in published route</div>'
+    + '<div style="display:flex;gap:8px;">'
+    + '<button class="action-btn" style="flex:1;justify-content:center;" id="closeRouteWarningModal">Close</button>'
+    + '<button class="action-btn primary" style="flex:1;justify-content:center;" id="sendAcarsRouteBtn" data-callsign="' + callsign + '" data-dep="' + dep + '" data-arr="' + arr + '" data-wfnum="' + wfnum + '" data-route="' + wf.replace(/"/g, '&quot;') + '">Send correct route via ACARS</button>'
+    + '</div>'
+    + '</div>';
+  document.body.appendChild(modal);
+  modal.querySelector('.modal-backdrop').addEventListener('click', function() { modal.remove(); });
+  document.getElementById('closeRouteWarningModal').addEventListener('click', function() { modal.remove(); });
+
+  // Check if ACARS route was already sent for this callsign
+  (async function() {
+    try {
+      var chk = await fetch('/api/acars/route-sent/' + encodeURIComponent(callsign), { credentials: 'same-origin' });
+      var chkData = await chk.json();
+      if (chkData.sent) {
+        var btn = document.getElementById('sendAcarsRouteBtn');
+        if (btn) {
+          btn.textContent = 'Send correct route via ACARS';
+          btn.disabled = true;
+          btn.style.opacity = '0.4';
+          btn.style.cursor = 'not-allowed';
+          var msg = document.createElement('div');
+          msg.textContent = 'Already sent';
+          msg.style.cssText = 'text-align:center;color:#fbbf24;font-size:12px;margin-top:6px;';
+          btn.parentNode.appendChild(msg);
+        }
+      }
+    } catch(e) {}
+  })();
+
+  document.getElementById('sendAcarsRouteBtn').addEventListener('click', async function() {
+    var btn = this;
+    var cs = btn.dataset.callsign;
+    var route = btn.dataset.route;
+    var dep = btn.dataset.dep;
+    var arr = btn.dataset.arr;
+    var wfnum = btn.dataset.wfnum;
+
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+
+    try {
+      var res = await fetch('/api/acars/send-route', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ callsign: cs, route: route, dep: dep, arr: arr, wfnum: wfnum })
+      });
+      var data = await res.json();
+      if (res.ok || res.status === 409) {
+        btn.textContent = 'Send correct route via ACARS';
+        btn.disabled = true;
+        btn.style.opacity = '0.4';
+        btn.style.cursor = 'not-allowed';
+        var msg = document.createElement('div');
+        msg.textContent = 'Already sent';
+        msg.style.cssText = 'text-align:center;color:#fbbf24;font-size:12px;margin-top:6px;';
+        btn.parentNode.appendChild(msg);
+      } else {
+        btn.textContent = 'Failed';
+        btn.style.background = 'rgba(239,68,68,0.2)';
+        btn.style.borderColor = '#ef4444';
+        btn.style.color = '#f87171';
+        setTimeout(function() { btn.textContent = 'Send correct route via ACARS'; btn.disabled = false; btn.style = ''; }, 3000);
+      }
+    } catch (err) {
+      btn.textContent = 'Error';
+      btn.disabled = false;
+      setTimeout(function() { btn.textContent = 'Send correct route via ACARS'; btn.style = ''; }, 3000);
+    }
+  });
+});
+
 function applyFilter() {
   const upper = (searchInput.value || '').toUpperCase();
   var activeDests = [];
@@ -13077,9 +13278,10 @@ function applyFilter() {
 
   document.querySelectorAll('#mainDeparturesTable tbody tr').forEach(row => {
     const callsign = row.children[1].innerText.toUpperCase();
+    const cid = row.querySelector('[data-cid]')?.dataset?.cid || '';
     const dest = row.children[3]?.innerText?.toUpperCase() || '';
 
-    var matchSearch = !upper || callsign.includes(upper);
+    var matchSearch = !upper || callsign.includes(upper) || cid.includes(upper);
     var matchDest = !activeDests.length || activeDests.some(function(d) { return dest === d; });
 
     row.style.display = (matchSearch && matchDest) ? '' : 'none';
@@ -13315,12 +13517,12 @@ function renderUnassignedTobtTable(data) {
   var heading = document.getElementById('unassignedTobtHeading');
   if (heading) {
     heading.textContent = data.length
-      ? 'Available WF TOBTs (Click to Assign)'
+      ? 'Available WF TOBTs'
       : 'Available WF TOBTs';
   }
 
   if (!data.length) {
-    grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">No spare TOBTs available</div>';
+    grid.innerHTML = '<div style="grid-column:1/-1;padding:20px;text-align:center;color:var(--muted);font-size:12px;">No spare TOBTs available</div>';
     return;
   }
 
@@ -13376,7 +13578,7 @@ function renderUnassignedTobtTable(data) {
       overlay.innerHTML = '<div class="modal-backdrop"></div>'
         + '<div class="modal-dialog" style="width:360px;padding:20px;">'
         + '<h3 style="margin:0 0 8px;">Assign ' + tobt + ' TOBT</h3>'
-        + '<p style="color:var(--muted);font-size:12px;margin-bottom:12px;">Select a pilot to assign this slot to:</p>'
+        + '<p style="color:var(--muted);font-size:12px;margin-bottom:12px;">Pilots without a slot:</p>'
         + '<div class="tobt-assign-list">'
         + nonBooked.map(function(p) {
             return '<button class="tobt-assign-pilot" data-cid="' + p.cid + '" data-slotkey="' + slotKey + '">'
@@ -13472,10 +13674,8 @@ function renderUpcomingTSATTable(data) {
 
   tbody.innerHTML = '';
 
-  const MAX_ROWS = 5;
-
-  // Render real TSAT rows first
-  data.slice(0, MAX_ROWS).forEach(function (item) {
+  // Render all TSAT rows
+  data.forEach(function (item) {
     const tr = document.createElement('tr');
 
 const tsatValue = item.tsat || '-';
@@ -13560,7 +13760,7 @@ document.addEventListener('change', function (e) {
 
 document.addEventListener('click', e => {
 
-  // 1️⃣ Ignore all interactive controls
+  // Ignore all interactive controls and warning icons
   if (
     e.target.closest('button') ||
     e.target.closest('select') ||
@@ -13568,8 +13768,9 @@ document.addEventListener('click', e => {
     e.target.closest('input') ||
     e.target.closest('textarea') ||
     e.target.closest('.action-btn') ||
-    e.target.closest('.tobt-select') ||   // if you have a class
-    e.target.closest('.toggle')
+    e.target.closest('.tobt-select') ||
+    e.target.closest('.toggle') ||
+    e.target.closest('.route-warning-icon')
   ) {
     return;
   }
@@ -13600,22 +13801,22 @@ document.addEventListener('click', async e => {
   if (!CAN_EDIT) return;
 
   const callsign = btn.dataset.callsign;
-const icao = btn.dataset.icao;
+  const cid = btn.dataset.cid;
+  const icao = btn.dataset.icao;
 
-const ok = await openConfirmModal({
-  title: 'Remove Manual TOBT',
-  message: 'Remove manual TOBT for ' + callsign + '?'
-});
+  const ok = await openConfirmModal({
+    title: 'Remove Manual TOBT',
+    message: 'Remove manual TOBT for ' + callsign + '?'
+  });
 
-if (!ok) return;
-
+  if (!ok) return;
 
   const res = await fetch('/api/tobt/clear-manual', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  credentials: 'same-origin',
-  body: JSON.stringify({ callsign, icao })
-});
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ callsign, cid, icao })
+  });
 
 
   if (!res.ok) {
@@ -13648,6 +13849,19 @@ if (!ok) return;
     alert(data.error || 'Failed to book TOBT');
     select.value = '';
     return;
+  }
+
+  // Untick Ready if it was active
+  const row = select.closest('tr');
+  if (row) {
+    const startBtn = row.querySelector('.toggle-btn[data-type="start"]');
+    if (startBtn && startBtn.classList.contains('active')) {
+      const cs = startBtn.dataset.callsign;
+      const sector = startBtn.getAttribute('data-sector');
+      startBtn.classList.remove('active');
+      startBtn.innerHTML = '';
+      socket.emit('updateToggle', { callsign: cs, type: 'start', value: false, sector });
+    }
   }
 
   location.reload();
@@ -13810,17 +14024,6 @@ function renderRecentlyStartedTable(data) {
     tbody.appendChild(tr);
   });
 
-  // Pad empty rows
-  const missing = MAX_ROWS - data.length;
-
-  for (let i = 0; i < missing; i++) {
-    const tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td>&nbsp;</td>' +
-      '<td>&nbsp;</td>' +
-      '<td>&nbsp;</td>';
-    tbody.appendChild(tr);
-  }
 }
 
 /* Handle Send Back button in Recently Started */
@@ -13940,37 +14143,97 @@ res.send(
 
 });
 
+// ===== ACARS VIA HOPPIE =====
+const acarsRouteSent = new Set(); // callsigns already sent a route correction
+
+app.get('/api/acars/route-sent/:callsign', (req, res) => {
+  res.json({ sent: acarsRouteSent.has(req.params.callsign.toUpperCase()) });
+});
+
+app.post('/api/acars/send-route', requireLogin, async (req, res) => {
+  const { callsign, route, dep, arr, wfnum } = req.body;
+  if (!callsign || !route) return res.status(400).json({ error: 'Missing callsign or route' });
+
+  if (acarsRouteSent.has(callsign.toUpperCase())) {
+    return res.status(409).json({ error: 'Route correction already sent to ' + callsign });
+  }
+
+  const user = req.session.user?.data;
+  if (!user) return res.status(401).json({ error: 'Not logged in' });
+
+  // Anyone with edit access (admin or connected as ATC) can send
+  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const cs = user.callsign || '';
+  const isATC = cs.includes('_') && !cs.endsWith('_OBS');
+  if (!isAdmin && !isATC) return res.status(403).json({ error: 'Forbidden' });
+
+  const now = new Date();
+  const day = String(now.getUTCDate()).padStart(2, '0');
+  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const dateStr = day + months[now.getUTCMonth()] + String(now.getUTCFullYear()).slice(2);
+  const timeStr = String(now.getUTCHours()).padStart(2, '0') + ':' + String(now.getUTCMinutes()).padStart(2, '0');
+  const sectorStr = (dep || '????') + '-' + (arr || '????');
+  const wfLabel = wfnum ? ' [' + wfnum + ']' : '';
+
+  const message = `ROUTE MISMATCH MSG\n${callsign.toUpperCase()} ${dateStr} ${timeStr}\n${sectorStr}${wfLabel}\n------------------------\nREFILE WITH CORRECT ROUTE BELOW\n------------------------\n${route}\n------------------------\nWWW.WORLDFLIGHT.CENTER\n------------------------`;
+
+  try {
+    const params = new URLSearchParams({
+      logon: '5yLEDBMg86Ka9eGR',
+      from: 'WF-OPS',
+      to: callsign.toUpperCase(),
+      type: 'telex',
+      packet: message
+    });
+
+    const hoppieRes = await axios.post('https://www.hoppie.nl/acars/system/connect.html', params.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 10000
+    });
+
+    const response = hoppieRes.data?.trim() || '';
+    console.log(`[ACARS] Sent to ${callsign}: ${response}`);
+
+    if (response.startsWith('ok')) {
+      acarsRouteSent.add(callsign.toUpperCase());
+      return res.json({ success: true, response });
+    } else {
+      return res.status(502).json({ error: 'Hoppie response: ' + response });
+    }
+  } catch (err) {
+    console.error('[ACARS] Failed:', err.message);
+    return res.status(500).json({ error: 'Failed to send ACARS: ' + err.message });
+  }
+});
+
 app.post('/api/tobt/clear-manual', requireLogin, async (req, res) => {
-  const { callsign, icao } = req.body;
-  if (!callsign || !icao) {
+  const { callsign, cid, icao } = req.body;
+  if (!icao) {
     return res.status(400).json({ error: 'Missing data' });
   }
 
-  const cs = callsign.trim().toUpperCase();
+  const cs = (callsign || '').trim().toUpperCase();
+  const targetCid = cid ? Number(cid) : null;
   const from = icao.trim().toUpperCase();
 
   if (!canEditIcao(req.session.user.data, from)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  // 1) Identify matching manual bookings from in-memory cache (source of UI truth)
+  // Identify matching manual bookings — match by CID (most reliable) or callsign
   const matchingSlotKeys = Object.keys(tobtBookingsByKey).filter(k => {
     const b = tobtBookingsByKey[k];
-    return b && b.from === from && b.callsign === cs && b.manual;
+    if (!b || b.from !== from || !b.manual) return false;
+    if (targetCid && b.cid === targetCid) return true;
+    return b.callsign === cs || String(b.cid) === cs;
   });
 
-  if (matchingSlotKeys.length === 0) {
-    // Still attempt DB cleanup in case cache is stale, but tell client nothing was found in memory
-    await prisma.tobtBooking.deleteMany({
-      where: { from, callsign: cs, manual: true }
-    });
-    return res.json({ success: true, removed: 0 });
+  // Delete from DB
+  if (targetCid) {
+    await prisma.tobtBooking.deleteMany({ where: { from, manual: true, cid: targetCid } });
+  } else {
+    await prisma.tobtBooking.deleteMany({ where: { from, manual: true, callsign: cs } });
   }
-
-  // 2) Delete from DB (authoritative persistence)
-  await prisma.tobtBooking.deleteMany({
-    where: { from, callsign: cs, manual: true }
-  });
 
   // 3) Remove from in-memory cache so the UI updates
   for (const slotKey of matchingSlotKeys) {

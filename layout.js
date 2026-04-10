@@ -92,6 +92,8 @@ export default function renderLayout({
   <title>${title}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
+  <link rel="icon" type="image/png" href="/logo.png" />
+  <link rel="apple-touch-icon" href="/logo.png" />
   <link rel="stylesheet" href="/styles.css" />
 
   <!-- Leaflet (global, safe) -->
@@ -114,6 +116,14 @@ export default function renderLayout({
 </head>
 
 <body class="${[hideSidebar ? 'no-sidebar' : '', layoutClass.includes('map-layout') ? 'map-layout-page' : ''].filter(Boolean).join(' ')}">
+  ${hideSidebar ? '' : `<script>
+    (function(){
+      var m = window.innerWidth <= 900;
+      var c = m || (localStorage.getItem('sidebarCollapsed') === null ? window.innerWidth <= 2000 : localStorage.getItem('sidebarCollapsed') === 'true');
+      if (c) document.body.classList.add('sidebar-collapsed');
+      document.documentElement.classList.add('sidebar-ready');
+    })();
+  </script>`}
 
   ${hideSidebar ? '' : sidebarHtml}
 
@@ -546,6 +556,11 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
       }
     }
 
+    // Re-enable transitions now that sidebar state is set
+    requestAnimationFrame(() => {
+      document.documentElement.classList.add('sidebar-ready');
+    });
+
     toggle.addEventListener('click', () => {
       setCollapsed(!sidebar.classList.contains('collapsed'));
     });
@@ -854,21 +869,12 @@ window.location.href = '/icao/' + icao;
     <pre class="fp-route" id="fpRoute"></pre>
   </div>
 
-  <!-- ROUTE (WF MISMATCH ONLY) -->
+  <!-- ROUTE MISMATCH (clickable) -->
   <div id="fpRouteFiledBlock" class="fp-route-block hidden">
-    <div class="fp-route-label">ATC ROUTE (FILED)</div>
-    <pre class="fp-route" id="fpRouteFiled"></pre>
-
-    <div class="fp-route-label">WF EVENT ROUTE (EXPECTED)</div>
-    <pre class="fp-route" id="fpRouteWf"></pre>
-
-    <div class="fp-route-alert">
-  <span class="fp-route-alert-icon">⚠</span>
-  <span class="fp-route-alert-text">
-    WF ROUTE VALIDATION FAILED
-  </span>
-</div>
-
+    <button id="fpRouteWarningBtn" class="fp-route-alert" style="width:100%;cursor:pointer;border:none;">
+      <span class="fp-route-alert-icon">⚠</span>
+      <span class="fp-route-alert-text">WF ROUTE VALIDATION FAILED — Click for details</span>
+    </button>
   </div>
 
   <!-- ACTIONS -->
@@ -954,8 +960,17 @@ document.getElementById('fpRules').textContent =
     filedBlock.classList.remove('hidden');
     warningIcon.classList.remove('hidden');
 
-   document.getElementById('fpRouteFiled').innerHTML = d.filedRoute;
-document.getElementById('fpRouteWf').innerHTML = d.wfRoute;
+    // Wire up the warning button to open the route mismatch modal
+    var warnBtn = document.getElementById('fpRouteWarningBtn');
+    if (warnBtn) {
+      warnBtn.onclick = function() {
+        // Close the FP modal first
+        document.getElementById('flightPlanModal').classList.add('hidden');
+        // Find the matching warning icon in the departures table and click it
+        var icon = document.querySelector('.route-warning-icon[data-callsign="' + d.callsign + '"]');
+        if (icon) icon.click();
+      };
+    }
 
   } else {
     filedBlock.classList.add('hidden');
