@@ -1365,7 +1365,7 @@ function rebuildAllTobtSlots() {
 /* ===== RECENTLY STARTED HELPER ===== */
 function buildRecentlyStartedForICAO(icao) {
   return Object.entries(recentlyStarted)
-    .filter(([cs, e]) => e.icao === icao)
+    .filter(([cs, e]) => cs && e.icao === icao)
     .map(([callsign, entry]) => ({
       callsign,
       startedAt: entry.startedAt
@@ -13673,6 +13673,7 @@ function renderUpcomingTSATTable(data) {
   if (!tbody) return;
 
   tbody.innerHTML = '';
+  const MAX_ROWS = 20;
 
   // Render all TSAT rows
   data.forEach(function (item) {
@@ -13697,17 +13698,6 @@ tbody.appendChild(tr);
 
   });
 
-  // Pad remaining empty rows to force consistent height
-  const missing = MAX_ROWS - Math.min(data.length, MAX_ROWS);
-
-  for (let i = 0; i < missing; i++) {
-    const tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td>&nbsp;</td>' +
-      '<td>&nbsp;</td>' +
-      '<td>&nbsp;</td>';
-    tbody.appendChild(tr);
-  }
 }
 
 /* ----------------------------------------------------
@@ -13997,9 +13987,9 @@ function renderRecentlyStartedTable(data) {
     const disabledAttr = CAN_EDIT ? '' : ' disabled';
 
 
-  const MAX_ROWS = 5;
+  const MAX_ROWS = 20;
 
-  data.slice(0, MAX_ROWS).forEach(item => {
+  data.filter(item => item.callsign).slice(0, MAX_ROWS).forEach(item => {
     const tr = document.createElement('tr');
 
     tr.innerHTML =

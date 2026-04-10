@@ -1742,14 +1742,6 @@ select{ cursor:pointer; }
   display: none;
 }
 /* Center empty states vertically */
-#recentlyStartedTable tbody:empty::after,
-#unassignedTobtTable tbody:empty::after {
-  content: "—";
-  display: block;
-  height: 100%;
-  text-align: center;
-  opacity: 0.15;
-}
 /* Prevent TSAT scrollbars from overlapping adjacent columns */
 .tsat-col .table-scroll {
   scrollbar-gutter: stable both-edges;
