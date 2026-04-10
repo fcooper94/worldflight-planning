@@ -3679,15 +3679,30 @@ function normalizeRoute(route, adminRoute = null) {
   .replace(/\bN\d+F\d+\b/g, '')     // remove speed/level (N0456F350)
   .replace(/\bDCT\b/g, '')          // 🔑 REMOVE rogue DCTs
   .split(/\s+/)
-  .filter(Boolean);
+  .filter(Boolean)
+  .map(t => t.replace(/^U([A-Z]\d+)$/, '$1')); // normalize upper airways (UM420 → M420)
 
+
+  // SID/STAR pattern: ends with digit+letter (e.g. MODMI1A, CLN8J) or digit+digit (e.g. SID01, STAR23)
+  const isSidStar = t => /\d[A-Z]$/.test(t) || /\d\d$/.test(t);
+
+  // Remove leading SID(s) and departure ICAO
+  while (
+    tokens.length &&
+    (
+      /^[A-Z]{4}$/.test(tokens[0]) || // departure ICAO
+      isSidStar(tokens[0])            // SID like MODMI1A
+    )
+  ) {
+    tokens.shift();
+  }
 
   // Remove trailing STAR(s) and destination ICAO
   while (
     tokens.length &&
     (
       /^[A-Z]{4}$/.test(tokens[tokens.length - 1]) || // destination ICAO
-      /\d[A-Z]$/.test(tokens[tokens.length - 1])      // STAR like IMCO1A
+      isSidStar(tokens[tokens.length - 1])             // STAR like IMCO1A
     )
   ) {
     tokens.pop();
@@ -13167,8 +13182,16 @@ document.addEventListener('click', function(e) {
   var filed = icon.dataset.filed || '';
   var wf = icon.dataset.wf || '';
 
-  var filedTokens = filed.toUpperCase().replace(/DCT/g, '').split(/\s+/).filter(Boolean);
-  var wfTokens = wf.toUpperCase().replace(/DCT/g, '').split(/\s+/).filter(Boolean);
+  var isSidStar = function(t) { return /\d[A-Z]$/.test(t) || /\d\d$/.test(t); };
+  var isIcao = function(t) { return /^[A-Z]{4}$/.test(t); };
+  var stripProc = function(arr) {
+    while (arr.length && (isIcao(arr[0]) || isSidStar(arr[0]))) arr.shift();
+    while (arr.length && (isIcao(arr[arr.length-1]) || isSidStar(arr[arr.length-1]))) arr.pop();
+    return arr;
+  };
+  var normAwy = function(t) { return t.replace(/^U([A-Z]\d+)$/, '$1'); };
+  var filedTokens = stripProc(filed.toUpperCase().replace(/DCT/g, '').replace(/N\d+F\d+/g, '').replace(/\/\d+[A-Z]?/g, '').split(/\s+/).filter(Boolean).map(normAwy));
+  var wfTokens = wf.toUpperCase().replace(/DCT/g, '').split(/\s+/).filter(Boolean).map(normAwy);
 
   // Build highlighted route comparison
   function highlightDiff(tokens, refTokens) {
@@ -13199,6 +13222,7 @@ document.addEventListener('click', function(e) {
     + '<button class="action-btn" style="flex:1;justify-content:center;" id="closeRouteWarningModal">Close</button>'
     + '<button class="action-btn primary" style="flex:1;justify-content:center;" id="sendAcarsRouteBtn" data-callsign="' + callsign + '" data-dep="' + dep + '" data-arr="' + arr + '" data-wfnum="' + wfnum + '" data-route="' + wf.replace(/"/g, '&quot;') + '">Send correct route via ACARS</button>'
     + '</div>'
+    + '<div id="acarsStatusMsg" style="text-align:right;margin-right:80px;"></div>'
     + '</div>';
   document.body.appendChild(modal);
   modal.querySelector('.modal-backdrop').addEventListener('click', function() { modal.remove(); });
@@ -13211,15 +13235,15 @@ document.addEventListener('click', function(e) {
       var chkData = await chk.json();
       if (chkData.sent) {
         var btn = document.getElementById('sendAcarsRouteBtn');
+        var msgEl = document.getElementById('acarsStatusMsg');
         if (btn) {
-          btn.textContent = 'Send correct route via ACARS';
           btn.disabled = true;
           btn.style.opacity = '0.4';
           btn.style.cursor = 'not-allowed';
-          var msg = document.createElement('div');
-          msg.textContent = 'Already sent';
-          msg.style.cssText = 'text-align:center;color:#fbbf24;font-size:12px;margin-top:6px;';
-          btn.parentNode.appendChild(msg);
+        }
+        if (msgEl) {
+          msgEl.textContent = 'Already sent';
+          msgEl.style.cssText = 'text-align:right;margin-right:80px;color:#fbbf24;font-size:12px;margin-top:8px;';
         }
       }
     } catch(e) {}
@@ -13245,14 +13269,13 @@ document.addEventListener('click', function(e) {
       });
       var data = await res.json();
       if (res.ok || res.status === 409) {
-        btn.textContent = 'Send correct route via ACARS';
+        btn.textContent = 'Sent!';
         btn.disabled = true;
         btn.style.opacity = '0.4';
         btn.style.cursor = 'not-allowed';
-        var msg = document.createElement('div');
-        msg.textContent = 'Already sent';
-        msg.style.cssText = 'text-align:center;color:#fbbf24;font-size:12px;margin-top:6px;';
-        btn.parentNode.appendChild(msg);
+        btn.style.background = 'rgba(74,222,128,0.15)';
+        btn.style.borderColor = '#4ade80';
+        btn.style.color = '#4ade80';
       } else {
         btn.textContent = 'Failed';
         btn.style.background = 'rgba(239,68,68,0.2)';
