@@ -420,7 +420,7 @@ function generateFakeTestPilots() {
   // Inject official WF team test pilot at every departure airport
   for (const leg of legs) {
     fakes.push({
-      cid: 1303570,
+      cid: 811093,
       callsign: 'BAW47C',
       latitude: 0, longitude: 0, altitude: 0, groundspeed: 0,
       transponder: '2000', heading: 0, qnh_i_hg: 29.92, qnh_mb: 1013,
@@ -13182,16 +13182,16 @@ document.addEventListener('click', function(e) {
   var filed = icon.dataset.filed || '';
   var wf = icon.dataset.wf || '';
 
-  var isSidStar = function(t) { return /\d[A-Z]$/.test(t) || /\d\d$/.test(t); };
+  var isSidStar = function(t) { return /\\d[A-Z]$/.test(t) || /\\d\\d$/.test(t); };
   var isIcao = function(t) { return /^[A-Z]{4}$/.test(t); };
   var stripProc = function(arr) {
     while (arr.length && (isIcao(arr[0]) || isSidStar(arr[0]))) arr.shift();
     while (arr.length && (isIcao(arr[arr.length-1]) || isSidStar(arr[arr.length-1]))) arr.pop();
     return arr;
   };
-  var normAwy = function(t) { return t.replace(/^U([A-Z]\d+)$/, '$1'); };
-  var filedTokens = stripProc(filed.toUpperCase().replace(/DCT/g, '').replace(/N\d+F\d+/g, '').replace(/\/\d+[A-Z]?/g, '').split(/\s+/).filter(Boolean).map(normAwy));
-  var wfTokens = wf.toUpperCase().replace(/DCT/g, '').split(/\s+/).filter(Boolean).map(normAwy);
+  var normAwy = function(t) { return t.replace(/^U([A-Z]\\d+)$/, '$1'); };
+  var filedTokens = stripProc(filed.toUpperCase().replace(/DCT/g, '').replace(/N\\d+F\\d+/g, '').replace(/\\/\\d+[A-Z]?/g, '').split(/\\s+/).filter(Boolean).map(normAwy));
+  var wfTokens = wf.toUpperCase().replace(/DCT/g, '').split(/\\s+/).filter(Boolean).map(normAwy);
 
   // Build highlighted route comparison
   function highlightDiff(tokens, refTokens) {
