@@ -15681,6 +15681,13 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     }
     .div-route-tooltip .leaflet-popup-content { margin: 14px 16px !important; color: #ffffff !important; }
     .div-route-tooltip .leaflet-popup-tip { background: rgba(15,23,42,0.97) !important; }
+    .fir-badge-link:hover { background: rgba(56,189,248,0.25); border-color: var(--accent); }
+    .fir-sub-row td {
+      padding-top: 4px !important;
+      padding-bottom: 4px !important;
+      border-top: 1px dashed rgba(255,255,255,0.08) !important;
+      font-size: 12px;
+    }
     .fir-detail-header-box {
       display: inline-flex;
       align-items: center;
@@ -15939,18 +15946,16 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
       <!-- Desktop table -->
       <div class="fir-desktop-table" style="overflow-x:auto;margin-top:16px;">
         <table id="firDetailTable">
-          <thead>
+          <thead id="firDetailHead">
             <tr>
               <th>WF</th>
-              <th>FIR</th>
               <th>From</th>
               <th>To</th>
               <th>Date</th>
+              <th>ATC Route</th>
+              <th>FIR</th>
               <th>Staff Window</th>
               <th>Staff Duration</th>
-              <th>ATC Route</th>
-              <th>Dep Flow</th>
-              <th>Flow Type</th>
               <th></th>
             </tr>
           </thead>
@@ -16431,7 +16436,6 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
     window.loadFirDetailFn = loadFirDetail;
     function loadFirDetail(firId) {
-      clearDivisionMap();
       fetch('/api/airspace-management?fir=' + encodeURIComponent(firId), { credentials: 'same-origin' })
         .then(function(r) { return r.json(); })
         .then(function(data) {
@@ -16458,9 +16462,16 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             });
           }
 
+          // Set single-FIR table header
+          document.getElementById('firDetailHead').innerHTML = '<tr><th>WF</th><th>FIR</th><th>From</th><th>To</th><th>Date</th><th>Staff Window <span class="col-help" title="Recommended staffing window:&#10;+/- 1 hour of the scheduled FIR entry and exit times" style="cursor:help;color:var(--muted);">?</span></th><th>Staff Duration</th><th>ATC Route</th><th>Dep Flow</th><th>Flow Type</th><th></th></tr>';
+
           // Build timeline for single FIR
           currentTlData = { legs: data.legs, mode: 'single' };
           renderTimeline(data.legs, 'single', currentTlView);
+
+          // Render route map for this FIR
+          var firLegsWithFir = data.legs.map(function(l) { return Object.assign({}, l, { _fir: data.fir }); });
+          renderDivisionRouteMap(firLegsWithFir, [data.fir], data.division || '');
 
           // Build table
           var tbody = document.getElementById('firDetailBody');
@@ -16486,17 +16497,10 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
               + '<td class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
               + '<td class="">' + (l.depFlow || '-') + '</td>'
               + '<td class=""><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
-              + '<td class=""><button class="fir-view-btn" data-leg-idx="' + idx + '">View</button></td>'
+              + '<td></td>'
               + '</tr>';
           }).join('');
 
-          // Attach view button handlers
-          tbody.querySelectorAll('.fir-view-btn').forEach(function(btn) {
-            btn.addEventListener('click', function() {
-              var idx = Number(this.dataset.legIdx);
-              openFirRouteModal(window._firLegs[idx], window._firId);
-            });
-          });
           // Click to expand route column
           tbody.querySelectorAll('.fir-route-col').forEach(function(td) {
             td.addEventListener('click', function() { this.classList.toggle('expanded'); });
@@ -16515,10 +16519,10 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
                 + '<div class="fir-leg-card-row">Staff Window: <b>' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</b></div>'
                 + '<div class="fir-leg-card-row">Duration: <b>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</b></div>'
                 + '<div class="fir-leg-card-row">Flow: <b>' + flowLabel + '</b></div>'
-                + '<div class="fir-leg-card-actions"><button class="fir-view-btn" data-card-idx="' + idx + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">View on Map</button></div>'
+                + ''
                 + '</div>';
             }).join('');
-            cards.querySelectorAll('.fir-view-btn[data-card-idx]').forEach(function(btn) {
+            cards.querySelectorAll('.fir-view-btn-REMOVED[data-card-idx]').forEach(function(btn) {
               btn.addEventListener('click', function() {
                 openFirRouteModal(window._firLegs[Number(btn.dataset.cardIdx)], window._firId);
               });
@@ -16573,31 +16577,54 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
         renderTimeline(allLegs, 'grouped', currentTlView);
         renderDivisionRouteMap(allLegs, firIds, division || '');
 
-        // Build table
+        // Set division table header
+        document.getElementById('firDetailHead').innerHTML = '<tr><th>WF</th><th>From</th><th>To</th><th>Date</th><th>ATC Route</th><th>FIRs</th><th>Staff Window <span class="col-help" title="Recommended staffing window:&#10;+/- 1 hour of the scheduled FIR entry and exit times" style="cursor:help;color:var(--muted);">?</span></th><th>Duration</th><th></th></tr>';
+
+        // Build table — group by sector
         window._firLegs = allLegs;
         window._firId = null;
 
+        // Group legs by sector (wf:from:to)
+        var sectorOrder = [];
+        var sectorMap = {};
+        allLegs.forEach(function(l, idx) {
+          var key = l.wf + ':' + l.from + ':' + l.to;
+          if (!sectorMap[key]) {
+            sectorMap[key] = { leg: l, firLegs: [], idx: idx };
+            sectorOrder.push(key);
+          }
+          sectorMap[key].firLegs.push({ fir: l._fir, staffStart: l.staffStart, staffEnd: l.staffEnd, staffMins: l.staffMins, flowType: l.flowType, depFlow: l.depFlow, idx: idx });
+        });
+
         var tbody = document.getElementById('firDetailBody');
-        tbody.innerHTML = allLegs.map(function(l, idx) {
-          var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
-          var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
-          return '<tr>'
-            + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
-            + '<td><span class="fir-badge">' + l._fir + '</span></td>'
-            + '<td>' + l.from + '</td>'
-            + '<td>' + l.to + '</td>'
-            + '<td>' + (l.date || '-') + '</td>'
-            + '<td class="staff-window">' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</td>'
-            + '<td class="">' + (l.staffMins ? l.staffMins + ' min' : '-') + '</td>'
-            + '<td class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
-            + '<td class="">' + (l.depFlow || '-') + '</td>'
-            + '<td class=""><span class="flow-badge ' + flowClass + '">' + flowLabel + '</span></td>'
-            + '<td class="" style="white-space:nowrap;">'
-            + '<button class="fir-view-btn" data-group-leg-idx="' + idx + '" data-leg-fir="' + l._fir + '" style="font-size:11px;padding:3px 8px;margin-right:4px;">View</button>'
-            + '<button class="fir-view-btn" data-view-fir="' + l._fir + '" style="font-size:11px;padding:3px 8px;">Open ' + l._fir + '</button>'
-            + '</td>'
+        var html = '';
+        sectorOrder.forEach(function(key) {
+          var s = sectorMap[key];
+          var l = s.leg;
+          var firCount = s.firLegs.length;
+          html += '<tr style="border-bottom:none;">'
+            + '<td rowspan="' + (firCount + 1) + '" style="font-weight:600;color:var(--accent);vertical-align:top;padding-top:12px;">' + l.wf + '</td>'
+            + '<td rowspan="' + (firCount + 1) + '" style="vertical-align:top;padding-top:12px;">' + l.from + '</td>'
+            + '<td rowspan="' + (firCount + 1) + '" style="vertical-align:top;padding-top:12px;">' + l.to + '</td>'
+            + '<td rowspan="' + (firCount + 1) + '" style="vertical-align:top;padding-top:12px;">' + (l.date || '-') + '</td>'
+            + '<td rowspan="' + (firCount + 1) + '" style="vertical-align:top;padding-top:12px;" class="fir-route-col"><div class="route-text">' + (l.atcRoute || '-') + '</div></td>'
+            + '<td colspan="4" style="padding:0;"></td>'
             + '</tr>';
-        }).join('');
+          s.firLegs.forEach(function(fl) {
+            var flowClass = fl.flowType === 'SLOTTED' ? 'slotted' : (fl.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
+            var flowLabel = fl.flowType === 'BOOKING_ONLY' ? 'Booking' : (fl.flowType === 'SLOTTED' ? 'Slotted' : 'None');
+            html += '<tr class="fir-sub-row">'
+              + '<td><span class="fir-badge fir-badge-link" data-view-fir="' + fl.fir + '" style="cursor:pointer;">' + fl.fir + '</span></td>'
+              + '<td class="staff-window">' + (fl.staffStart && fl.staffEnd ? fl.staffStart + ' \u2013 ' + fl.staffEnd : '-') + '</td>'
+              + '<td>' + (fl.staffMins ? fl.staffMins + ' min' : '-') + '</td>'
+              + '<td style="white-space:nowrap;display:flex;align-items:center;justify-content:space-between;gap:4px;">'
+              + '<span class="flow-badge ' + flowClass + '">' + flowLabel + '</span>'
+              + '<button class="fir-view-btn" data-view-fir="' + fl.fir + '" style="font-size:11px;padding:2px 6px;">Open ' + fl.fir + '</button>'
+              + '</td>'
+              + '</tr>';
+          });
+        });
+        tbody.innerHTML = html;
 
         tbody.querySelectorAll('.fir-route-col').forEach(function(td) {
           td.addEventListener('click', function() { this.classList.toggle('expanded'); });
@@ -16605,12 +16632,8 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
         tbody.querySelectorAll('.fir-view-btn[data-view-fir]').forEach(function(btn) {
           btn.addEventListener('click', function() { loadFirDetail(btn.dataset.viewFir); });
         });
-        tbody.querySelectorAll('.fir-view-btn[data-group-leg-idx]').forEach(function(btn) {
-          btn.addEventListener('click', function() {
-            var idx = Number(btn.dataset.groupLegIdx);
-            var fir = btn.dataset.legFir;
-            openFirRouteModal(window._firLegs[idx], fir);
-          });
+        tbody.querySelectorAll('.fir-badge-link[data-view-fir]').forEach(function(badge) {
+          badge.addEventListener('click', function() { loadFirDetail(badge.dataset.viewFir); });
         });
 
         // Mobile cards
@@ -16627,16 +16650,10 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
               + '<div class="fir-leg-card-row">Duration: <b>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</b></div>'
               + '<div class="fir-leg-card-row">Flow: <b>' + flowLabel + '</b></div>'
               + '<div class="fir-leg-card-actions">'
-              + '<button class="fir-view-btn" data-card-grp-idx="' + idx + '" data-card-fir="' + (l._fir || '') + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">View</button>'
               + '<button class="fir-open-btn" data-open-fir="' + (l._fir || '') + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">Open ' + (l._fir || '') + '</button>'
               + '</div>'
               + '</div>';
           }).join('');
-          cards.querySelectorAll('.fir-view-btn[data-card-grp-idx]').forEach(function(btn) {
-            btn.addEventListener('click', function() {
-              openFirRouteModal(window._firLegs[Number(btn.dataset.cardGrpIdx)], btn.dataset.cardFir);
-            });
-          });
           cards.querySelectorAll('.fir-open-btn[data-open-fir]').forEach(function(btn) {
             btn.addEventListener('click', function() { loadFirDetail(btn.dataset.openFir); });
           });
@@ -16898,6 +16915,22 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             return [(a[0]+b[0])/2, (a[1]+b[1])/2];
           }
 
+          // Add chevron arrows along a polyline
+          function addChevrons(line, color, map) {
+            if (!L.polylineDecorator) return;
+            L.polylineDecorator(line, {
+              patterns: [{
+                offset: '15%',
+                repeat: '80px',
+                symbol: L.Symbol.arrowHead({
+                  pixelSize: 8,
+                  polygon: false,
+                  pathOptions: { color: color, weight: 2, opacity: 0.7 }
+                })
+              }]
+            }).addTo(map);
+          }
+
           // Deduplicate legs by WF number (unique routes), collect all FIR legs per route
           var seen = {};
           var uniqueLegs = [];
@@ -16916,7 +16949,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             var key = leg.wf + ':' + leg.from + ':' + leg.to;
             var firLegs = legsByRoute[key] || [];
             var flowLabel = function(ft) { return ft === 'BOOKING_ONLY' ? 'Booking' : ft === 'SLOTTED' ? 'Slotted' : 'None'; };
-            var html = '<div style="font-family:inherit;min-width:280px;color:#fff;">'
+            var html = '<div style="font-family:inherit;min-width:280px;max-width:340px;color:#fff;">'
               + '<div style="font-weight:700;font-size:14px;margin-bottom:4px;color:' + color + ';">' + leg.wf + ': ' + leg.from + ' \u2192 ' + leg.to + '</div>'
               + '<div style="font-size:12px;color:#cbd5e1;margin-bottom:4px;">' + (leg.date || '') + '</div>'
               + '<div style="font-size:12px;color:#94a3b8;margin-bottom:10px;">Dep <strong style="color:#fff;">' + (leg.depTime || '-') + '</strong> UTC \u00a0\u2022\u00a0 Arr <strong style="color:#fff;">' + (leg.arrTime || '-') + '</strong> UTC</div>'
@@ -16930,7 +16963,14 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
                 + '<td style="padding:3px 6px;">' + flowLabel(fl.flowType) + '</td>'
                 + '</tr>';
             });
-            html += '</table></div>';
+            html += '</table>';
+            if (leg.atcRoute) {
+              html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155;">'
+                + '<div style="font-size:11px;color:#94a3b8;margin-bottom:3px;">ATC Route</div>'
+                + '<div style="font-size:11px;font-family:monospace;color:#cbd5e1;word-break:break-all;line-height:1.4;">' + leg.atcRoute + '</div>'
+                + '</div>';
+            }
+            html += '</div>';
             return html;
           }
 
@@ -16952,7 +16992,8 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
                 // Full route dim
                 var allCoords = pts.map(function(p) { return [p.lat, p.lon]; });
-                L.polyline(allCoords, { color: color, weight: 1.5, opacity: 0.25 }).addTo(divisionMap);
+                var routeLine = L.polyline(allCoords, { color: color, weight: 1.5, opacity: 0.25 }).addTo(divisionMap);
+                addChevrons(routeLine, color, divisionMap);
                 // Invisible wide hit target for hover
                 L.polyline(allCoords, { color: color, weight: 16, opacity: 0 }).addTo(divisionMap)
                   .on('mouseover', function() {
@@ -16980,7 +17021,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
                     bounds.push(cross, [b.lat, b.lon]);
                   }
                   if (seg) {
-                    L.polyline(seg, { color: color, weight: 3.5, opacity: 0.9 }).addTo(divisionMap);
+                    L.polyline(seg, { color: color, weight: 2.5, opacity: 0.85 }).addTo(divisionMap);
                     L.polyline(seg, { color: color, weight: 16, opacity: 0 }).addTo(divisionMap)
                       .on('mouseover', function() {
                     var infoEl = document.getElementById('divisionRouteInfo');

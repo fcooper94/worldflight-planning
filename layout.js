@@ -106,6 +106,7 @@ export default function renderLayout({
   src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   defer
 ></script>
+<script src="/leaflet.polylineDecorator.js" defer></script>
 <!-- Leaflet JS -->
 <script src="/icao-map.js"></script>
 <script src="/wf-world-map.js"></script>

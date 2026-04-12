@@ -16,6 +16,7 @@
     "dotenv": "^16.6.1",
     "express": "^4.19.2",
     "express-session": "^1.17.3",
+    "leaflet-polylinedecorator": "^1.6.0",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.4",
