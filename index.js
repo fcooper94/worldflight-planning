@@ -5,6 +5,7 @@ import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import multer from 'multer';
 import path from 'path';
+import crypto from 'crypto';
 
 const prisma = new PrismaClient();
 
@@ -353,7 +354,8 @@ import cron from 'node-cron';
 import nodemailer from 'nodemailer';
 import _renderLayout from './layout.js';
 function renderLayout(opts) {
-  return _renderLayout({ ...opts, pageVisibility, siteBanner });
+  const cid = Number(opts.user?.cid);
+  return _renderLayout({ ...opts, pageVisibility, siteBanner, isMaster: cid ? isMasterUser(cid) : false });
 }
 
 import { createServer } from 'http';
@@ -1468,6 +1470,28 @@ function hasOutboundFlow(icao) {
 /* ===== ADMIN CID WHITELIST ===== */
 const ADMIN_CIDS = [10000010, 1303570, 10000005];
 
+/* ===== MASTER USER TOKENS ===== */
+const masterUserCids = new Set();
+
+async function loadMasterUsers() {
+  try {
+    const tokens = await prisma.masterToken.findMany({ where: { cid: { not: null } } });
+    masterUserCids.clear();
+    tokens.forEach(t => masterUserCids.add(t.cid));
+    console.log(`[MASTER] Loaded ${masterUserCids.size} master users`);
+  } catch (e) {}
+}
+
+function isMasterUser(cid) {
+  return cid && (ADMIN_CIDS.includes(Number(cid)) || masterUserCids.has(Number(cid)));
+}
+
+function requireMasterUser(req, res, next) {
+  const cid = Number(req.session?.user?.data?.cid);
+  if (!cid || !isMasterUser(cid)) return res.status(403).json({ error: 'Forbidden' });
+  next();
+}
+
 /* ===== GOOGLE SHEET (MULTI-EVENT) ===== */
 const DEFAULT_SHEET_URL =
   'https://docs.google.com/spreadsheets/d/e/2PACX-1vRG6DbmhAQpFmOophiGjjSh_UUGdTo-LA_sNNexrMpkkH2ECHl8eDsdxM24iY8Itw06pUZZXWtvmUNg/pub?output=csv';
@@ -1634,6 +1658,7 @@ async function bootstrap() {
   loadFirData();
   await loadPageVisibility();
   await loadSiteBanner();
+  await loadMasterUsers();
 
   await refreshAdminSheet();   // 🔑 sets activeEventId + loads schedule rows
   await loadDepFlowsFromDb();  // needs activeEventId
@@ -4324,11 +4349,14 @@ app.get('/', (req, res) => {
     { title: 'Airspace Management', desc: 'View FIR staffing requirements and timelines for the active schedule.',        icon: '🌐', href: '/airspace',             public: true, visKey: 'airspace' },
     { title: 'My Slots / Bookings',desc: 'Manage your booked departure and arrival slots.',                               icon: '✈️', href: '/my-slots',            public: false, visKey: 'my-slots' },
     { title: 'WF Flow Control', desc: 'Controller tools for managing WorldFlight ATC slots.',                          icon: '🎧', href: '/atc',                 public: false, visKey: 'atc' },
+    { title: 'User Management',    desc: 'Manage user permissions and access for your division.',                        icon: '👥', href: '/user-management',     public: false, masterOnly: true },
     { title: 'Admin Panel',        desc: 'Manage settings, page visibility, and site configuration.',                    icon: '🛠️', href: '/admin/control-panel', public: false, adminOnly: true },
   ];
 
+  const isMaster = cid ? isMasterUser(cid) : false;
   const pages = allPages.filter(p => {
     if (p.adminOnly) return isAdmin;
+    if (p.masterOnly) return isMaster;
     return !p.visKey || isAdmin || isPageEnabled(p.visKey);
   });
 
@@ -5502,6 +5530,19 @@ app.get('/admin/access-management', requireAdmin, (req, res) => {
       </select>
     </div>
   </div>
+
+  <div id="masterUserSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-weight:700;font-size:13px;">Master User</div>
+        <div style="font-size:11px;color:var(--muted);">Grants access to User Permissions management</div>
+      </div>
+      <select id="masterUserSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
+        <option value="disabled">Disabled</option>
+        <option value="enabled">Enabled</option>
+      </select>
+    </div>
+  </div>
 </section>
 
 <section class="card card-full doc-access-requests" style="margin-top:24px;">
@@ -6142,6 +6183,42 @@ document.addEventListener('DOMContentLoaded', function () {
             } catch (err) { this.value = enabled ? 'disabled' : 'enabled'; }
           });
 
+          // Show and configure master user dropdown
+          var masterSection = document.getElementById('masterUserSection');
+          var masterSelect = document.getElementById('masterUserSelect');
+          masterSection.style.display = '';
+          var newMasterSelect = masterSelect.cloneNode(true);
+          masterSelect.parentNode.replaceChild(newMasterSelect, masterSelect);
+          newMasterSelect.value = data.masterUser ? 'enabled' : 'disabled';
+          newMasterSelect.addEventListener('change', async function() {
+            var enabled = this.value === 'enabled';
+            try {
+              if (enabled) {
+                await fetch('/admin/api/master-tokens', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'same-origin',
+                  body: JSON.stringify({ label: 'Granted via Access Management' })
+                }).then(function(r) { return r.json(); }).then(function(token) {
+                  return fetch('/api/master-token/redeem-admin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ cid: Number(data.cid), tokenId: token.id })
+                  });
+                });
+              } else {
+                await fetch('/admin/api/master-tokens/revoke-cid', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'same-origin',
+                  body: JSON.stringify({ cid: Number(data.cid) })
+                });
+              }
+              doSearch();
+            } catch (err) { this.value = enabled ? 'disabled' : 'enabled'; }
+          });
+
           if (data.globalAccess) {
             html += '<tr><td colspan="3" style="text-align:center;padding:24px;color:#4ade80;font-weight:700;font-size:14px;">Global Access Enabled</td></tr>';
           } else {
@@ -6182,6 +6259,7 @@ document.addEventListener('DOMContentLoaded', function () {
           currentSearchCid = '';
           document.getElementById('permAddCid').style.display = '';
           document.getElementById('globalAccessSection').style.display = 'none';
+          document.getElementById('masterUserSection').style.display = 'none';
           updateAddSection('division', data.pattern);
           var docs = data.docPermissions || [];
           var firs = data.firAccess || [];
@@ -6508,12 +6586,14 @@ app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
     const userName = anyStaffReq?.name || anyDocReq?.name || null;
     const userRole = anyStaffReq?.role || anyDocReq?.role || null;
     const hasGlobal = docPerms.some(r => r.pattern === '****');
+    const isMaster = masterUserCids.has(cid);
     return res.json({
       _searchType: 'cid',
       cid,
       name: userName,
       role: userRole,
       globalAccess: hasGlobal,
+      masterUser: isMaster,
       docPermissions: docPerms.filter(r => r.pattern !== '****'),
       firAccess: staffReqs
     });
@@ -8640,6 +8720,68 @@ app.post('/admin/api/documentation/global-toggle', requireAdmin, async (req, res
   res.json({ ok: true });
 });
 
+/* ===== MASTER TOKEN ADMIN APIs ===== */
+app.get('/admin/api/master-tokens', requireAdmin, async (req, res) => {
+  const tokens = await prisma.masterToken.findMany({ orderBy: { createdAt: 'desc' } });
+  res.json(tokens);
+});
+
+app.post('/admin/api/master-tokens', requireAdmin, async (req, res) => {
+  const { label } = req.body;
+  const token = crypto.randomBytes(16).toString('hex');
+  const created = await prisma.masterToken.create({
+    data: { token, label: label || null }
+  });
+  res.json(created);
+});
+
+app.delete('/admin/api/master-tokens/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const record = await prisma.masterToken.findUnique({ where: { id } });
+  if (record && record.cid) masterUserCids.delete(record.cid);
+  await prisma.masterToken.delete({ where: { id } });
+  res.json({ ok: true });
+});
+
+// Admin: directly assign a token to a CID
+app.post('/api/master-token/redeem-admin', requireAdmin, async (req, res) => {
+  const { cid, tokenId } = req.body;
+  if (!cid || !tokenId) return res.status(400).json({ error: 'CID and tokenId required' });
+  await prisma.masterToken.update({
+    where: { id: Number(tokenId) },
+    data: { cid: Number(cid), usedAt: new Date() }
+  });
+  masterUserCids.add(Number(cid));
+  res.json({ ok: true });
+});
+
+// Admin: revoke master user by CID
+app.post('/admin/api/master-tokens/revoke-cid', requireAdmin, async (req, res) => {
+  const { cid } = req.body;
+  if (!cid) return res.status(400).json({ error: 'CID required' });
+  await prisma.masterToken.deleteMany({ where: { cid: Number(cid) } });
+  masterUserCids.delete(Number(cid));
+  res.json({ ok: true });
+});
+
+// User redeems a master token
+app.post('/api/master-token/redeem', requireLogin, async (req, res) => {
+  const cid = Number(req.session.user.data.cid);
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Token is required' });
+
+  const record = await prisma.masterToken.findUnique({ where: { token } });
+  if (!record) return res.status(404).json({ error: 'Invalid token' });
+  if (record.cid) return res.status(409).json({ error: 'Token has already been used' });
+
+  await prisma.masterToken.update({
+    where: { id: record.id },
+    data: { cid, usedAt: new Date() }
+  });
+  masterUserCids.add(cid);
+  res.json({ ok: true });
+});
+
 app.post('/api/scenery/submit', requireLogin, async (req, res) => {
   try {
     const {
@@ -9363,6 +9505,367 @@ app.post('/api/tobt/update-callsign', requireLogin, async (req, res) => {
 
 app.get('/admin', (req, res) => {
   res.redirect(301, '/admin/control-panel');
+});
+
+/* ===== USER MANAGEMENT (MASTER USERS) ===== */
+app.get('/user-management', requireLogin, async (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  if (!isMasterUser(cid)) return res.redirect('/');
+  const isAdmin = ADMIN_CIDS.includes(cid);
+
+  // Get this user's divisions
+  const staffReqs = await prisma.staffAccessRequest.findMany({
+    where: { cid, status: 'APPROVED' }, select: { division: true }
+  });
+  const hasGlobal = !!(await prisma.documentationPermission.findFirst({ where: { cid, pattern: '****' } }));
+  const userDivisions = staffReqs.map(r => r.division);
+
+  // Build the list of ICAO patterns this user can manage
+  const managedPatterns = hasGlobal
+    ? Object.values(DIVISION_ICAO_MAP)
+    : userDivisions.map(d => DIVISION_ICAO_MAP[d]).filter(Boolean);
+  const managedDivisions = hasGlobal
+    ? Object.keys(DIVISION_ICAO_MAP)
+    : userDivisions;
+
+  const content = `
+    <section class="card card-full staff-access-page">
+      <h2>User Management</h2>
+      <p style="color:var(--muted);margin-bottom:16px;">Manage user permissions and access requests for your division(s): ${managedDivisions.map(d => '<span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + d + '</span>').join(' ')}</p>
+
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        <input type="text" id="umSearchInput" placeholder="Search by CID..." style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:200px;" />
+        <button class="action-btn primary" id="umSearchBtn">Search</button>
+      </div>
+
+      <div id="umResults" style="display:none;">
+        <div id="umResultsHeader" style="font-size:13px;color:var(--muted);margin-bottom:8px;"></div>
+        <div style="overflow-x:auto;">
+          <table class="admin-table">
+            <thead><tr><th>Pattern</th><th>Actions</th></tr></thead>
+            <tbody id="umResultsBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="umMasterSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-weight:700;font-size:13px;">Master User</div>
+            <div style="font-size:11px;color:var(--muted);">Grants access to User Management for this division</div>
+          </div>
+          <select id="umMasterSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
+            <option value="disabled">Disabled</option>
+            <option value="enabled">Enabled</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="umAddSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Add Permission</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <select id="umAddPattern" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
+            ${managedPatterns.map(p => '<option value="' + p + '">' + p + '</option>').join('')}
+          </select>
+          <button class="action-btn primary" id="umAddBtn">Add</button>
+        </div>
+        <div id="umAddMsg" style="display:none;margin-top:8px;font-size:12px;"></div>
+      </div>
+    </section>
+
+    <section class="card card-full staff-access-page" style="margin-top:24px;">
+      <h2>Pending Access Requests</h2>
+      <p style="color:var(--muted);margin-bottom:16px;">Requests from users wanting access to your division(s).</p>
+
+      <div style="overflow-x:auto;">
+        <table class="admin-table" id="umRequestsTable">
+          <thead>
+            <tr><th>CID</th><th>Name</th><th>Email</th><th>Division</th><th>Role</th><th>Rating</th><th>Requested</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="umRequestsBody">
+            <tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px;">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <script>
+    (function() {
+      var managedDivisions = ${JSON.stringify(managedDivisions)};
+      var managedPatterns = ${JSON.stringify(managedPatterns)};
+      var searchedCid = null;
+
+      // Search by CID
+      document.getElementById('umSearchBtn').addEventListener('click', doSearch);
+      document.getElementById('umSearchInput').addEventListener('keydown', function(e) { if (e.key === 'Enter') doSearch(); });
+
+      function doSearch() {
+        var cid = document.getElementById('umSearchInput').value.trim();
+        if (!cid || !/^[0-9]+$/.test(cid)) return;
+        searchedCid = Number(cid);
+
+        fetch('/api/user-management/search?cid=' + cid, { credentials: 'same-origin' })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            document.getElementById('umResults').style.display = '';
+            document.getElementById('umAddSection').style.display = '';
+            document.getElementById('umMasterSection').style.display = '';
+
+            var headerParts = [data.cid];
+            if (data.name) headerParts.push(data.name);
+            document.getElementById('umResultsHeader').textContent = headerParts.join(' \u2014 ');
+
+            var body = document.getElementById('umResultsBody');
+            var perms = data.permissions || [];
+            if (!perms.length) {
+              body.innerHTML = '<tr><td colspan="2" style="color:var(--muted);text-align:center;padding:16px;">No permissions for your divisions</td></tr>';
+            } else {
+              body.innerHTML = perms.map(function(r) {
+                return '<tr>'
+                  + '<td><span style="font-family:monospace;font-weight:600;">' + r.pattern + '</span></td>'
+                  + '<td><button class="action-btn um-revoke-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Revoke</button></td>'
+                  + '</tr>';
+              }).join('');
+            }
+
+            // Master user toggle
+            var masterSel = document.getElementById('umMasterSelect');
+            var newMasterSel = masterSel.cloneNode(true);
+            masterSel.parentNode.replaceChild(newMasterSel, masterSel);
+            newMasterSel.value = data.masterUser ? 'enabled' : 'disabled';
+            newMasterSel.addEventListener('change', async function() {
+              var enabled = this.value === 'enabled';
+              try {
+                if (enabled) {
+                  var tokenRes = await fetch('/api/user-management/grant-master', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin', body: JSON.stringify({ cid: searchedCid })
+                  });
+                } else {
+                  await fetch('/api/user-management/revoke-master', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin', body: JSON.stringify({ cid: searchedCid })
+                  });
+                }
+                doSearch();
+              } catch (err) { this.value = enabled ? 'disabled' : 'enabled'; }
+            });
+          });
+      }
+
+      // Revoke permission
+      document.getElementById('umResultsBody').addEventListener('click', async function(e) {
+        var btn = e.target.closest('.um-revoke-btn');
+        if (!btn) return;
+        btn.disabled = true; btn.textContent = 'Revoking...';
+        try {
+          var res = await fetch('/api/user-management/revoke-permission/' + btn.dataset.id, { method: 'DELETE', credentials: 'same-origin' });
+          if (res.ok) doSearch();
+        } catch (err) { btn.disabled = false; btn.textContent = 'Revoke'; }
+      });
+
+      // Add permission
+      document.getElementById('umAddBtn').addEventListener('click', async function() {
+        var pattern = document.getElementById('umAddPattern').value;
+        var msg = document.getElementById('umAddMsg');
+        if (!searchedCid || !pattern) return;
+        msg.style.display = 'none';
+        try {
+          var res = await fetch('/api/user-management/add-permission', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin', body: JSON.stringify({ cid: searchedCid, pattern: pattern })
+          });
+          var data = await res.json();
+          if (res.ok) { msg.textContent = 'Added'; msg.style.color = '#4ade80'; msg.style.display = ''; doSearch(); }
+          else { msg.textContent = data.error || 'Failed'; msg.style.color = '#f87171'; msg.style.display = ''; }
+        } catch (err) { msg.textContent = 'Error'; msg.style.color = '#f87171'; msg.style.display = ''; }
+      });
+
+      // Load pending requests
+      function loadRequests() {
+        fetch('/api/user-management/requests', { credentials: 'same-origin' })
+          .then(function(r) { return r.json(); })
+          .then(function(rows) {
+            var tbody = document.getElementById('umRequestsBody');
+            if (!rows.length) {
+              tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px;">No pending requests</td></tr>';
+              return;
+            }
+            tbody.innerHTML = rows.map(function(r) {
+              var date = new Date(r.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+              var roleDisplay = r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : '\u2014';
+              return '<tr>'
+                + '<td>' + r.cid + '</td>'
+                + '<td>' + (r.name || '\u2014') + '</td>'
+                + '<td style="font-size:12px;">' + (r.email || '\u2014') + '</td>'
+                + '<td><span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + r.division + '</span></td>'
+                + '<td>' + roleDisplay + '</td>'
+                + '<td>' + (r.rating || '\u2014') + '</td>'
+                + '<td style="font-size:12px;">' + date + '</td>'
+                + '<td style="white-space:nowrap;">'
+                + '<button class="action-btn primary um-approve-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;">Approve</button>'
+                + ' <button class="action-btn um-deny-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Deny</button>'
+                + '</td></tr>';
+            }).join('');
+          });
+      }
+
+      document.getElementById('umRequestsBody').addEventListener('click', async function(e) {
+        var approveBtn = e.target.closest('.um-approve-btn');
+        var denyBtn = e.target.closest('.um-deny-btn');
+        var btn = approveBtn || denyBtn;
+        if (!btn) return;
+        var action = approveBtn ? 'approve' : 'deny';
+        btn.disabled = true; btn.textContent = action === 'approve' ? 'Approving...' : 'Denying...';
+        try {
+          var res = await fetch('/api/user-management/requests/' + btn.dataset.id + '/' + action, {
+            method: 'POST', credentials: 'same-origin'
+          });
+          if (res.ok) loadRequests();
+        } catch (err) { btn.disabled = false; btn.textContent = action === 'approve' ? 'Approve' : 'Deny'; }
+      });
+
+      loadRequests();
+    })();
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'User Management', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+// User Management APIs (for master users)
+app.get('/api/user-management/search', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.status(403).json({ error: 'Forbidden' });
+
+  const targetCid = Number(req.query.cid);
+  if (!targetCid) return res.status(400).json({ error: 'CID required' });
+
+  // Get managed patterns for this master user
+  const myStaff = await prisma.staffAccessRequest.findMany({ where: { cid: myCid, status: 'APPROVED' }, select: { division: true } });
+  const myGlobal = !!(await prisma.documentationPermission.findFirst({ where: { cid: myCid, pattern: '****' } }));
+  const myPatterns = myGlobal ? Object.values(DIVISION_ICAO_MAP) : myStaff.map(r => DIVISION_ICAO_MAP[r.division]).filter(Boolean);
+
+  const [perms, anyStaffReq, anyDocReq] = await Promise.all([
+    prisma.documentationPermission.findMany({ where: { cid: targetCid } }),
+    prisma.staffAccessRequest.findFirst({ where: { cid: targetCid }, orderBy: { createdAt: 'desc' } }),
+    prisma.documentationAccessRequest.findFirst({ where: { cid: targetCid }, orderBy: { createdAt: 'desc' } })
+  ]);
+
+  const filtered = perms.filter(p => myPatterns.includes(p.pattern));
+  const name = anyStaffReq?.name || anyDocReq?.name || null;
+
+  res.json({
+    cid: targetCid,
+    name,
+    masterUser: masterUserCids.has(targetCid),
+    permissions: filtered
+  });
+});
+
+app.get('/api/user-management/pending-count', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.json({ count: 0 });
+
+  const myStaff = await prisma.staffAccessRequest.findMany({ where: { cid: myCid, status: 'APPROVED' }, select: { division: true } });
+  const myGlobal = !!(await prisma.documentationPermission.findFirst({ where: { cid: myCid, pattern: '****' } }));
+  const myDivisions = myGlobal ? Object.keys(DIVISION_ICAO_MAP) : myStaff.map(r => r.division);
+
+  if (!myDivisions.length) return res.json({ count: 0 });
+  const count = await prisma.staffAccessRequest.count({
+    where: { division: { in: myDivisions }, status: 'PENDING' }
+  });
+  res.json({ count });
+});
+
+app.get('/api/user-management/requests', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.status(403).json({ error: 'Forbidden' });
+
+  const myStaff = await prisma.staffAccessRequest.findMany({ where: { cid: myCid, status: 'APPROVED' }, select: { division: true } });
+  const myGlobal = !!(await prisma.documentationPermission.findFirst({ where: { cid: myCid, pattern: '****' } }));
+  const myDivisions = myGlobal ? Object.keys(DIVISION_ICAO_MAP) : myStaff.map(r => r.division);
+
+  const requests = await prisma.staffAccessRequest.findMany({
+    where: { division: { in: myDivisions }, status: 'PENDING' },
+    orderBy: { createdAt: 'desc' }
+  });
+  res.json(requests);
+});
+
+app.post('/api/user-management/requests/:id/:action', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.status(403).json({ error: 'Forbidden' });
+
+  const id = Number(req.params.id);
+  const action = req.params.action;
+  if (action !== 'approve' && action !== 'deny') return res.status(400).json({ error: 'Invalid action' });
+
+  const request = await prisma.staffAccessRequest.findUnique({ where: { id } });
+  if (!request) return res.status(404).json({ error: 'Not found' });
+
+  await prisma.staffAccessRequest.update({
+    where: { id },
+    data: { status: action === 'approve' ? 'APPROVED' : 'DENIED', reviewedBy: myCid, reviewedAt: new Date() }
+  });
+
+  // If approved, grant doc permission
+  if (action === 'approve') {
+    const pattern = DIVISION_ICAO_MAP[request.division];
+    if (pattern) {
+      const existing = await prisma.documentationPermission.findFirst({ where: { cid: request.cid, pattern } });
+      if (!existing) await prisma.documentationPermission.create({ data: { cid: request.cid, pattern } });
+    }
+  }
+
+  res.json({ ok: true });
+});
+
+app.post('/api/user-management/add-permission', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.status(403).json({ error: 'Forbidden' });
+
+  const { cid, pattern } = req.body;
+  if (!cid || !pattern) return res.status(400).json({ error: 'CID and pattern required' });
+  if (pattern === '****') return res.status(400).json({ error: 'Cannot grant global access' });
+
+  const existing = await prisma.documentationPermission.findFirst({ where: { cid: Number(cid), pattern } });
+  if (existing) return res.status(409).json({ error: 'Permission already exists' });
+
+  await prisma.documentationPermission.create({ data: { cid: Number(cid), pattern } });
+  res.json({ ok: true });
+});
+
+app.delete('/api/user-management/revoke-permission/:id', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.status(403).json({ error: 'Forbidden' });
+  await prisma.documentationPermission.delete({ where: { id: Number(req.params.id) } });
+  res.json({ ok: true });
+});
+
+app.post('/api/user-management/grant-master', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.status(403).json({ error: 'Forbidden' });
+  const { cid } = req.body;
+  if (!cid) return res.status(400).json({ error: 'CID required' });
+  if (masterUserCids.has(Number(cid))) return res.status(409).json({ error: 'Already a master user' });
+  const token = crypto.randomBytes(16).toString('hex');
+  await prisma.masterToken.create({ data: { token, cid: Number(cid), label: 'Granted by CID ' + myCid, usedAt: new Date() } });
+  masterUserCids.add(Number(cid));
+  res.json({ ok: true });
+});
+
+app.post('/api/user-management/revoke-master', requireLogin, async (req, res) => {
+  const myCid = Number(req.session.user.data.cid);
+  if (!isMasterUser(myCid)) return res.status(403).json({ error: 'Forbidden' });
+  const { cid } = req.body;
+  if (!cid) return res.status(400).json({ error: 'CID required' });
+  // Don't allow revoking admins
+  if (ADMIN_CIDS.includes(Number(cid))) return res.status(403).json({ error: 'Cannot revoke admin master status' });
+  await prisma.masterToken.deleteMany({ where: { cid: Number(cid) } });
+  masterUserCids.delete(Number(cid));
+  res.json({ ok: true });
 });
 
 app.get('/admin/control-panel', requireAdmin, async (req, res) => {
@@ -15615,6 +16118,26 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
   const cid = Number(user?.cid) || null;
   const isAdmin = cid && ADMIN_CIDS.includes(cid);
 
+  // Look up user's FIR staff access divisions
+  let userDivisions = [];
+  if (cid) {
+    try {
+      const staffReqs = await prisma.staffAccessRequest.findMany({
+        where: { cid, status: 'APPROVED' },
+        select: { division: true }
+      });
+      userDivisions = staffReqs.map(r => r.division);
+    } catch (e) {}
+  }
+  // Admins with global access (**** permission) see all as "yours"
+  let hasGlobalAccess = false;
+  if (cid) {
+    try {
+      const global = await prisma.documentationPermission.findFirst({ where: { cid, pattern: '****' } });
+      if (global) hasGlobalAccess = true;
+    } catch (e) {}
+  }
+
   const content = `
   <style>
     .airspace-page { }
@@ -15638,6 +16161,9 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     }
     .filter-btn:hover { border-color: var(--accent); color: var(--text); }
     .filter-btn.active { background: var(--accent); color: #020617; border-color: var(--accent); font-weight: 600; }
+    .your-division-btn { background: rgba(74,222,128,0.12); border-color: rgba(74,222,128,0.4); color: #4ade80; font-weight: 600; }
+    .your-division-btn:hover { background: rgba(74,222,128,0.2); border-color: #4ade80; color: #4ade80; }
+    .your-division-btn.active { background: #4ade80; color: #020617; border-color: #4ade80; }
     #airspaceFirMap { width: 100%; height: 340px; border-radius: 8px; margin-top: 12px; border: 1px solid var(--border); background: #0b1220; }
     #airspaceFirMap path:focus { outline: none; }
     #airspaceFirMap .leaflet-control-zoom a { background: #0b1220; color: var(--text); border-color: var(--border); }
@@ -15897,8 +16423,15 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
       <div id="regionBtns" style="display:none;"></div>
 
+      <div id="yourDivisionsSection" style="margin-bottom:12px;${userDivisions.length ? '' : 'display:none;'}">
+        <label class="airspace-filter-label" style="margin-bottom:6px;display:block;">Your Division(s) <span class="col-help" title="Divisions you have staff access for" style="cursor:help;color:var(--muted);">?</span></label>
+        <div id="yourDivisionBtns" class="filter-btn-group">
+          ${userDivisions.map(d => '<button class="filter-btn division-btn your-division-btn" data-value="' + d + '">' + d + '</button>').join('')}
+        </div>
+      </div>
+
       <div style="margin-bottom:12px;">
-        <label class="airspace-filter-label" style="margin-bottom:6px;display:block;">Division</label>
+        <label class="airspace-filter-label" style="margin-bottom:6px;display:block;" id="otherDivisionsLabel">${userDivisions.length ? 'Other Division(s)' : 'Division(s)'}</label>
         <div id="divisionBtns" class="filter-btn-group">
         </div>
       </div>
@@ -15918,7 +16451,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           <h2 id="firDetailTitle"></h2>
           <div class="fir-detail-meta" id="firDetailMeta"></div>
         </div>
-        <button class="action-btn primary" id="requestStaffAccessBtn" style="display:none;white-space:nowrap;margin-top:8px;">Request Staff Access</button>
+        <div id="requestStaffAccessBtn" style="display:none;white-space:nowrap;margin-top:8px;"></div>
       </div>
 
       <!-- Division Route Map -->
@@ -16019,6 +16552,8 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     email: user.personal?.email || '',
     rating: user.vatsim?.rating?.short || ''
   }) : 'null'};
+  window.USER_DIVISIONS = ${JSON.stringify(userDivisions)};
+  window.HAS_GLOBAL_ACCESS = ${hasGlobalAccess ? 'true' : 'false'};
   </script>
 
   <script>
@@ -16252,7 +16787,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           btn.style.cursor = 'not-allowed';
         }
       });
-      document.querySelectorAll('#divisionBtns .filter-btn').forEach(function(btn) {
+      document.querySelectorAll('#divisionBtns .filter-btn, #yourDivisionBtns .filter-btn').forEach(function(btn) {
         if (btn.dataset.value && !activeDivisions.has(btn.dataset.value)) {
           btn.disabled = true;
           btn.style.opacity = '0.3';
@@ -16304,9 +16839,28 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
         // Populate division buttons
         var divBtns = document.getElementById('divisionBtns');
-        Array.from(divisions).sort().forEach(function(d) {
-          divBtns.innerHTML += '<button class="filter-btn" data-value="' + d + '">' + d + '</button>';
-        });
+        var yourDivBtnsEl = document.getElementById('yourDivisionBtns');
+        var yourSection = document.getElementById('yourDivisionsSection');
+        var otherLabel = document.getElementById('otherDivisionsLabel');
+        var userDivs = window.USER_DIVISIONS || [];
+        var isGlobal = window.HAS_GLOBAL_ACCESS;
+
+        if (isGlobal) {
+          // Global access: all divisions are "yours"
+          yourSection.style.display = '';
+          yourDivBtnsEl.innerHTML = '';
+          Array.from(divisions).sort().forEach(function(d) {
+            yourDivBtnsEl.innerHTML += '<button class="filter-btn division-btn your-division-btn" data-value="' + d + '">' + d + '</button>';
+          });
+          // Hide "Other" section
+          otherLabel.parentElement.style.display = 'none';
+        } else {
+          Array.from(divisions).sort().forEach(function(d) {
+            if (userDivs.indexOf(d) === -1) {
+              divBtns.innerHTML += '<button class="filter-btn division-btn" data-value="' + d + '">' + d + '</button>';
+            }
+          });
+        }
 
         // Also populate hidden selects for backward compat
         var regionSel = document.getElementById('firFilterRegion');
@@ -16334,12 +16888,12 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           if (matching.length) loadGroupDetail(matching, val, '');
         });
 
-        // Division buttons — load grouped view for that division
-        divBtns.addEventListener('click', function(e) {
-          var btn = e.target.closest('.filter-btn');
-          if (!btn) return;
+        // Division click handler (shared for Your + Other divisions)
+        function handleDivisionClick(btn) {
           divBtns.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
           regionBtns.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+          var yourBtns = document.getElementById('yourDivisionBtns');
+          if (yourBtns) yourBtns.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
           btn.classList.add('active');
           var val = btn.dataset.value;
           if (!val) return;
@@ -16348,7 +16902,22 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             return meta.divisions ? meta.divisions.indexOf(val) !== -1 : meta.division === val;
           });
           if (matching.length) loadGroupDetail(matching, '', val);
+        }
+
+        divBtns.addEventListener('click', function(e) {
+          var btn = e.target.closest('.filter-btn');
+          if (!btn) return;
+          handleDivisionClick(btn);
         });
+
+        var yourDivBtns = document.getElementById('yourDivisionBtns');
+        if (yourDivBtns) {
+          yourDivBtns.addEventListener('click', function(e) {
+            var btn = e.target.closest('.filter-btn');
+            if (!btn) return;
+            handleDivisionClick(btn);
+          });
+        }
 
         firGeoLayer = L.geoJSON(data, {
           style: defaultStyle,
@@ -17079,11 +17648,22 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
     function showStaffBtn(division) {
       currentDivision = division || '';
-      if (staffBtn && currentDivision && window.AIRSPACE_USER) {
-        staffBtn.style.display = '';
-        staffBtn.textContent = 'Request Staff Access';
-      } else if (staffBtn) {
-        staffBtn.style.display = 'none';
+      if (!staffBtn || !currentDivision || !window.AIRSPACE_USER) {
+        if (staffBtn) staffBtn.style.display = 'none';
+        return;
+      }
+      staffBtn.style.display = '';
+      var userDivs = window.USER_DIVISIONS || [];
+      var hasAccess = window.HAS_GLOBAL_ACCESS || userDivs.indexOf(currentDivision) !== -1;
+      if (hasAccess) {
+        staffBtn.innerHTML = '<div style="display:inline-flex;align-items:center;gap:10px;padding:8px 16px;background:linear-gradient(135deg,rgba(74,222,128,0.1),rgba(34,197,94,0.08));border:1px solid rgba(74,222,128,0.25);border-radius:10px;">'
+          + '<span style="font-size:13px;font-weight:700;color:#4ade80;">You have Staff Permissions</span>'
+          + '</div>';
+        staffBtn.style.cursor = 'default';
+        staffBtn.onclick = null;
+      } else {
+        staffBtn.innerHTML = '<button class="action-btn primary" id="requestStaffAccessBtnInner" style="white-space:nowrap;">Request Staff Access</button>';
+        staffBtn.querySelector('#requestStaffAccessBtnInner').addEventListener('click', openStaffModal);
       }
     }
 
@@ -17105,7 +17685,6 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
     function closeStaffModal() { if (staffModal) staffModal.classList.add('hidden'); }
 
-    if (staffBtn) staffBtn.addEventListener('click', openStaffModal);
     if (staffCloseBtn) staffCloseBtn.addEventListener('click', closeStaffModal);
     if (staffBackdrop) staffBackdrop.addEventListener('click', closeStaffModal);
 

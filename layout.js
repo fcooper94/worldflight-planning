@@ -2,6 +2,7 @@ export default function renderLayout({
   title,
   user,
   isAdmin,
+  isMaster = false,
   content,
   layoutClass = '',
   pageVisibility = {},
@@ -68,6 +69,19 @@ export default function renderLayout({
         <span class="label">Airspace Management</span>
       </a>` : ''}
     </div>` : ''}
+
+    ${isMaster ? `
+    <div class="nav-section">
+      <div class="nav-title">FIR Manager</div>
+      <a href="/user-management" class="nav-item" data-tooltip="User Management">
+        <span class="icon">👥</span>
+        <span class="label">
+          User Management
+          <span id="firManagerBadge" class="nav-badge hidden"></span>
+        </span>
+      </a>
+    </div>
+    ` : ''}
 
     ${isAdmin ? `
     <div class="nav-section nav-admin">
@@ -1065,6 +1079,21 @@ document.addEventListener('click', (e) => {
   } catch (err) {
     console.error('Failed to load admin badge', err);
   }
+})();
+
+// FIR Manager badge
+(async function() {
+  var firBadge = document.getElementById('firManagerBadge');
+  if (!firBadge) return;
+  try {
+    var res = await fetch('/api/user-management/pending-count', { credentials: 'same-origin' }).catch(function() { return null; });
+    if (!res || !res.ok) return;
+    var data = await res.json();
+    if (data.count > 0) {
+      firBadge.textContent = data.count;
+      firBadge.classList.remove('hidden');
+    }
+  } catch(e) {}
 })();
 </script>
 <script>
