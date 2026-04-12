@@ -137,6 +137,23 @@ model DocumentationAccessRequest {
   @@index([status])
 }
 
+model StaffAccessRequest {
+  id          Int       @id @default(autoincrement())
+  cid         Int
+  division    String
+  name        String?
+  email       String?
+  role        String?
+  rating      String?
+  status      String    @default("PENDING")
+  reviewedBy  Int?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([cid])
+  @@index([status])
+}
+
 model WfVisitedAirport {
   id        Int      @id @default(autoincrement())
   icao      String

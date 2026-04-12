@@ -198,6 +198,8 @@ export default function renderLayout({
   </div>
   ` : ''}
 
+  ${isAdmin ? '<div id="adminAlertBanner" class="admin-alert-banner"></div>' : ''}
+
   <!-- ===== PAGE CONTENT ===== -->
   <main class="dashboard ${layoutClass}">
     ${content}
@@ -1002,13 +1004,27 @@ document.addEventListener('click', (e) => {
 (async function updateAdminBadge() {
   try {
     const badge = document.getElementById('adminBadge');
-    if (!badge) return;
+    const alertBanner = document.getElementById('adminAlertBanner');
+    if (!badge && !alertBanner) return;
+
+    // Quick check: if no badge, test if user is admin before fetching
+    if (!badge) {
+      const probe = await fetch('/admin/api/staff-access-requests/pending-count', { credentials: 'same-origin' }).catch(() => null);
+      if (!probe || !probe.ok) return; // not admin
+      const { count } = await probe.json();
+      if (count > 0 && alertBanner) {
+        alertBanner.innerHTML = '<a href="/admin/access-management" class="admin-alert-link">\uD83D\uDD11 ' + count + ' pending staff access request' + (count > 1 ? 's' : '') + ' \u2014 View Access Management \u2192</a>';
+      }
+      return;
+    }
 
     let total = 0;
 
-    const [sceneryRes, docRes] = await Promise.all([
+    const [sceneryRes, docRes, airacRes, staffRes] = await Promise.all([
       fetch('/api/admin/scenery/pending-count').catch(() => null),
-      fetch('/admin/api/documentation-access-requests/pending-count').catch(() => null)
+      fetch('/admin/api/documentation-access-requests/pending-count').catch(() => null),
+      fetch('/api/admin/airac/status').catch(() => null),
+      fetch('/admin/api/staff-access-requests/pending-count').catch(() => null)
     ]);
 
     if (sceneryRes && sceneryRes.ok) {
@@ -1019,12 +1035,31 @@ document.addEventListener('click', (e) => {
       const { count } = await docRes.json();
       total += count;
     }
+    if (airacRes && airacRes.ok) {
+      const data = await airacRes.json();
+      if (data.alert) total += 1;
+    }
+    let staffCount = 0;
+    if (staffRes && staffRes.ok) {
+      const { count } = await staffRes.json();
+      staffCount = count;
+      total += count;
+    }
 
     if (total > 0) {
       badge.textContent = total;
       badge.classList.remove('hidden');
     } else {
       badge.classList.add('hidden');
+    }
+
+    // Show admin alert banner for pending notifications
+    if (alertBanner) {
+      const alerts = [];
+      if (staffCount > 0) alerts.push('🔑 ' + staffCount + ' pending staff access request' + (staffCount > 1 ? 's' : ''));
+      if (alerts.length) {
+        alertBanner.innerHTML = '<a href="/admin/access-management" class="admin-alert-link">' + alerts.join(' &nbsp;&bull;&nbsp; ') + ' — View Access Management →</a>';
+      }
     }
   } catch (err) {
     console.error('Failed to load admin badge', err);

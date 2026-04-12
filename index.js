@@ -646,6 +646,30 @@ io.use((socket, next) => {
 const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots'];
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
+// Division → ICAO prefix mapping for document upload permissions
+const DIVISION_ICAO_MAP = {
+  'VATUK':   'EG**',
+  'VATUSA':  'K***',
+  'VATCAN':  'C***',
+  'VATNZ':   'NZ**',
+  'VATPAC':  'Y***',
+  'VATJPN':  'RJ**',
+  'VATSEA':  'W***',
+  'VATEUD':  'E***',
+  'VATMENA': 'O***',
+  'VATSAF':  'FA**',
+  'VATSSA':  'S***',
+  'VATKOR':  'RK**',
+  'VATIND':  'VI**',
+  'VATPRC':  'Z***',
+  'VATHK':   'VH**',
+  'VATTW':   'RC**',
+  'VATBRZ':  'SB**',
+  'VATMEX':  'MM**',
+  'VATCAR':  'T***',
+  'VATSIM':  '****'
+};
+
 async function loadPageVisibility() {
   const rows = await prisma.pageVisibility.findMany();
   const found = new Set();
@@ -5423,53 +5447,70 @@ app.post('/admin/api/scenery/:id/reject', requireAdmin, async (req, res) => {
 });
 
 app.get('/admin/documentation-access', requireAdmin, (req, res) => {
+  res.redirect('/admin/access-management');
+});
+
+app.get('/admin/access-management', requireAdmin, (req, res) => {
   const content = `
-<section class="card card-narrow">
+<a href="/admin" class="back-link">\u2190 Back to Admin</a>
+
+<section class="card card-full staff-access-page">
   <h2>Manage User Access</h2>
+  <p style="color:var(--muted);margin-bottom:16px;">Search by CID, Division (e.g. VATUK), or airport ICAO (e.g. EGLL) to view and manage document upload permissions.</p>
 
-  <form id="docAccessSearch">
-    <label>
-      VATSIM CID
-      <input id="docAccessCid" required>
-    </label>
+  <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+    <input type="text" id="permSearchInput" placeholder="CID, Division, or ICAO..." style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:240px;text-transform:uppercase;" />
+    <button class="action-btn primary" id="permSearchBtn">Search</button>
+  </div>
 
-    <button class="action-btn">Load Permissions</button>
-  </form>
+  <div id="permResults" style="display:none;">
+    <div id="permResultsHeader" style="font-size:13px;color:var(--muted);margin-bottom:8px;"></div>
+    <div style="overflow-x:auto;">
+      <table class="admin-table">
+        <thead id="permResultsHead"><tr><th>CID</th><th>Pattern</th><th>Actions</th></tr></thead>
+        <tbody id="permResultsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="permAddSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;">
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Add Permission</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <input type="text" id="permAddCid" placeholder="CID" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:120px;" />
+      <select id="permAddType" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
+        <option value="both">Both</option>
+        <option value="document">Document Only</option>
+        <option value="fir">FIR Only</option>
+      </select>
+      <input type="text" id="permAddPattern" placeholder="Access (e.g. EG**)" maxlength="10" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:160px;text-transform:uppercase;" />
+      <span id="permAddHelp" class="col-help" title="" style="display:none;cursor:help;font-size:14px;color:var(--muted);">?</span>
+      <span id="permAddPatternHint" style="display:none;font-size:12px;color:var(--muted);"></span>
+      <button class="action-btn primary" id="permAddBtn">Add</button>
+    </div>
+    <div id="permAddMsg" style="display:none;margin-top:8px;font-size:12px;"></div>
+  </div>
+
+  <div id="globalAccessSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-weight:700;font-size:13px;">Global FIR and Document Access</div>
+        <div style="font-size:11px;color:var(--muted);">Overrides all individual permissions for this user</div>
+      </div>
+      <select id="globalAccessSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
+        <option value="disabled">Disabled</option>
+        <option value="enabled">Enabled</option>
+      </select>
+    </div>
+  </div>
 </section>
 
-<section class="card hidden" id="docAccessPanel">
-  <h3>Permissions for CID <span id="currentCid"></span></h3>
+<section class="card card-full doc-access-requests" style="margin-top:24px;">
+  <h2>Document Upload Requests</h2>
 
   <table class="admin-table">
     <thead>
       <tr>
-        <th>Pattern</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="docAccessTable"></tbody>
-  </table>
-
-  <form id="addDocAccess">
-    <input id="newPattern" placeholder="EGLL or EG**" required>
-    <button class="action-btn">Add Permission</button>
-  </form>
-</section>
-
-<section class="card card-narrow doc-access-requests">
-  <h2>Documentation Upload Access Requests</h2>
-
-  <table class="admin-table">
-    <thead>
-      <tr>
-        <th>CID</th>
-        <th>Name</th>
-        <th>Email</th>
-        <th>Role</th>
-        <th>Pattern</th>
-        <th>Requested</th>
-        <th>Status</th>
-        <th>Actions</th>
+        <th>CID</th><th>Name</th><th>Email</th><th>Role</th><th>Pattern</th><th>Requested</th><th>Status</th><th>Actions</th>
       </tr>
     </thead>
     <tbody id="docAccessRequestsTable">
@@ -5477,6 +5518,32 @@ app.get('/admin/documentation-access', requireAdmin, (req, res) => {
     </tbody>
   </table>
 </section>
+
+<section class="card card-full staff-access-page" id="firRequestsSection" style="margin-top:24px;">
+  <h2>FIR Access Requests</h2>
+
+  <div style="overflow-x:auto;">
+    <table class="admin-table" id="staffAccessTable">
+      <thead>
+        <tr>
+          <th>CID</th><th>Name</th><th>Email</th><th>Division</th><th>Role</th><th>Rating</th><th>Requested</th><th>Status</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="staffAccessBody">
+        <tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px;">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- Hidden: old CID search elements (kept for script compatibility) -->
+<div style="display:none;">
+  <form id="docAccessSearch"><input id="docAccessCid"><button type="submit"></button></form>
+  <div id="docAccessPanel"><span id="currentCid"></span>
+    <table><tbody id="docAccessTable"></tbody></table>
+    <form id="addDocAccess"><input id="newPattern"><button type="submit"></button></form>
+  </div>
+</div>
 
 <!-- APPROVAL MODAL -->
 <div id="approvalModal" class="modal hidden">
@@ -5951,11 +6018,459 @@ document.addEventListener('DOMContentLoaded', function () {
   loadRequests();
 
 });
+
+// ===== PERMISSION MANAGER =====
+(function() {
+  var searchInput = document.getElementById('permSearchInput');
+  var searchBtn = document.getElementById('permSearchBtn');
+  var resultsDiv = document.getElementById('permResults');
+  var resultsHeader = document.getElementById('permResultsHeader');
+  var resultsBody = document.getElementById('permResultsBody');
+  var addSection = document.getElementById('permAddSection');
+  var addMsg = document.getElementById('permAddMsg');
+  var patternInput = document.getElementById('permAddPattern');
+  var helpIcon = document.getElementById('permAddHelp');
+  var patternHint = document.getElementById('permAddPatternHint');
+  var typeSelect = document.getElementById('permAddType');
+  var currentSearchType = '';
+  var currentDivisionPattern = '';
+  var currentSearchCid = '';
+
+  typeSelect.addEventListener('change', function() {
+    var type = typeSelect.value;
+    // In CID mode, access field is always enabled
+    if (currentSearchType === 'cid') {
+      patternInput.disabled = false;
+      patternInput.style.opacity = '1';
+      patternHint.style.display = 'none';
+      if (type === 'document') {
+        patternInput.placeholder = 'Pattern (e.g. EG**, EGLL)';
+      } else {
+        patternInput.placeholder = 'Division or pattern (e.g. VATUK, EG**)';
+      }
+      return;
+    }
+    if (type === 'document') {
+      patternInput.disabled = false;
+      patternInput.style.opacity = '1';
+      patternHint.style.display = 'none';
+    } else {
+      patternInput.disabled = true;
+      patternInput.style.opacity = '0.4';
+      patternInput.value = currentDivisionPattern || '';
+      patternHint.textContent = currentDivisionPattern ? 'Full FIR: ' + currentDivisionPattern : '';
+      patternHint.style.display = currentDivisionPattern ? '' : 'none';
+    }
+  });
+
+  function updateAddSection(searchType, divPattern) {
+    currentSearchType = searchType;
+    currentDivisionPattern = divPattern || '';
+    if (searchType === 'cid') {
+      patternInput.placeholder = 'Division or pattern (e.g. VATUK, EG**)';
+      patternInput.disabled = false;
+      patternInput.style.opacity = '1';
+      helpIcon.title = 'Enter a division name (e.g. VATUK) or ICAO pattern (e.g. EG**)';
+      helpIcon.style.display = '';
+      patternHint.style.display = 'none';
+      typeSelect.value = 'both';
+      return;
+    }
+    if (searchType === 'division' && divPattern) {
+      var prefix = divPattern.replace(/[*]/g, '');
+      patternInput.placeholder = 'Access (e.g. ' + divPattern + ')';
+      var tip = prefix + '*** = all ' + prefix + ' airports';
+      if (prefix.length < 3) tip += ', ' + prefix + 'A** = narrower';
+      tip += ', ' + prefix + 'AB* = specific region';
+      tip += ', ' + prefix + 'ABC = single airport';
+      tip += '\\nUse Global Access dropdown for full access';
+      helpIcon.title = tip;
+      helpIcon.style.display = '';
+    } else {
+      patternInput.placeholder = 'Access (e.g. EG**)';
+      helpIcon.style.display = 'none';
+    }
+    // Reset type dropdown and trigger its logic
+    typeSelect.value = 'both';
+    typeSelect.dispatchEvent(new Event('change'));
+  }
+
+  function doSearch() {
+    var q = searchInput.value.trim();
+    if (!q) return;
+    fetch('/admin/api/documentation/search?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        resultsDiv.style.display = '';
+        addSection.style.display = '';
+
+        var thead = document.getElementById('permResultsHead');
+
+        // CID search returns grouped object
+        if (data._searchType === 'cid') {
+          thead.style.display = 'none';
+          currentSearchCid = data.cid;
+          updateAddSection('cid', '');
+          // Hide CID input, show access field
+          document.getElementById('permAddCid').style.display = 'none';
+
+          var headerParts = [data.cid];
+          if (data.name) headerParts.push(data.name);
+          if (data.role) headerParts.push(data.role.charAt(0).toUpperCase() + data.role.slice(1));
+          resultsHeader.textContent = headerParts.join(' \u2014 ');
+
+          var html = '';
+
+          // Show and configure global access dropdown
+          var globalSection = document.getElementById('globalAccessSection');
+          var globalSelect = document.getElementById('globalAccessSelect');
+          globalSection.style.display = '';
+          // Remove old listener by cloning
+          var newSelect = globalSelect.cloneNode(true);
+          globalSelect.parentNode.replaceChild(newSelect, globalSelect);
+          newSelect.value = data.globalAccess ? 'enabled' : 'disabled';
+          newSelect.addEventListener('change', async function() {
+            var enabled = this.value === 'enabled';
+            try {
+              await fetch('/admin/api/documentation/global-toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ cid: Number(data.cid), enabled: enabled })
+              });
+              doSearch();
+            } catch (err) { this.value = enabled ? 'disabled' : 'enabled'; }
+          });
+
+          if (data.globalAccess) {
+            html += '<tr><td colspan="3" style="text-align:center;padding:24px;color:#4ade80;font-weight:700;font-size:14px;">Global Access Enabled</td></tr>';
+          } else {
+            var docs = data.docPermissions || [];
+            var firs = data.firAccess || [];
+
+            if (!docs.length && !firs.length) {
+              html += '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:16px;">No individual permissions</td></tr>';
+            } else {
+              if (docs.length) {
+                html += '<tr><td colspan="3" style="font-weight:700;font-size:12px;color:var(--accent);padding:8px 12px;text-transform:uppercase;letter-spacing:0.5px;">Document Upload Permissions</td></tr>';
+                html += docs.map(function(r) {
+                  return '<tr>'
+                    + '<td colspan="2"><span style="font-family:monospace;font-weight:600;">' + r.pattern + '</span></td>'
+                    + '<td><button class="action-btn perm-revoke-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Revoke</button></td>'
+                    + '</tr>';
+                }).join('');
+              }
+              if (firs.length) {
+                html += '<tr><td colspan="3" style="font-weight:700;font-size:12px;color:var(--accent);padding:8px 12px;text-transform:uppercase;letter-spacing:0.5px;' + (docs.length ? 'border-top:1px solid var(--border);' : '') + '">FIR Access</td></tr>';
+                html += firs.map(function(r) {
+                  return '<tr>'
+                    + '<td colspan="2"><span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + r.division + '</span> <span style="font-size:12px;color:var(--muted);">' + (r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : '') + '</span></td>'
+                    + '<td><button class="action-btn fir-revoke-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Revoke</button></td>'
+                    + '</tr>';
+                }).join('');
+              }
+            }
+          }
+
+          resultsBody.innerHTML = html;
+          return;
+        }
+
+        // Division search returns grouped object
+        if (data._searchType === 'division') {
+          thead.style.display = 'none';
+          currentSearchCid = '';
+          document.getElementById('permAddCid').style.display = '';
+          document.getElementById('globalAccessSection').style.display = 'none';
+          updateAddSection('division', data.pattern);
+          var docs = data.docPermissions || [];
+          var firs = data.firAccess || [];
+          if (!docs.length && !firs.length) {
+            resultsHeader.textContent = 'No access found for ' + data.division;
+            resultsBody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:16px;">No results</td></tr>';
+            return;
+          }
+          resultsHeader.textContent = data.division + ' \u2014 ' + data.pattern;
+          var html = '';
+          if (docs.length) {
+            html += '<tr><td colspan="3" style="font-weight:700;font-size:12px;color:var(--accent);padding:8px 12px;text-transform:uppercase;letter-spacing:0.5px;">Document Upload Permissions (' + data.pattern + ')</td></tr>';
+            html += docs.map(function(r) {
+              var nameStr = r._name ? ' <span style="color:var(--muted);font-size:12px;">' + r._name + '</span>' : '';
+              return '<tr>'
+                + '<td>' + r.cid + nameStr + '</td>'
+                + '<td><span style="font-family:monospace;font-weight:600;">' + r.pattern + '</span></td>'
+                + '<td><button class="action-btn perm-revoke-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Revoke</button></td>'
+                + '</tr>';
+            }).join('');
+          }
+          if (firs.length) {
+            html += '<tr><td colspan="3" style="font-weight:700;font-size:12px;color:var(--accent);padding:8px 12px;text-transform:uppercase;letter-spacing:0.5px;' + (docs.length ? 'border-top:1px solid var(--border);' : '') + '">FIR Access</td></tr>';
+            html += firs.map(function(r) {
+              var nameStr = r._name ? ' <span style="color:var(--muted);font-size:12px;">' + r._name + '</span>' : '';
+              return '<tr>'
+                + '<td>' + r.cid + nameStr + '</td>'
+                + '<td><span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + r.division + '</span> <span style="font-size:12px;color:var(--muted);">' + (r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : '') + '</span></td>'
+                + '<td><button class="action-btn fir-revoke-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Revoke</button></td>'
+                + '</tr>';
+            }).join('');
+          }
+          resultsBody.innerHTML = html;
+          return;
+        }
+
+        // ICAO search returns flat array
+        thead.style.display = '';
+        currentSearchCid = '';
+        document.getElementById('permAddCid').style.display = '';
+        document.getElementById('globalAccessSection').style.display = 'none';
+        updateAddSection('icao', '');
+        var rows = Array.isArray(data) ? data : [];
+        if (!rows.length) {
+          resultsHeader.textContent = 'No permissions found for "' + q.toUpperCase() + '"';
+          resultsBody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:16px;">No results</td></tr>';
+          return;
+        }
+        resultsHeader.textContent = rows.length + ' permission' + (rows.length > 1 ? 's' : '') + ' found';
+        resultsBody.innerHTML = rows.map(function(r) {
+          var nameStr = r._name ? ' <span style="color:var(--muted);font-size:12px;">' + r._name + '</span>' : '';
+          return '<tr>'
+            + '<td>' + r.cid + nameStr + '</td>'
+            + '<td><span style="font-family:monospace;font-weight:600;">' + r.pattern + '</span></td>'
+            + '<td><button class="action-btn perm-revoke-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Revoke</button></td>'
+            + '</tr>';
+        }).join('');
+      });
+  }
+
+  searchBtn.addEventListener('click', doSearch);
+  searchInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') doSearch(); });
+
+  resultsBody.addEventListener('click', async function(e) {
+    var docBtn = e.target.closest('.perm-revoke-btn');
+    if (docBtn) {
+      docBtn.disabled = true;
+      docBtn.textContent = 'Revoking...';
+      try {
+        var res = await fetch('/admin/api/documentation/' + docBtn.dataset.id, { method: 'DELETE', credentials: 'same-origin' });
+        if (res.ok) doSearch();
+      } catch (err) { docBtn.disabled = false; docBtn.textContent = 'Revoke'; }
+      return;
+    }
+    var firBtn = e.target.closest('.fir-revoke-btn');
+    if (firBtn) {
+      firBtn.disabled = true;
+      firBtn.textContent = 'Revoking...';
+      try {
+        var res = await fetch('/admin/api/staff-access-requests/' + firBtn.dataset.id + '/deny', { method: 'POST', credentials: 'same-origin' });
+        if (res.ok) doSearch();
+      } catch (err) { firBtn.disabled = false; firBtn.textContent = 'Revoke'; }
+    }
+  });
+
+  // Reverse lookup: ICAO pattern → division name
+  var ICAO_TO_DIVISION = {};
+  var divMap = ${JSON.stringify(DIVISION_ICAO_MAP)};
+  for (var div in divMap) { ICAO_TO_DIVISION[divMap[div]] = div; }
+
+  document.getElementById('permAddBtn').addEventListener('click', async function() {
+    var cid = currentSearchCid || document.getElementById('permAddCid').value.trim();
+    var accessType = document.getElementById('permAddType').value;
+    var rawInput = document.getElementById('permAddPattern').value.trim().toUpperCase();
+    addMsg.style.display = 'none';
+
+    if (!cid) { addMsg.textContent = 'CID is required'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; return; }
+
+    // For CID search mode, resolve division name to pattern
+    var resolvedPattern = '';
+    var resolvedDivision = '';
+    if (currentSearchType === 'cid' && rawInput) {
+      if (divMap[rawInput]) {
+        resolvedDivision = rawInput;
+        resolvedPattern = divMap[rawInput];
+      } else if (/^[A-Z*]{4}$/.test(rawInput)) {
+        resolvedPattern = rawInput;
+        resolvedDivision = ICAO_TO_DIVISION[rawInput] || '';
+      } else {
+        addMsg.textContent = '"' + rawInput + '" is not a recognised division or valid ICAO pattern';
+        addMsg.style.color = '#f87171';
+        addMsg.style.display = '';
+        return;
+      }
+    } else if (accessType === 'document') {
+      resolvedPattern = rawInput;
+    } else {
+      resolvedPattern = currentDivisionPattern;
+      resolvedDivision = ICAO_TO_DIVISION[currentDivisionPattern] || '';
+    }
+
+    if (!resolvedPattern && currentSearchType !== 'cid') { addMsg.textContent = 'Access pattern is required'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; return; }
+    if (!rawInput && currentSearchType === 'cid') { addMsg.textContent = 'Enter a division or access pattern'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; return; }
+    if (resolvedPattern === '****') { addMsg.textContent = '**** is global access — use the Global Access dropdown instead'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; return; }
+    if ((accessType === 'both' || accessType === 'fir') && !resolvedDivision && currentSearchType !== 'cid') { addMsg.textContent = 'Search by division first to grant FIR access'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; return; }
+    if ((accessType === 'both' || accessType === 'fir') && currentSearchType === 'cid' && !resolvedDivision) { addMsg.textContent = 'Could not determine division — enter a division name (e.g. VATUK) or a matching ICAO pattern'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; return; }
+
+    var results = [];
+    var errors = [];
+
+    try {
+      var res = await fetch('/admin/api/documentation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ cid: Number(cid), pattern: resolvedPattern })
+      });
+      var d = await res.json();
+      if (res.ok) {
+        addMsg.textContent = 'Permission added: ' + resolvedPattern;
+        addMsg.style.color = '#4ade80';
+        addMsg.style.display = '';
+        if (!currentSearchCid) document.getElementById('permAddCid').value = '';
+        document.getElementById('permAddPattern').value = '';
+        doSearch();
+      } else {
+        addMsg.textContent = d.error || 'Failed';
+        addMsg.style.color = '#f87171';
+        addMsg.style.display = '';
+      }
+    } catch (err) {
+      addMsg.textContent = 'Error';
+      addMsg.style.color = '#f87171';
+      addMsg.style.display = '';
+    }
+  });
+})();
+
+// ===== FIR ACCESS REQUESTS =====
+(function() {
+  var allRequests = [];
+
+  function renderTable() {
+    var tbody = document.getElementById('staffAccessBody');
+    if (!tbody) return;
+    var filtered = allRequests;
+
+    if (!filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px;">No requests found.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(function(r) {
+      var date = new Date(r.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+      var statusClass = r.status === 'APPROVED' ? 'color:#4ade80;' : (r.status === 'DENIED' ? 'color:#f87171;' : 'color:#fbbf24;');
+      var roleDisplay = r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : '\u2014';
+      var actions = r.status === 'PENDING'
+        ? '<button class="action-btn primary staff-approve-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;">Approve</button>'
+        + ' <button class="action-btn staff-deny-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Deny</button>'
+        : '<button class="action-btn staff-delete-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(255,255,255,0.05);color:var(--muted);border-color:var(--border);">Delete</button>';
+      return '<tr>'
+        + '<td>' + r.cid + '</td>'
+        + '<td>' + (r.name || '\u2014') + '</td>'
+        + '<td style="font-size:12px;">' + (r.email || '\u2014') + '</td>'
+        + '<td><span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + r.division + '</span></td>'
+        + '<td>' + roleDisplay + '</td>'
+        + '<td>' + (r.rating || '\u2014') + '</td>'
+        + '<td style="font-size:12px;">' + date + '</td>'
+        + '<td style="font-weight:600;' + statusClass + '">' + r.status + '</td>'
+        + '<td style="white-space:nowrap;">' + actions + '</td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  function loadFirRequests() {
+    fetch('/admin/api/staff-access-requests', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        allRequests = data;
+        renderTable();
+      });
+  }
+
+  document.getElementById('staffAccessBody').addEventListener('click', async function(e) {
+    var approveBtn = e.target.closest('.staff-approve-btn');
+    var denyBtn = e.target.closest('.staff-deny-btn');
+
+    if (approveBtn) {
+      var id = approveBtn.dataset.id;
+      var req = allRequests.find(function(r) { return r.id === Number(id); });
+      if (!req) return;
+      showStaffApproveModal(req);
+      return;
+    }
+
+    if (denyBtn) {
+      var id = denyBtn.dataset.id;
+      denyBtn.disabled = true;
+      denyBtn.textContent = 'Denying...';
+      try {
+        var res = await fetch('/admin/api/staff-access-requests/' + id + '/deny', { method: 'POST', credentials: 'same-origin' });
+        if (res.ok) loadFirRequests();
+      } catch (err) { denyBtn.disabled = false; denyBtn.textContent = 'Deny'; }
+      return;
+    }
+
+    var deleteBtn = e.target.closest('.staff-delete-btn');
+    if (deleteBtn) {
+      var id = deleteBtn.dataset.id;
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = 'Deleting...';
+      try {
+        var res = await fetch('/admin/api/staff-access-requests/' + id, { method: 'DELETE', credentials: 'same-origin' });
+        if (res.ok) loadFirRequests();
+      } catch (err) { deleteBtn.disabled = false; deleteBtn.textContent = 'Delete'; }
+    }
+  });
+
+  function showStaffApproveModal(req) {
+    var overlay = document.createElement('div');
+    overlay.className = 'modal';
+    overlay.innerHTML = '<div class="modal-backdrop"></div>'
+      + '<div class="modal-dialog" style="width:480px;padding:24px;">'
+      + '<h3 style="margin:0 0 12px;">Approve Staff Access</h3>'
+      + '<div style="margin-bottom:16px;">'
+      + '<div style="display:flex;gap:12px;font-size:13px;margin-bottom:6px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">Name</span><span>' + (req.name || '\u2014') + '</span></div>'
+      + '<div style="display:flex;gap:12px;font-size:13px;margin-bottom:6px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">CID</span><span>' + req.cid + '</span></div>'
+      + '<div style="display:flex;gap:12px;font-size:13px;margin-bottom:6px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">Division</span><span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + req.division + '</span></div>'
+      + '<div style="display:flex;gap:12px;font-size:13px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">Role</span><span>' + (req.role ? req.role.charAt(0).toUpperCase() + req.role.slice(1) : '\u2014') + '</span></div>'
+      + '</div>'
+      + '<div style="padding:12px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:8px;margin-bottom:16px;">'
+      + '<p style="margin:0;font-size:13px;color:#fbbf24;font-weight:600;">This will also grant document upload permissions</p>'
+      + '<p style="margin:4px 0 0;font-size:12px;color:var(--muted);">The user will be able to upload airport documentation for airports within the <strong>' + req.division + '</strong> division.</p>'
+      + '</div>'
+      + '<div class="modal-actions" style="gap:8px;">'
+      + '<button class="modal-btn modal-btn-cancel" id="staffModalCancel">Cancel</button>'
+      + '<button class="modal-btn" id="staffModalDeny" style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid #f87171;">Deny</button>'
+      + '<button class="modal-btn modal-btn-submit" id="staffModalApprove">Approve</button>'
+      + '</div>'
+      + '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+    document.getElementById('staffModalCancel').addEventListener('click', function() { overlay.remove(); });
+
+    document.getElementById('staffModalDeny').addEventListener('click', async function() {
+      this.disabled = true; this.textContent = 'Denying...';
+      try {
+        var res = await fetch('/admin/api/staff-access-requests/' + req.id + '/deny', { method: 'POST', credentials: 'same-origin' });
+        if (res.ok) { overlay.remove(); loadFirRequests(); }
+      } catch (err) { this.disabled = false; this.textContent = 'Deny'; }
+    });
+
+    document.getElementById('staffModalApprove').addEventListener('click', async function() {
+      this.disabled = true; this.textContent = 'Approving...';
+      try {
+        var res = await fetch('/admin/api/staff-access-requests/' + req.id + '/approve', { method: 'POST', credentials: 'same-origin' });
+        if (res.ok) { overlay.remove(); loadFirRequests(); }
+      } catch (err) { this.disabled = false; this.textContent = 'Approve'; }
+    });
+  }
+
+  loadFirRequests();
+})();
 </script>
 `;
 
   res.send(renderLayout({
-    title: 'Documentation Access',
+    title: 'Access Management',
     user: req.session.user?.data,
     isAdmin: true,
     content,
@@ -5975,6 +6490,87 @@ app.get(
   }
 );
 
+
+// Search permissions by CID, division, or ICAO pattern
+app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
+  const q = (req.query.q || '').trim().toUpperCase();
+  if (!q) return res.json([]);
+
+  // Check if it's a CID (all digits)
+  if (/^\d+$/.test(q)) {
+    const cid = Number(q);
+    const [docPerms, staffReqs, anyStaffReq, anyDocReq] = await Promise.all([
+      prisma.documentationPermission.findMany({ where: { cid } }),
+      prisma.staffAccessRequest.findMany({ where: { cid, status: 'APPROVED' } }),
+      prisma.staffAccessRequest.findFirst({ where: { cid }, orderBy: { createdAt: 'desc' } }),
+      prisma.documentationAccessRequest.findFirst({ where: { cid }, orderBy: { createdAt: 'desc' } })
+    ]);
+    const userName = anyStaffReq?.name || anyDocReq?.name || null;
+    const userRole = anyStaffReq?.role || anyDocReq?.role || null;
+    const hasGlobal = docPerms.some(r => r.pattern === '****');
+    return res.json({
+      _searchType: 'cid',
+      cid,
+      name: userName,
+      role: userRole,
+      globalAccess: hasGlobal,
+      docPermissions: docPerms.filter(r => r.pattern !== '****'),
+      firAccess: staffReqs
+    });
+  }
+
+  // Check if it's a division name — look up ICAO pattern + FIR access
+  if (DIVISION_ICAO_MAP[q]) {
+    const pattern = DIVISION_ICAO_MAP[q];
+    const [docPerms, staffReqs] = await Promise.all([
+      prisma.documentationPermission.findMany({ where: { pattern } }),
+      prisma.staffAccessRequest.findMany({ where: { division: q, status: 'APPROVED' } })
+    ]);
+    // Enrich with names
+    const allCids = [...new Set([...docPerms.map(r => r.cid), ...staffReqs.map(r => r.cid)])];
+    const nameMap = {};
+    if (allCids.length) {
+      const [staffNames, docNames] = await Promise.all([
+        prisma.staffAccessRequest.findMany({ where: { cid: { in: allCids } }, select: { cid: true, name: true }, distinct: ['cid'] }),
+        prisma.documentationAccessRequest.findMany({ where: { cid: { in: allCids } }, select: { cid: true, name: true }, distinct: ['cid'] })
+      ]);
+      staffNames.forEach(r => { if (r.name) nameMap[r.cid] = r.name; });
+      docNames.forEach(r => { if (r.name && !nameMap[r.cid]) nameMap[r.cid] = r.name; });
+    }
+    return res.json({
+      _searchType: 'division',
+      division: q,
+      pattern,
+      docPermissions: docPerms.map(r => ({ ...r, _name: nameMap[r.cid] || null })),
+      firAccess: staffReqs.map(r => ({ ...r, _name: nameMap[r.cid] || null }))
+    });
+  }
+
+  // Otherwise treat as ICAO pattern — find permissions that would match this ICAO
+  // e.g. searching "EGLL" should match patterns "EG**", "EGLL", "E***", "****"
+  const allPerms = await prisma.documentationPermission.findMany();
+  const matching = allPerms.filter(r => {
+    const p = r.pattern;
+    if (p.length !== 4 || q.length !== 4) return p === q;
+    for (let i = 0; i < 4; i++) {
+      if (p[i] !== '*' && p[i] !== q[i]) return false;
+    }
+    return true;
+  });
+  // Enrich with names
+  const cidSet = new Set(matching.map(r => r.cid));
+  const nameMap = {};
+  if (cidSet.size) {
+    const cids = [...cidSet];
+    const [staffNames, docNames] = await Promise.all([
+      prisma.staffAccessRequest.findMany({ where: { cid: { in: cids } }, select: { cid: true, name: true }, distinct: ['cid'] }),
+      prisma.documentationAccessRequest.findMany({ where: { cid: { in: cids } }, select: { cid: true, name: true }, distinct: ['cid'] })
+    ]);
+    staffNames.forEach(r => { if (r.name) nameMap[r.cid] = r.name; });
+    docNames.forEach(r => { if (r.name && !nameMap[r.cid]) nameMap[r.cid] = r.name; });
+  }
+  res.json(matching.map(r => ({ ...r, _searchType: 'icao', _name: nameMap[r.cid] || null })));
+});
 
 app.get('/admin/api/documentation/:cid', requireAdmin, async (req, res) => {
   const cid = Number(req.params.cid);
@@ -6023,12 +6619,9 @@ app.post('/admin/api/documentation', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Invalid ICAO pattern' });
   }
 
-  // 2️⃣ Restrict global wildcard ****
-  if (
-    normalized === '****' &&
-    !ADMIN_CIDS.includes(Number(req.session.user.data.cid))
-  ) {
-    return res.status(403).json({ error: 'Not allowed' });
+  // 2️⃣ Block global wildcard **** — use global-toggle endpoint instead
+  if (normalized === '****') {
+    return res.status(400).json({ error: 'Use the Global Access toggle to grant **** permissions' });
   }
 
   // 3️⃣ Create permission
@@ -6043,6 +6636,7 @@ app.post('/admin/api/documentation', requireAdmin, async (req, res) => {
 });
 
 
+// Search permissions by CID, division, or ICAO pattern
 app.delete('/admin/api/documentation/:id', requireAdmin, async (req, res) => {
   await prisma.documentationPermission.delete({
     where: { id: Number(req.params.id) }
@@ -7638,6 +8232,413 @@ app.post(
   }
 );
 
+// ===== STAFF ACCESS REQUEST =====
+app.post(
+  '/api/staff-access/request',
+  requireLogin,
+  async (req, res) => {
+    const cid = Number(req.session.user.data.cid);
+    const { division, email, role } = req.body;
+
+    if (!division || typeof division !== 'string') {
+      return res.status(400).json({ error: 'Division is required' });
+    }
+
+    const existing = await prisma.staffAccessRequest.findFirst({
+      where: { cid, division, status: 'PENDING' }
+    });
+
+    if (existing) {
+      return res.status(409).json({ error: 'Request already pending for this division' });
+    }
+
+    const personal = req.session.user.data.personal || {};
+    const vatsim = req.session.user.data.vatsim || {};
+    const fullName = [personal.name_first, personal.name_last].filter(Boolean).join(' ') || null;
+
+    await prisma.staffAccessRequest.create({
+      data: {
+        cid,
+        division,
+        name: fullName,
+        email: typeof email === 'string' ? email.trim() : (personal.email || null),
+        role: typeof role === 'string' ? role : null,
+        rating: vatsim.rating?.short || null,
+        status: 'PENDING'
+      }
+    });
+
+    res.json({ success: true });
+  }
+);
+
+// ===== ADMIN: STAFF ACCESS REQUESTS =====
+app.get('/admin/staff-access', requireAdmin, (req, res) => {
+  res.redirect('/admin/access-management');
+});
+
+app.get('/admin/staff-access-OLD-UNUSED', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+
+  const content = `
+    <a href="/admin" class="back-link">\u2190 Back to Admin</a>
+    <section class="card card-full staff-access-page">
+      <h2>Manage Permissions</h2>
+      <p style="color:var(--muted);margin-bottom:16px;">Search by CID, Division (e.g. VATUK), or airport ICAO (e.g. EGLL) to view and manage document upload permissions.</p>
+
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        <input type="text" id="permSearchInput" placeholder="CID, Division, or ICAO..." style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:240px;text-transform:uppercase;" />
+        <button class="action-btn primary" id="permSearchBtn">Search</button>
+      </div>
+
+      <div id="permResults" style="display:none;">
+        <div id="permResultsHeader" style="font-size:13px;color:var(--muted);margin-bottom:8px;"></div>
+        <div style="overflow-x:auto;">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>CID</th>
+                <th>Pattern</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="permResultsBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="permAddSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Add Permission</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <input type="text" id="permAddCid" placeholder="CID" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:120px;" />
+          <input type="text" id="permAddPattern" placeholder="Pattern (e.g. EG**)" maxlength="4" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:140px;text-transform:uppercase;" />
+          <button class="action-btn primary" id="permAddBtn">Add</button>
+        </div>
+        <div id="permAddMsg" style="display:none;margin-top:8px;font-size:12px;"></div>
+      </div>
+    </section>
+
+    <section class="card card-full staff-access-page" style="margin-top:24px;">
+      <h2>Staff Access Requests</h2>
+      <p style="color:var(--muted);margin-bottom:16px;">Review and approve or deny staff access requests from controllers.</p>
+
+      <div style="overflow-x:auto;">
+        <table class="admin-table" id="staffAccessTable">
+          <thead>
+            <tr>
+              <th>CID</th>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Division</th>
+              <th>Role</th>
+              <th>Rating</th>
+              <th>Requested</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="staffAccessBody">
+            <tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px;">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <script>
+    // ===== PERMISSION MANAGER =====
+    (function() {
+      var searchInput = document.getElementById('permSearchInput');
+      var searchBtn = document.getElementById('permSearchBtn');
+      var resultsDiv = document.getElementById('permResults');
+      var resultsHeader = document.getElementById('permResultsHeader');
+      var resultsBody = document.getElementById('permResultsBody');
+      var addSection = document.getElementById('permAddSection');
+      var addMsg = document.getElementById('permAddMsg');
+
+      function doSearch() {
+        var q = searchInput.value.trim();
+        if (!q) return;
+        fetch('/admin/api/documentation/search?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
+          .then(function(r) { return r.json(); })
+          .then(function(rows) {
+            resultsDiv.style.display = '';
+            addSection.style.display = '';
+            if (!rows.length) {
+              resultsHeader.textContent = 'No permissions found for "' + q + '"';
+              resultsBody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:16px;">No results</td></tr>';
+              return;
+            }
+            resultsHeader.textContent = rows.length + ' permission' + (rows.length > 1 ? 's' : '') + ' found';
+            resultsBody.innerHTML = rows.map(function(r) {
+              return '<tr>'
+                + '<td>' + r.cid + '</td>'
+                + '<td><span style="font-family:monospace;font-weight:600;">' + r.pattern + '</span></td>'
+                + '<td><button class="action-btn perm-revoke-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Revoke</button></td>'
+                + '</tr>';
+            }).join('');
+          });
+      }
+
+      searchBtn.addEventListener('click', doSearch);
+      searchInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') doSearch(); });
+
+      resultsBody.addEventListener('click', async function(e) {
+        var btn = e.target.closest('.perm-revoke-btn');
+        if (!btn) return;
+        btn.disabled = true;
+        btn.textContent = 'Revoking...';
+        try {
+          var res = await fetch('/admin/api/documentation/' + btn.dataset.id, { method: 'DELETE', credentials: 'same-origin' });
+          if (res.ok) doSearch();
+        } catch (err) { btn.disabled = false; btn.textContent = 'Revoke'; }
+      });
+
+      document.getElementById('permAddBtn').addEventListener('click', async function() {
+        var cid = document.getElementById('permAddCid').value.trim();
+        var pattern = document.getElementById('permAddPattern').value.trim().toUpperCase();
+        addMsg.style.display = 'none';
+        if (!cid || !pattern) { addMsg.textContent = 'CID and pattern are required'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; return; }
+        try {
+          var res = await fetch('/admin/api/documentation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ cid: Number(cid), pattern: pattern })
+          });
+          var data = await res.json();
+          if (res.ok) {
+            addMsg.textContent = 'Permission added';
+            addMsg.style.color = '#4ade80';
+            addMsg.style.display = '';
+            document.getElementById('permAddCid').value = '';
+            document.getElementById('permAddPattern').value = '';
+            doSearch();
+          } else {
+            addMsg.textContent = data.error || 'Failed';
+            addMsg.style.color = '#f87171';
+            addMsg.style.display = '';
+          }
+        } catch (err) { addMsg.textContent = 'Error'; addMsg.style.color = '#f87171'; addMsg.style.display = ''; }
+      });
+    })();
+
+    // ===== REQUESTS TABLE =====
+    (function() {
+      var allRequests = [];
+
+      function renderTable() {
+        var tbody = document.getElementById('staffAccessBody');
+        var filtered = allRequests;
+
+        if (!filtered.length) {
+          tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px;">No requests found.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = filtered.map(function(r) {
+          var date = new Date(r.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+          var statusClass = r.status === 'APPROVED' ? 'color:#4ade80;' : (r.status === 'DENIED' ? 'color:#f87171;' : 'color:#fbbf24;');
+          var roleDisplay = r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : '\u2014';
+          var actions = r.status === 'PENDING'
+            ? '<button class="action-btn primary staff-approve-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;">Approve</button>'
+            + ' <button class="action-btn staff-deny-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(239,68,68,0.15);color:#f87171;border-color:#f87171;">Deny</button>'
+            : '<button class="action-btn staff-delete-btn" data-id="' + r.id + '" style="font-size:11px;padding:3px 10px;background:rgba(255,255,255,0.05);color:var(--muted);border-color:var(--border);">Delete</button>';
+          return '<tr>'
+            + '<td>' + r.cid + '</td>'
+            + '<td>' + (r.name || '\u2014') + '</td>'
+            + '<td style="font-size:12px;">' + (r.email || '\u2014') + '</td>'
+            + '<td><span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + r.division + '</span></td>'
+            + '<td>' + roleDisplay + '</td>'
+            + '<td>' + (r.rating || '\u2014') + '</td>'
+            + '<td style="font-size:12px;">' + date + '</td>'
+            + '<td style="font-weight:600;' + statusClass + '">' + r.status + '</td>'
+            + '<td style="white-space:nowrap;">' + actions + '</td>'
+            + '</tr>';
+        }).join('');
+      }
+
+      function loadRequests() {
+        fetch('/admin/api/staff-access-requests', { credentials: 'same-origin' })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            allRequests = data;
+            renderTable();
+          });
+      }
+
+      document.getElementById('staffAccessBody').addEventListener('click', async function(e) {
+        var approveBtn = e.target.closest('.staff-approve-btn');
+        var denyBtn = e.target.closest('.staff-deny-btn');
+
+        if (approveBtn) {
+          var id = approveBtn.dataset.id;
+          var req = allRequests.find(function(r) { return r.id === Number(id); });
+          if (!req) return;
+          showApproveModal(req);
+          return;
+        }
+
+        if (denyBtn) {
+          var id = denyBtn.dataset.id;
+          denyBtn.disabled = true;
+          denyBtn.textContent = 'Denying...';
+          try {
+            var res = await fetch('/admin/api/staff-access-requests/' + id + '/deny', {
+              method: 'POST',
+              credentials: 'same-origin'
+            });
+            if (res.ok) loadRequests();
+          } catch (err) {
+            denyBtn.disabled = false;
+            denyBtn.textContent = 'Deny';
+          }
+          return;
+        }
+
+        var deleteBtn = e.target.closest('.staff-delete-btn');
+        if (deleteBtn) {
+          var id = deleteBtn.dataset.id;
+          deleteBtn.disabled = true;
+          deleteBtn.textContent = 'Deleting...';
+          try {
+            var res = await fetch('/admin/api/staff-access-requests/' + id, {
+              method: 'DELETE',
+              credentials: 'same-origin'
+            });
+            if (res.ok) loadRequests();
+          } catch (err) {
+            deleteBtn.disabled = false;
+            deleteBtn.textContent = 'Delete';
+          }
+        }
+      });
+
+      function showApproveModal(req) {
+        var overlay = document.createElement('div');
+        overlay.className = 'modal';
+        overlay.innerHTML = '<div class="modal-backdrop"></div>'
+          + '<div class="modal-dialog" style="width:480px;padding:24px;">'
+          + '<h3 style="margin:0 0 12px;">Approve Staff Access</h3>'
+          + '<div style="margin-bottom:16px;">'
+          + '<div style="display:flex;gap:12px;font-size:13px;margin-bottom:6px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">Name</span><span>' + (req.name || '\u2014') + '</span></div>'
+          + '<div style="display:flex;gap:12px;font-size:13px;margin-bottom:6px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">CID</span><span>' + req.cid + '</span></div>'
+          + '<div style="display:flex;gap:12px;font-size:13px;margin-bottom:6px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">Division</span><span class="fir-badge" style="font-size:11px;padding:2px 8px;">' + req.division + '</span></div>'
+          + '<div style="display:flex;gap:12px;font-size:13px;"><span style="color:var(--muted);min-width:70px;font-weight:600;">Role</span><span>' + (req.role || '\u2014') + '</span></div>'
+          + '</div>'
+          + '<div style="padding:12px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:8px;margin-bottom:16px;">'
+          + '<p style="margin:0;font-size:13px;color:#fbbf24;font-weight:600;">This will also grant document upload permissions</p>'
+          + '<p style="margin:4px 0 0;font-size:12px;color:var(--muted);">The user will be able to upload airport documentation for airports within the <strong>' + req.division + '</strong> division.</p>'
+          + '</div>'
+          + '<div class="modal-actions" style="gap:8px;">'
+          + '<button class="modal-btn modal-btn-cancel" id="staffModalCancel">Cancel</button>'
+          + '<button class="modal-btn" id="staffModalDeny" style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid #f87171;">Deny</button>'
+          + '<button class="modal-btn modal-btn-submit" id="staffModalApprove">Approve</button>'
+          + '</div>'
+          + '</div>';
+        document.body.appendChild(overlay);
+
+        overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+        document.getElementById('staffModalCancel').addEventListener('click', function() { overlay.remove(); });
+
+        document.getElementById('staffModalDeny').addEventListener('click', async function() {
+          this.disabled = true;
+          this.textContent = 'Denying...';
+          try {
+            var res = await fetch('/admin/api/staff-access-requests/' + req.id + '/deny', { method: 'POST', credentials: 'same-origin' });
+            if (res.ok) { overlay.remove(); loadRequests(); }
+          } catch (err) { this.disabled = false; this.textContent = 'Deny'; }
+        });
+
+        document.getElementById('staffModalApprove').addEventListener('click', async function() {
+          this.disabled = true;
+          this.textContent = 'Approving...';
+          try {
+            var res = await fetch('/admin/api/staff-access-requests/' + req.id + '/approve', { method: 'POST', credentials: 'same-origin' });
+            if (res.ok) { overlay.remove(); loadRequests(); }
+          } catch (err) { this.disabled = false; this.textContent = 'Approve'; }
+        });
+      }
+
+      loadRequests();
+    })();
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'Staff Access Requests', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.get('/admin/api/staff-access-requests', requireAdmin, async (req, res) => {
+  const requests = await prisma.staffAccessRequest.findMany({
+    orderBy: { createdAt: 'desc' }
+  });
+  res.json(requests);
+});
+
+app.get('/admin/api/staff-access-requests/pending-count', requireAdmin, async (req, res) => {
+  const count = await prisma.staffAccessRequest.count({ where: { status: 'PENDING' } });
+  res.json({ count });
+});
+
+app.post('/admin/api/staff-access-requests/:id/approve', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const adminCid = Number(req.session.user.data.cid);
+
+  const request = await prisma.staffAccessRequest.update({
+    where: { id },
+    data: { status: 'APPROVED', reviewedBy: adminCid, reviewedAt: new Date() }
+  });
+
+  // Grant document upload permission for the division's ICAO pattern
+  const pattern = DIVISION_ICAO_MAP[request.division];
+  if (pattern) {
+    const existing = await prisma.documentationPermission.findFirst({
+      where: { cid: request.cid, pattern }
+    });
+    if (!existing) {
+      await prisma.documentationPermission.create({
+        data: { cid: request.cid, pattern }
+      });
+      console.log(`[STAFF] Granted doc upload ${pattern} to CID ${request.cid} (${request.division})`);
+    }
+  }
+
+  res.json({ ok: true });
+});
+
+app.post('/admin/api/staff-access-requests/:id/deny', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const adminCid = Number(req.session.user.data.cid);
+  await prisma.staffAccessRequest.update({
+    where: { id },
+    data: { status: 'DENIED', reviewedBy: adminCid, reviewedAt: new Date() }
+  });
+  res.json({ ok: true });
+});
+
+app.delete('/admin/api/staff-access-requests/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  await prisma.staffAccessRequest.delete({ where: { id } });
+  res.json({ ok: true });
+});
+
+// Admin: toggle global access for a CID
+app.post('/admin/api/documentation/global-toggle', requireAdmin, async (req, res) => {
+  const { cid, enabled } = req.body;
+  if (!cid) return res.status(400).json({ error: 'CID is required' });
+
+  if (enabled) {
+    const existing = await prisma.documentationPermission.findFirst({
+      where: { cid: Number(cid), pattern: '****' }
+    });
+    if (!existing) {
+      await prisma.documentationPermission.create({ data: { cid: Number(cid), pattern: '****' } });
+    }
+  } else {
+    await prisma.documentationPermission.deleteMany({ where: { cid: Number(cid), pattern: '****' } });
+  }
+  res.json({ ok: true });
+});
 
 app.post('/api/scenery/submit', requireLogin, async (req, res) => {
   try {
@@ -8370,11 +9371,21 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
 
   let sceneryCount = 0;
   let docAccessCount = 0;
+  let staffAccessCount = 0;
+  let airacAlert = false;
   try {
     sceneryCount = await prisma.airportScenery.count({ where: { approved: false } });
   } catch (e) {}
   try {
     docAccessCount = await prisma.documentationAccessRequest.count({ where: { status: 'PENDING' } });
+  } catch (e) {}
+  try {
+    staffAccessCount = await prisma.staffAccessRequest.count({ where: { status: 'PENDING' } });
+  } catch (e) {}
+  try {
+    const navDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata');
+    const info = parseAiracHeader(path.join(navDir, 'earth_fix.dat')) || parseAiracHeader(path.join(navDir, 'earth_awy.dat'));
+    if (info && info.exists) airacAlert = !info.valid || info.daysLeft <= 2;
   } catch (e) {}
 
   const sections = [
@@ -8400,11 +9411,11 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
       badge: sceneryCount > 0 ? sceneryCount : null
     },
     {
-      title: 'Doc Upload Permissions',
-      desc: 'Manage user access permissions for uploading airport documentation.',
-      icon: '📄',
-      href: '/admin/documentation-access',
-      badge: docAccessCount > 0 ? docAccessCount : null
+      title: 'Access Management',
+      desc: 'Manage user permissions, document upload requests, and staff access requests.',
+      icon: '🔑',
+      href: '/admin/access-management',
+      badge: (docAccessCount + staffAccessCount) > 0 ? (docAccessCount + staffAccessCount) : null
     },
     {
       title: 'Visited Airports',
@@ -8439,6 +9450,13 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
       desc: 'Upload and manage navigation data (waypoints, airways) for route planning.',
       icon: '🧭',
       href: '/admin/airac',
+      badge: airacAlert ? '!' : null
+    },
+    {
+      title: 'Test Pilot Data',
+      desc: 'Generate fake pilot departures at WF airports for testing.',
+      icon: '🧪',
+      href: '/admin/test-pilots',
       badge: null
     }
   ];
@@ -11311,6 +12329,8 @@ async function _buildFirAnalysisInner() {
         from: leg.from,
         to: leg.to,
         date: leg.date_utc,
+        depTime: leg.dep_time_utc || '',
+        arrTime: leg.arr_time_utc || '',
         atcRoute: leg.atc_route || '',
         entryFrac: seg.entryFrac,
         exitFrac: seg.exitFrac,
@@ -11847,8 +12867,17 @@ function parseAiracHeader(filePath) {
     const buildStr = m[2];
     const buildDate = new Date(buildStr.slice(0, 4) + '-' + buildStr.slice(4, 6) + '-' + buildStr.slice(6, 8));
 
-    // AIRAC cycles are 28 days. Calculate expiry.
-    const expiryDate = new Date(buildDate.getTime() + 28 * 24 * 60 * 60 * 1000);
+    // Calculate AIRAC cycle start/expiry from cycle number
+    // Reference: cycle 2501 starts 23 Jan 2025. Each cycle = 28 days, 13 per year.
+    const cycleYear = parseInt(cycle.slice(0, 2), 10) + 2000;
+    const cycleNum = parseInt(cycle.slice(2), 10);
+    // First cycle of each year: Jan date from table (use 2025-01-23 as epoch)
+    const epoch = new Date('2025-01-23T00:00:00Z');
+    const yearOffset = cycleYear - 2025;
+    // Total cycles since epoch: (yearOffset * 13) + (cycleNum - 1)
+    const totalCycles = (yearOffset * 13) + (cycleNum - 1);
+    const cycleStart = new Date(epoch.getTime() + totalCycles * 28 * 24 * 60 * 60 * 1000);
+    const expiryDate = new Date(cycleStart.getTime() + 28 * 24 * 60 * 60 * 1000);
     const now = new Date();
     const valid = now < expiryDate;
     const daysLeft = Math.ceil((expiryDate - now) / (24 * 60 * 60 * 1000));
@@ -11868,6 +12897,17 @@ function parseAiracHeader(filePath) {
     };
   } catch { return null; }
 }
+
+app.get('/api/admin/airac/status', requireAdmin, (req, res) => {
+  const navDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata');
+  const fixInfo = parseAiracHeader(path.join(navDir, 'earth_fix.dat'));
+  const awyInfo = parseAiracHeader(path.join(navDir, 'earth_awy.dat'));
+  const info = fixInfo || awyInfo;
+  if (!info || !info.exists) return res.json({ alert: false });
+  const expired = !info.valid;
+  const expiringSoon = info.valid && info.daysLeft <= 2;
+  res.json({ alert: expired || expiringSoon, expired, expiringSoon, daysLeft: info.daysLeft, cycle: info.cycle });
+});
 
 app.get('/admin/airac', requireAdmin, (req, res) => {
   const user = req.session.user.data;
@@ -12077,8 +13117,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
     { key: 'airspace',        label: 'Airspace Management',  icon: '🌐', desc: 'FIR staffing requirements and timelines' },
     { key: 'arrival-info',    label: 'Arrival Info',         icon: '🛬', desc: 'Arrival banner on airport portal pages' },
     { key: 'departure-info',  label: 'Departure Info',       icon: '🛫', desc: 'Departure banner on airport portal pages' },
-    { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' },
-    { key: 'fake-pilots',     label: 'Test Pilot Data',      icon: '🧪', desc: 'Generate fake pilot departures at WF airports for testing' }
+    { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
   ];
 
   const toggleRows = pages.map(p => {
@@ -12373,6 +13412,106 @@ app.post('/api/admin/page-visibility', requireAdmin, async (req, res) => {
 
 app.get('/api/page-visibility', (req, res) => {
   res.json(pageVisibility);
+});
+
+/* ===== ADMIN: TEST PILOT DATA ===== */
+app.get('/admin/test-pilots', requireAdmin, (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+  const enabled = isPageEnabled('fake-pilots');
+  const fakeCount = cachedPilots.filter(p => p.server === 'FAKE').length;
+
+  const content = `
+    <a href="/admin" class="back-link">\u2190 Back to Admin</a>
+    <section class="card">
+      <h2>Test Pilot Data</h2>
+      <p style="color:var(--muted);margin-bottom:20px;">Generate fake pilot departures at all WorldFlight airports for testing flow control, TOBT assignments, and departure management.</p>
+
+      <div class="settings-row" data-page="fake-pilots">
+        <div class="settings-row-info">
+          <span class="settings-row-icon">\uD83E\uDDEA</span>
+          <div>
+            <div class="settings-row-label">Test Pilot Generation</div>
+            <div class="settings-row-desc">When enabled, fake pilots appear at every WF departure airport</div>
+          </div>
+        </div>
+        <div class="settings-row-controls">
+          <span class="vis-pill ${enabled ? 'vis-on' : 'vis-off'}" id="fakePilotPill">
+            ${enabled ? 'Enabled' : 'Disabled'}
+          </span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="fakePilotToggle" ${enabled ? 'checked' : ''} />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div style="margin-top:16px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-size:13px;color:var(--muted);">Active Test Pilots</div>
+            <div style="font-size:24px;font-weight:700;color:var(--accent);" id="fakeCount">${fakeCount}</div>
+          </div>
+          <div>
+            <div style="font-size:13px;color:var(--muted);">WF Team Pilot</div>
+            <div style="font-size:14px;font-weight:600;">BAW47C (CID 811093)</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      document.getElementById('fakePilotToggle').addEventListener('change', async function() {
+        var enabled = this.checked;
+        var pill = document.getElementById('fakePilotPill');
+        var countEl = document.getElementById('fakeCount');
+        try {
+          var res = await fetch('/admin/api/test-pilots/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ enabled: enabled })
+          });
+          if (res.ok) {
+            pill.className = 'vis-pill ' + (enabled ? 'vis-on' : 'vis-off');
+            pill.textContent = enabled ? 'Enabled' : 'Disabled';
+            if (!enabled) countEl.textContent = '0';
+            else setTimeout(function() { location.reload(); }, 2000);
+          }
+        } catch (err) {
+          this.checked = !enabled;
+        }
+      });
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'Test Pilot Data', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/admin/api/test-pilots/toggle', requireAdmin, express.json(), async (req, res) => {
+  const enabled = !!req.body.enabled;
+  await prisma.pageVisibility.upsert({
+    where: { key: 'fake-pilots' },
+    update: { enabled },
+    create: { key: 'fake-pilots', enabled }
+  });
+  pageVisibility['fake-pilots'] = enabled;
+
+  if (!enabled) {
+    for (const bk of Object.keys(tobtBookingsByKey)) {
+      if (tobtBookingsByKey[bk]._fake) {
+        const cid = tobtBookingsByKey[bk].cid;
+        delete tobtBookingsByKey[bk];
+        if (tobtBookingsByCid[cid]) delete tobtBookingsByCid[cid];
+      }
+    }
+    cachedPilots = cachedPilots.filter(p => p.server !== 'FAKE');
+    console.log('[FAKE] Disabled — cleared fake pilots and bookings');
+  } else {
+    await refreshPilots();
+  }
+
+  res.json({ ok: true });
 });
 
 /* ===== ADMIN: MAILING LIST ===== */
@@ -14524,6 +15663,81 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     #firDetailTable th { font-size: 13px; font-weight: 600; color: var(--muted); }
     #firDetailTable td { font-size: 13px; }
     .staff-window { font-family: monospace; font-size: 12px; }
+    .div-route-tooltip {
+      background: rgba(15,23,42,0.97) !important;
+      border: 1px solid rgba(56,189,248,0.3) !important;
+      border-radius: 8px !important;
+      color: #ffffff !important;
+      padding: 0 !important;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important;
+      z-index: 10000 !important;
+    }
+    .div-route-tooltip .leaflet-popup-content-wrapper {
+      background: rgba(15,23,42,0.97) !important;
+      border: 1px solid rgba(56,189,248,0.3) !important;
+      border-radius: 8px !important;
+      color: #ffffff !important;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important;
+    }
+    .div-route-tooltip .leaflet-popup-content { margin: 14px 16px !important; color: #ffffff !important; }
+    .div-route-tooltip .leaflet-popup-tip { background: rgba(15,23,42,0.97) !important; }
+    .fir-detail-header-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      padding: 10px 20px;
+      background: linear-gradient(135deg, rgba(74,222,128,0.1), rgba(34,197,94,0.08));
+      border: 1px solid rgba(74,222,128,0.25);
+      border-radius: 10px;
+      margin-bottom: 4px;
+    }
+    .fir-detail-header-name {
+      font-size: 22px;
+      font-weight: 800;
+      color: #4ade80;
+      letter-spacing: 0.5px;
+    }
+    .fir-detail-header-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      padding: 3px 10px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 4px;
+    }
+    .division-overview-header {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      padding: 10px 20px;
+      background: linear-gradient(135deg, rgba(56,189,248,0.1), rgba(139,92,246,0.1));
+      border: 1px solid rgba(56,189,248,0.25);
+      border-radius: 10px;
+      margin-bottom: 4px;
+    }
+    .division-overview-name {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--accent);
+      letter-spacing: 0.5px;
+    }
+    .division-overview-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      padding: 3px 10px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 4px;
+    }
+    .fir-badge {
+      display: inline-block; padding: 3px 10px; border-radius: 5px; font-size: 12px; font-weight: 700;
+      font-family: monospace; letter-spacing: 0.5px;
+      background: rgba(56,189,248,0.15); color: var(--accent); border: 1px solid rgba(56,189,248,0.3);
+    }
     .flow-badge {
       display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
     }
@@ -14674,11 +15888,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
       <select id="firFilterRegion" style="display:none;"><option value="">All Regions</option></select>
       <select id="firFilterDivision" style="display:none;"><option value="">All Divisions</option></select>
 
-      <div style="margin-bottom:12px;">
-        <label class="airspace-filter-label" style="margin-bottom:6px;display:block;">Region</label>
-        <div id="regionBtns" class="filter-btn-group">
-        </div>
-      </div>
+      <div id="regionBtns" style="display:none;"></div>
 
       <div style="margin-bottom:12px;">
         <label class="airspace-filter-label" style="margin-bottom:6px;display:block;">Division</label>
@@ -14688,20 +15898,29 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
       <div id="airspaceFirMap"></div>
 
-      <div id="firChipContainer" style="margin-top:16px;">
-        <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">FIRs on the active schedule (click to view):</div>
+      <div id="firChipContainer" style="display:none;">
         <div class="fir-summary-grid" id="firSummaryGrid"></div>
       </div>
     </section>
 
     <!-- Detail Section (hidden until FIR selected) -->
     <section class="card fir-detail-card" id="firDetailSection" style="display:none;">
-      <div class="fir-detail-header">
+      <div class="fir-detail-header" style="display:flex;justify-content:space-between;align-items:flex-start;">
         <div>
           <a href="#" class="back-link" id="firBackLink">&larr; Back to all FIRs</a>
           <h2 id="firDetailTitle"></h2>
           <div class="fir-detail-meta" id="firDetailMeta"></div>
         </div>
+        <button class="action-btn primary" id="requestStaffAccessBtn" style="display:none;white-space:nowrap;margin-top:8px;">Request Staff Access</button>
+      </div>
+
+      <!-- Division Route Map -->
+      <div id="divisionRouteMapContainer" style="display:none;margin-bottom:16px;">
+        <div style="position:relative;">
+          <div id="divisionRouteMap" style="width:100%;height:400px;border-radius:8px;border:1px solid var(--border);background:#0b1220;"></div>
+          <div id="divisionRouteInfo" style="display:none;position:absolute;top:10px;right:10px;z-index:1000;background:rgba(15,23,42,0.95);border:1px solid rgba(56,189,248,0.3);border-radius:8px;padding:14px 16px;color:#fff;box-shadow:0 4px 20px rgba(0,0,0,0.5);pointer-events:none;"></div>
+        </div>
+        <div id="divisionRouteLegend" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;font-size:11px;"></div>
       </div>
 
       <!-- Timeline -->
@@ -14742,13 +15961,67 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
       <!-- Mobile cards -->
       <div class="fir-leg-cards" id="firDetailCards"></div>
     </section>
+
+    <!-- Staff Access Request Modal -->
+    <div id="staffAccessModal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog">
+        <h3 id="staffAccessTitle">Request Staff Access</h3>
+        <p id="staffAccessSubtitle" style="color:var(--muted);font-size:13px;margin-bottom:16px;"></p>
+
+        <form id="staffAccessForm">
+          <label>
+            First Name
+            <input type="text" id="staffAccessFirst" readonly />
+          </label>
+          <label>
+            Last Name
+            <input type="text" id="staffAccessLast" readonly />
+          </label>
+          <label>
+            Email Address
+            <input type="email" id="staffAccessEmail" required />
+          </label>
+          <label>
+            VATSIM Rating
+            <input type="text" id="staffAccessRating" readonly />
+          </label>
+          <label>
+            Staff Role
+            <select id="staffAccessRole" required>
+              <option value="">Select...</option>
+              <option value="staff">Staff Member</option>
+              <option value="director">Director</option>
+            </select>
+          </label>
+
+          <div id="staffAccessFormMessage" class="modal-message hidden"></div>
+
+          <div class="modal-actions">
+            <button type="button" class="modal-btn modal-btn-cancel" id="closeStaffAccessModal">Cancel</button>
+            <button type="submit" class="modal-btn modal-btn-submit" id="submitStaffAccessBtn">Submit Request</button>
+          </div>
+        </form>
+      </div>
+    </div>
   </main>
+
+  <script>
+  window.AIRSPACE_USER = ${user ? JSON.stringify({
+    cid: user.cid,
+    nameFirst: user.personal?.name_first || '',
+    nameLast: user.personal?.name_last || '',
+    email: user.personal?.email || '',
+    rating: user.vatsim?.rating?.short || ''
+  }) : 'null'};
+  </script>
 
   <script>
   document.addEventListener('DOMContentLoaded', function() {
     var map = null;
     var firGeoLayer = null;
     var highlightLayer = null;
+    var currentHoveredLayer = null;
     var currentTlView = 'weekly';
     var currentTlDay = 0; // index into event days
     var currentTlData = null;
@@ -15081,8 +16354,17 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
               layer._firId = firId;
               layer._firRegion = (feature.properties.region || '');
               layer._firDivision = (feature.properties.division || '');
-              layer.on('mouseover', function() { layer.setStyle(hoverStyle); layer.bringToFront(); });
-              layer.on('mouseout', function() { firGeoLayer.resetStyle(layer); });
+              layer.on('mouseover', function() {
+                if (currentHoveredLayer && currentHoveredLayer !== layer) {
+                  firGeoLayer.resetStyle(currentHoveredLayer);
+                }
+                currentHoveredLayer = layer;
+                layer.setStyle(hoverStyle);
+              });
+              layer.on('mouseout', function() {
+                firGeoLayer.resetStyle(layer);
+                if (currentHoveredLayer === layer) currentHoveredLayer = null;
+              });
               layer.on('click', function() {
                 layer.setStyle({ color: '#38bdf8', weight: 3, fillColor: 'rgba(56,189,248,0.35)', fillOpacity: 0.4 });
                 setTimeout(function() { layer.setStyle({ color: '#38bdf8', weight: 2, fillColor: 'rgba(56,189,248,0.2)', fillOpacity: 0.3 }); }, 150);
@@ -15149,18 +16431,19 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
     window.loadFirDetailFn = loadFirDetail;
     function loadFirDetail(firId) {
+      clearDivisionMap();
       fetch('/api/airspace-management?fir=' + encodeURIComponent(firId), { credentials: 'same-origin' })
         .then(function(r) { return r.json(); })
         .then(function(data) {
           document.getElementById('airspaceSearchSection').style.display = 'none';
           document.getElementById('firDetailSection').style.display = '';
 
-          document.getElementById('firDetailTitle').textContent = data.fir + ' Airspace';
+          var divLabel = data.division ? ' <span style="font-size:11px;color:var(--muted);margin-left:4px;">' + data.division + '</span>' : '';
+          document.getElementById('firDetailTitle').innerHTML = '<div class="fir-detail-header-box"><span class="fir-detail-header-name">' + data.fir + '</span><span class="fir-detail-header-label">FIR Airspace</span>' + divLabel + '</div>';
           var metaParts = [];
-          if (data.region) metaParts.push('Region: ' + data.region);
-          if (data.division) metaParts.push('Division: ' + data.division);
           metaParts.push(data.legs.length + ' leg' + (data.legs.length !== 1 ? 's' : '') + ' transiting');
-          document.getElementById('firDetailMeta').textContent = metaParts.join(' — ');
+          document.getElementById('firDetailMeta').textContent = metaParts.join(' \u2014 ');
+          showStaffBtn(data.division || '');
 
           // Highlight FIR on map
           if (highlightLayer) { map.removeLayer(highlightLayer); }
@@ -15194,7 +16477,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
             return '<tr>'
               + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
-              + '<td class="" style="font-family:monospace;font-weight:600;color:var(--accent);">' + data.fir + '</td>'
+              + '<td><span class="fir-badge">' + data.fir + '</span></td>'
               + '<td>' + l.from + '</td>'
               + '<td>' + l.to + '</td>'
               + '<td>' + (l.date || '-') + '</td>'
@@ -15260,11 +16543,15 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
         document.getElementById('firDetailSection').style.display = '';
 
         var label = division || region || 'Filtered';
-        document.getElementById('firDetailTitle').textContent = label + ' Airspace';
-        document.getElementById('firDetailMeta').textContent = results.length + ' FIR' + (results.length !== 1 ? 's' : '') + ' — ' + results.reduce(function(sum, r) { return sum + (r.legs || []).length; }, 0) + ' total leg transits';
+        document.getElementById('firDetailTitle').innerHTML = '<div class="division-overview-header"><span class="division-overview-name">' + label + '</span><span class="division-overview-label">Division Overview</span></div>';
+        document.getElementById('firDetailMeta').textContent = results.length + ' FIR' + (results.length !== 1 ? 's' : '') + ' \u2014 ' + results.reduce(function(sum, r) { return sum + (r.legs || []).length; }, 0) + ' total leg transits';
+        showStaffBtn(division || '');
 
         // Clear highlight
         if (highlightLayer) { map.removeLayer(highlightLayer); highlightLayer = null; }
+
+        // Render division route map
+        var firIds = matchingFirs.map(function(f) { return f.fir; });
 
         // Build combined table grouped by FIR
         var allLegs = [];
@@ -15284,6 +16571,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
         // Build timeline grouped by FIR
         currentTlData = { legs: allLegs, mode: 'grouped' };
         renderTimeline(allLegs, 'grouped', currentTlView);
+        renderDivisionRouteMap(allLegs, firIds, division || '');
 
         // Build table
         window._firLegs = allLegs;
@@ -15295,7 +16583,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
           return '<tr>'
             + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
-            + '<td class=""><span style="font-family:monospace;font-weight:600;color:var(--accent);">' + l._fir + '</span></td>'
+            + '<td><span class="fir-badge">' + l._fir + '</span></td>'
             + '<td>' + l.from + '</td>'
             + '<td>' + l.to + '</td>'
             + '<td>' + (l.date || '-') + '</td>'
@@ -15520,6 +16808,307 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             }
           });
       }, 100);
+    }
+
+    // ===== DIVISION ROUTE MAP =====
+    var divisionMap = null;
+    var divisionRouteLayers = [];
+    var ROUTE_COLORS = ['#f59e0b','#ef4444','#22c55e','#3b82f6','#a855f7','#ec4899','#14b8a6','#f97316','#06b6d4','#eab308','#8b5cf6','#10b981','#e11d48','#0ea5e9'];
+
+    function clearDivisionMap() {
+      var container = document.getElementById('divisionRouteMapContainer');
+      container.style.display = 'none';
+      if (divisionMap) { divisionMap.remove(); divisionMap = null; }
+      divisionRouteLayers = [];
+      document.getElementById('divisionRouteLegend').innerHTML = '';
+      document.getElementById('divisionRouteInfo').style.display = 'none';
+    }
+
+    function renderDivisionRouteMap(allLegs, matchingFirIds, divisionName) {
+      clearDivisionMap();
+      if (!allLegs.length) return;
+
+      var container = document.getElementById('divisionRouteMapContainer');
+      container.style.display = '';
+
+      divisionMap = L.map('divisionRouteMap', { zoomControl: true, worldCopyJump: true }).setView([30, 0], 3);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 10 }).addTo(divisionMap);
+
+      // Draw FIR boundaries
+      fetch('/fir-boundaries.geojson')
+        .then(function(r) { return r.json(); })
+        .then(function(rawGeo) {
+          // Draw ALL division FIRs in subtle style
+          rawGeo.features.forEach(function(f) {
+            if (f.properties && f.properties.division === divisionName) {
+              L.geoJSON(f, {
+                style: { color: '#334155', weight: 1, fillColor: 'rgba(51,65,85,0.08)', fillOpacity: 0.1, dashArray: '3 3' }
+              }).addTo(divisionMap);
+            }
+          });
+
+          // Now load merged FIRs for transited ones (highlighted)
+          return fetch('/api/fir-merged.geojson');
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(geoData) {
+          var firFeatures = {};
+          var transitLayers = [];
+          geoData.features.forEach(function(f) {
+            if (f.properties && matchingFirIds.indexOf(f.properties.id) !== -1) {
+              firFeatures[f.properties.id] = f;
+              var layer = L.geoJSON(f, {
+                style: { color: '#6366f1', weight: 2, fillColor: 'rgba(99,102,241,0.12)', fillOpacity: 0.2 }
+              }).addTo(divisionMap);
+              transitLayers.push(layer);
+            }
+          });
+          // Fit map to transited FIR bounds immediately
+          if (transitLayers.length) {
+            var group = L.featureGroup(transitLayers);
+            divisionMap.fitBounds(group.getBounds(), { padding: [30, 30], maxZoom: 7 });
+          }
+
+          // Point-in-any-FIR helper
+          function pointInDivision(lat, lon) {
+            for (var fid in firFeatures) {
+              var geom = firFeatures[fid].geometry;
+              var polys = geom.type === 'MultiPolygon' ? geom.coordinates : geom.type === 'Polygon' ? [geom.coordinates] : [];
+              for (var p = 0; p < polys.length; p++) {
+                var ring = polys[p][0];
+                if (!ring) continue;
+                var inside = false;
+                for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                  var yi = ring[i][0], xi = ring[i][1];
+                  var yj = ring[j][0], xj = ring[j][1];
+                  if (((yi > lon) !== (yj > lon)) && (lat < (xj - xi) * (lon - yi) / (yj - yi) + xi)) inside = !inside;
+                }
+                if (inside) return true;
+              }
+            }
+            return false;
+          }
+
+          function findCrossing(insidePt, outsidePt, steps) {
+            var a = [insidePt[0], insidePt[1]], b = [outsidePt[0], outsidePt[1]];
+            for (var s = 0; s < (steps || 12); s++) {
+              var mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
+              if (pointInDivision(mid[0], mid[1])) a = mid; else b = mid;
+            }
+            return [(a[0]+b[0])/2, (a[1]+b[1])/2];
+          }
+
+          // Deduplicate legs by WF number (unique routes), collect all FIR legs per route
+          var seen = {};
+          var uniqueLegs = [];
+          var legsByRoute = {};
+          allLegs.forEach(function(l) {
+            var key = l.wf + ':' + l.from + ':' + l.to;
+            if (!seen[key]) { seen[key] = true; uniqueLegs.push(l); legsByRoute[key] = []; }
+            legsByRoute[key].push(l);
+          });
+
+          var bounds = [];
+          var legendHtml = '';
+          var pending = uniqueLegs.length;
+
+          function buildRoutePopup(leg, color) {
+            var key = leg.wf + ':' + leg.from + ':' + leg.to;
+            var firLegs = legsByRoute[key] || [];
+            var flowLabel = function(ft) { return ft === 'BOOKING_ONLY' ? 'Booking' : ft === 'SLOTTED' ? 'Slotted' : 'None'; };
+            var html = '<div style="font-family:inherit;min-width:280px;color:#fff;">'
+              + '<div style="font-weight:700;font-size:14px;margin-bottom:4px;color:' + color + ';">' + leg.wf + ': ' + leg.from + ' \u2192 ' + leg.to + '</div>'
+              + '<div style="font-size:12px;color:#cbd5e1;margin-bottom:4px;">' + (leg.date || '') + '</div>'
+              + '<div style="font-size:12px;color:#94a3b8;margin-bottom:10px;">Dep <strong style="color:#fff;">' + (leg.depTime || '-') + '</strong> UTC \u00a0\u2022\u00a0 Arr <strong style="color:#fff;">' + (leg.arrTime || '-') + '</strong> UTC</div>'
+              + '<table style="width:100%;font-size:12px;border-collapse:collapse;color:#fff;">'
+              + '<tr style="border-bottom:1px solid #334155;"><th style="text-align:left;padding:3px 6px;color:#94a3b8;">FIR</th><th style="text-align:left;padding:3px 6px;color:#94a3b8;">Staff Window</th><th style="text-align:left;padding:3px 6px;color:#94a3b8;">Duration</th><th style="text-align:left;padding:3px 6px;color:#94a3b8;">Flow</th></tr>';
+            firLegs.forEach(function(fl) {
+              html += '<tr>'
+                + '<td style="padding:3px 6px;font-weight:600;">' + fl._fir + '</td>'
+                + '<td style="padding:3px 6px;">' + (fl.staffStart && fl.staffEnd ? fl.staffStart + '\u2013' + fl.staffEnd : '-') + '</td>'
+                + '<td style="padding:3px 6px;">' + (fl.staffMins ? fl.staffMins + 'm' : '-') + '</td>'
+                + '<td style="padding:3px 6px;">' + flowLabel(fl.flowType) + '</td>'
+                + '</tr>';
+            });
+            html += '</table></div>';
+            return html;
+          }
+
+          uniqueLegs.forEach(function(leg, idx) {
+            var color = ROUTE_COLORS[idx % ROUTE_COLORS.length];
+            legendHtml += '<span class="div-route-legend-item" data-idx="' + idx + '" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;padding:2px 6px;border-radius:4px;transition:background 0.15s;"><span style="width:14px;height:3px;background:' + color + ';border-radius:2px;display:inline-block;"></span>' + leg.wf + ' ' + leg.from + '\u2192' + leg.to + '</span>';
+
+            fetch('/api/resolve-route?from=' + leg.from + '&to=' + leg.to + '&route=' + encodeURIComponent(leg.atcRoute || '') + '&depTime=&blockTime=')
+              .then(function(r) { return r.json(); })
+              .then(function(routeData) {
+                if (!routeData.points || routeData.points.length < 2) { checkDone(); return; }
+
+                var pts = routeData.points.map(function(p) {
+                  return { lat: p.lat, lon: p.lon, inDiv: pointInDivision(p.lat, p.lon) };
+                });
+
+                var popupContent = buildRoutePopup(leg, color);
+                var popupKey = leg.wf + ':' + leg.from + ':' + leg.to;
+
+                // Full route dim
+                var allCoords = pts.map(function(p) { return [p.lat, p.lon]; });
+                L.polyline(allCoords, { color: color, weight: 1.5, opacity: 0.25 }).addTo(divisionMap);
+                // Invisible wide hit target for hover
+                L.polyline(allCoords, { color: color, weight: 16, opacity: 0 }).addTo(divisionMap)
+                  .on('mouseover', function() {
+                    var infoEl = document.getElementById('divisionRouteInfo');
+                    infoEl.innerHTML = popupContent;
+                    infoEl.style.display = '';
+                  }).on('mouseout', function() {
+                    document.getElementById('divisionRouteInfo').style.display = 'none';
+                  });
+
+                // Highlighted FIR transit segments
+                for (var i = 0; i < pts.length - 1; i++) {
+                  var a = pts[i], b = pts[i + 1];
+                  var seg = null;
+                  if (a.inDiv && b.inDiv) {
+                    seg = [[a.lat, a.lon], [b.lat, b.lon]];
+                    bounds.push([a.lat, a.lon], [b.lat, b.lon]);
+                  } else if (a.inDiv && !b.inDiv) {
+                    var cross = findCrossing([a.lat, a.lon], [b.lat, b.lon]);
+                    seg = [[a.lat, a.lon], cross];
+                    bounds.push([a.lat, a.lon], cross);
+                  } else if (!a.inDiv && b.inDiv) {
+                    var cross = findCrossing([b.lat, b.lon], [a.lat, a.lon]);
+                    seg = [cross, [b.lat, b.lon]];
+                    bounds.push(cross, [b.lat, b.lon]);
+                  }
+                  if (seg) {
+                    L.polyline(seg, { color: color, weight: 3.5, opacity: 0.9 }).addTo(divisionMap);
+                    L.polyline(seg, { color: color, weight: 16, opacity: 0 }).addTo(divisionMap)
+                      .on('mouseover', function() {
+                    var infoEl = document.getElementById('divisionRouteInfo');
+                    infoEl.innerHTML = popupContent;
+                    infoEl.style.display = '';
+                  }).on('mouseout', function() {
+                    document.getElementById('divisionRouteInfo').style.display = 'none';
+                  });
+                  }
+                }
+
+                checkDone();
+              })
+              .catch(function() { checkDone(); });
+          });
+
+          function checkDone() {
+            pending--;
+            if (pending <= 0 && bounds.length) {
+              divisionMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 7 });
+            }
+          }
+
+          document.getElementById('divisionRouteLegend').innerHTML = legendHtml;
+
+          // Legend hover → show info overlay
+          document.getElementById('divisionRouteLegend').addEventListener('mouseover', function(e) {
+            var item = e.target.closest('.div-route-legend-item');
+            if (!item) return;
+            item.style.background = 'rgba(255,255,255,0.08)';
+            var idx = Number(item.dataset.idx);
+            var leg = uniqueLegs[idx];
+            if (!leg) return;
+            var color = ROUTE_COLORS[idx % ROUTE_COLORS.length];
+            var infoEl = document.getElementById('divisionRouteInfo');
+            infoEl.innerHTML = buildRoutePopup(leg, color);
+            infoEl.style.display = '';
+          });
+          document.getElementById('divisionRouteLegend').addEventListener('mouseout', function(e) {
+            var item = e.target.closest('.div-route-legend-item');
+            if (item) item.style.background = '';
+            document.getElementById('divisionRouteInfo').style.display = 'none';
+          });
+        });
+    }
+
+    // ===== STAFF ACCESS REQUEST =====
+    var currentDivision = '';
+    var staffBtn = document.getElementById('requestStaffAccessBtn');
+    var staffModal = document.getElementById('staffAccessModal');
+    var staffForm = document.getElementById('staffAccessForm');
+    var staffCloseBtn = document.getElementById('closeStaffAccessModal');
+    var staffBackdrop = staffModal ? staffModal.querySelector('.modal-backdrop') : null;
+    var staffMsg = document.getElementById('staffAccessFormMessage');
+
+    function showStaffBtn(division) {
+      currentDivision = division || '';
+      if (staffBtn && currentDivision && window.AIRSPACE_USER) {
+        staffBtn.style.display = '';
+        staffBtn.textContent = 'Request Staff Access';
+      } else if (staffBtn) {
+        staffBtn.style.display = 'none';
+      }
+    }
+
+    function openStaffModal() {
+      var u = window.AIRSPACE_USER;
+      if (!u || !staffModal) return;
+      document.getElementById('staffAccessTitle').textContent = 'Request Staff Access';
+      document.getElementById('staffAccessSubtitle').textContent = 'Request staff access to ' + currentDivision + ' airports';
+      document.getElementById('staffAccessFirst').value = u.nameFirst;
+      document.getElementById('staffAccessLast').value = u.nameLast;
+      document.getElementById('staffAccessEmail').value = u.email;
+      document.getElementById('staffAccessRating').value = u.rating || 'N/A';
+      document.getElementById('staffAccessRole').value = '';
+      staffMsg.classList.add('hidden');
+      document.getElementById('submitStaffAccessBtn').disabled = false;
+      document.getElementById('submitStaffAccessBtn').textContent = 'Submit Request';
+      staffModal.classList.remove('hidden');
+    }
+
+    function closeStaffModal() { if (staffModal) staffModal.classList.add('hidden'); }
+
+    if (staffBtn) staffBtn.addEventListener('click', openStaffModal);
+    if (staffCloseBtn) staffCloseBtn.addEventListener('click', closeStaffModal);
+    if (staffBackdrop) staffBackdrop.addEventListener('click', closeStaffModal);
+
+    if (staffForm) {
+      staffForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        var role = document.getElementById('staffAccessRole').value;
+        if (!role) return;
+        var submitBtn = document.getElementById('submitStaffAccessBtn');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Submitting...';
+        try {
+          var res = await fetch('/api/staff-access/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+              division: currentDivision,
+              email: document.getElementById('staffAccessEmail').value.trim(),
+              role: role
+            })
+          });
+          var data = await res.json();
+          if (!res.ok) {
+            staffMsg.textContent = data.error || 'Request failed';
+            staffMsg.style.color = 'var(--danger)';
+            staffMsg.classList.remove('hidden');
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Submit Request';
+            return;
+          }
+          staffMsg.textContent = 'Your request has been sent to an administrator for review.';
+          staffMsg.style.color = 'var(--success)';
+          staffMsg.classList.remove('hidden');
+          submitBtn.textContent = 'Sent';
+          setTimeout(closeStaffModal, 2000);
+        } catch (err) {
+          staffMsg.textContent = 'Unable to submit request. Please try again.';
+          staffMsg.style.color = 'var(--danger)';
+          staffMsg.classList.remove('hidden');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Submit Request';
+        }
+      });
     }
 
     // Allow direct FIR from URL hash

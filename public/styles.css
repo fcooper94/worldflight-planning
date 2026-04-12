@@ -88,6 +88,27 @@ a:hover{ text-decoration:none; }
 .site-banner-text {
   display: inline;
 }
+.admin-alert-banner {
+  position: relative;
+  z-index: 1;
+  min-height: 35px;
+  padding: 8px 20px;
+  text-align: center;
+  font-size: 13px;
+}
+.admin-alert-banner:not(:empty) {
+  background: linear-gradient(135deg, rgba(251,191,36,0.12), rgba(245,158,11,0.12));
+  border-bottom: 1px solid rgba(251,191,36,0.3);
+}
+.admin-alert-link {
+  color: #fbbf24;
+  text-decoration: none;
+  font-weight: 600;
+}
+.admin-alert-link:hover {
+  color: #fcd34d;
+  text-decoration: underline;
+}
 
 /* Disabled */
 button:disabled, input:disabled, select:disabled{
@@ -816,6 +837,7 @@ select{ cursor:pointer; }
   margin:0;
   line-height:1;
 }
+
 
 /* =========================
    TSAT / Slot Management
@@ -4139,12 +4161,14 @@ html[data-map-theme="light"] .ac-label {
   font-size: 12px;
   color: #9fb3c8;
 }
+.staff-access-page .admin-table,
 .doc-access-requests .admin-table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0 6px;
 }
 
+.staff-access-page .admin-table thead th,
 .doc-access-requests .admin-table thead th {
   text-align: left;
   font-size: 13px;
@@ -4153,16 +4177,19 @@ html[data-map-theme="light"] .ac-label {
   padding: 8px 12px;
 }
 
+.staff-access-page .admin-table tbody tr,
 .doc-access-requests .admin-table tbody tr {
   background: rgba(255, 255, 255, 0.02);
   border-radius: 8px;
 }
 
+.staff-access-page .admin-table tbody td,
 .doc-access-requests .admin-table tbody td {
   padding: 10px 12px;
   vertical-align: middle;
 }
 
+.staff-access-page .admin-table tbody tr:hover,
 .doc-access-requests .admin-table tbody tr:hover {
   background: rgba(255, 255, 255, 0.05);
 }
@@ -4190,6 +4217,7 @@ html[data-map-theme="light"] .ac-label {
 }
 
 /* Actions column */
+.staff-access-page .admin-table td:last-child,
 .doc-access-requests .admin-table td:last-child {
   white-space: nowrap;
 }
