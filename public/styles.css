@@ -2969,7 +2969,7 @@ tr:hover .row-actions {
 
 /* Leaflet map itself */
 #icaoMap {
-  height: 320px;        /* or whatever height you chose */
+  height: 450px;
   width: 100%;
   border-radius: 14px;
   overflow: hidden;
@@ -3091,7 +3091,7 @@ html[data-map-theme="light"] .runway-label > div {
 
 .icao-top-row.two-cols {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 2fr;
   gap: 24px;
   align-items: stretch;
 }
@@ -3582,6 +3582,9 @@ html[data-map-theme="light"] .runway-label > div {
 }
 .route-collapsible {
   max-width: 420px;
+}
+.schedule-page .route-collapsible {
+  max-width: none !important;
 }
 
 .route-text {
@@ -4794,305 +4797,259 @@ html[data-map-theme="light"] .ac-label {
    ========================================================= */
 
 /* ----- Table scroll container ----- */
-.schedule-page .table-scroll{
+/* =========================================================
+   Schedule page — clean CSS (single source of truth)
+   ========================================================= */
+
+/* Page layout: full width, reduced padding */
+.schedule-page {
+  padding: 24px !important;
+  max-width: none !important;
+}
+.schedule-page .card-full {
+  max-width: none;
   width: 100%;
-  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* Scroll wrapper */
+.schedule-page .table-scroll {
+  width: 100%;
   overflow-x: auto;
-  overflow-y: hidden;
-  position: relative;
-  scrollbar-gutter: stable both-edges;
-}
-@media (max-width: 900px) {
-  .schedule-page .card {
-    width: calc(100vw - 44px);
-    box-sizing: border-box;
-    padding: 10px 8px;
-    margin: 8px 4px;
-    overflow-x: auto;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-  }
-  .schedule-page .card::-webkit-scrollbar { display: none; }
-  .schedule-page .table-scroll { overflow-x: visible !important; }
-  .schedule-page .col-book {
-    width: 80px !important;
-    min-width: 80px !important;
-    max-width: 80px !important;
-  }
-  .schedule-page .book-pill,
-  .schedule-page .col-book .flowtype-pill {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    font-size: 8px !important;
-    padding: 4px 2px !important;
-    white-space: nowrap !important;
-    width: 76px !important;
-    height: 24px !important;
-    min-width: 76px !important;
-    max-width: 76px !important;
-    min-height: 24px !important;
-    max-height: 24px !important;
-    line-height: 1 !important;
-    box-sizing: border-box !important;
-  }
 }
 
-/* ----- Table base ----- */
-.schedule-page .departures-table{
+/* Table: fixed layout, full width */
+.schedule-page .departures-table {
   width: 100%;
-  min-width: 0;              /* critical for flex + scroll */
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: fixed !important;
 }
 
-/* ----- Header + cells ----- */
+
+/* All cells */
 .schedule-page .departures-table th,
-.schedule-page .departures-table td{
-  padding: 4px 8px;
+.schedule-page .departures-table td {
+  padding: 6px 10px;
   font-size: 13px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   border-top: 1px solid var(--border);
+  vertical-align: middle;
 }
 
-.schedule-page .departures-table th{
+/* Headers */
+.schedule-page .departures-table th {
   font-weight: 600;
   color: var(--text);
+  letter-spacing: 0.02em;
 }
 
-/* =========================================================
-   Column sizing (efficient + readable)
-   ========================================================= */
+/* Narrow columns: fixed widths so route gets the rest */
+.schedule-page .col-wf-sector { font-weight: 600; width: 95px; overflow: visible !important; text-overflow: unset !important; }
+.schedule-page .col-from      { width: 65px; }
+.schedule-page .col-to        { width: 65px; }
+.schedule-page .col-date      { width: 125px; }
+.schedule-page .col-window    { width: 115px; }
+.schedule-page .col-block     { width: 55px; text-align: center; }
+.schedule-page .col-book      { width: 180px; text-align: center; overflow: visible; }
+.schedule-page .col-details   { width: 110px; text-align: center; }
+.sector-details-btn {
+  background: rgba(56,189,248,0.1);
+  border: 1px solid rgba(56,189,248,0.3);
+  color: var(--accent);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sector-details-btn:hover {
+  background: rgba(56,189,248,0.2);
+  border-color: var(--accent);
+}
+/* Sector page banners */
+.sector-banner {
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex: 1;
+  border-radius: 12px;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+.sector-banner:hover { transform: scale(1.01); }
+.sector-banner-flow-slotted,
+.sector-banner-flow-booking,
+.sector-banner-flow-none,
+.sector-banner-flow-full { cursor: default; pointer-events: none; }
+.sector-banner-flow-slotted,
+.sector-banner-flow-booking { pointer-events: auto; }
+.sector-banner-flow-slotted:hover,
+.sector-banner-flow-booking:hover,
+.sector-banner-flow-none:hover,
+.sector-banner-flow-full:hover { transform: none; }
+.sector-banner-dep {
+  background: linear-gradient(135deg, rgba(56,189,248,0.1), rgba(56,189,248,0.02));
+  border: 1px solid rgba(56,189,248,0.2);
+}
+.sector-banner-dep:hover { background: linear-gradient(135deg, rgba(56,189,248,0.18), rgba(56,189,248,0.05)); border-color: rgba(56,189,248,0.5); }
+.sector-banner-arr {
+  background: linear-gradient(135deg, rgba(245,158,11,0.1), rgba(245,158,11,0.02));
+  border: 1px solid rgba(245,158,11,0.2);
+}
+.sector-banner-arr:hover { background: linear-gradient(135deg, rgba(245,158,11,0.18), rgba(245,158,11,0.05)); border-color: rgba(245,158,11,0.5); }
+.sector-banner-sb {
+  background: linear-gradient(135deg, rgba(74,222,128,0.1), rgba(74,222,128,0.02));
+  border: 1px solid rgba(74,222,128,0.2);
+}
+.sector-banner-sb:hover { background: linear-gradient(135deg, rgba(74,222,128,0.18), rgba(74,222,128,0.05)); border-color: rgba(74,222,128,0.5); }
+.sector-banner-flow-slotted {
+  background: linear-gradient(135deg, rgba(239,68,68,0.1), rgba(239,68,68,0.02));
+  border: 1px solid rgba(239,68,68,0.25);
+  color: #f87171;
+}
+.sector-banner-flow-booking {
+  background: linear-gradient(135deg, rgba(251,146,60,0.1), rgba(251,146,60,0.02));
+  border: 1px solid rgba(251,146,60,0.25);
+  color: #fb923c;
+}
+.sector-banner-flow-none {
+  background: linear-gradient(135deg, rgba(74,222,128,0.1), rgba(74,222,128,0.02));
+  border: 1px solid rgba(74,222,128,0.25);
+  color: #4ade80;
+}
+.sector-banner-flow-slotted .sector-banner-icao { color: #f87171; }
+.sector-banner-flow-booking .sector-banner-icao { color: #fb923c; }
+.sector-banner-flow-none .sector-banner-icao { color: #4ade80; }
+.sector-banner-flow-full {
+  background: linear-gradient(135deg, rgba(100,116,139,0.1), rgba(100,116,139,0.02));
+  border: 1px solid rgba(100,116,139,0.25);
+  color: #94a3b8;
+}
+.sector-banner-flow-full .sector-banner-icao { color: #94a3b8; }
+.flowtype-pill.flowtype-full {
+  background: rgba(100,116,139,0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(100,116,139,0.3);
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  display: inline-block;
+}
+.sector-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sector-banner-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 600;
+  color: #94a3b8;
+}
+.sector-banner-dep .sector-banner-label { color: #7dd3fc; }
+.sector-banner-arr .sector-banner-label { color: #fcd34d; }
+.sector-banner-icao {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+.sector-banner-dep .sector-banner-icao { color: #38bdf8; }
+.sector-banner-arr .sector-banner-icao { color: #f59e0b; }
 
-/* WF number */
-.schedule-page .col-wf-sector{
-  width: 72px;
+/* Rotating pill text */
+.pill-rotate {
+  display: inline-block;
+  position: relative;
+  overflow: hidden;
+  height: 1.2em;
+  vertical-align: middle;
+}
+.pill-line {
+  display: block;
+  animation: pillRotate 5s ease-in-out infinite;
+}
+.pill-line-1 { animation-delay: 0s; }
+.pill-line-2 {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  opacity: 0;
+  animation: pillRotate2 5s ease-in-out infinite;
+}
+@keyframes pillRotate {
+  0%, 40% { transform: translateY(0); opacity: 1; }
+  50%, 90% { transform: translateY(-100%); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+@keyframes pillRotate2 {
+  0%, 40% { transform: translateY(100%); opacity: 0; }
+  50%, 90% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(100%); opacity: 0; }
 }
 
-/* Dep / Arr ICAO */
-.schedule-page .col-from,
-.schedule-page .col-to{
-  width: 64px;
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
-
-/* Date */
-.schedule-page .col-date{
-  width: 110px;
+.sector-airport-label {
+  background: rgba(15,23,42,0.9) !important;
+  border: 1px solid rgba(255,255,255,0.15) !important;
+  border-radius: 6px !important;
+  color: #fff !important;
+  font-size: 12px !important;
+  padding: 4px 8px !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4) !important;
 }
-
-/* Dep / Arr windows */
-.schedule-page .col-window{
-  width: 130px;
+.sector-airport-label::before {
+  border-top-color: rgba(15,23,42,0.9) !important;
 }
+.sector-wpt-label {
+  background: rgba(0,0,0,0.6) !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #ffffff !important;
+  font-size: 12px !important;
+  font-family: monospace !important;
+  font-weight: 600 !important;
+  padding: 2px 4px !important;
+  border-radius: 3px !important;
+  white-space: nowrap !important;
+}
+.sector-wpt-label::before { display: none !important; }
 
-/* Block time */
-/* col-time: see final sizing block */
-
-/* =========================================================
-   ATC Route – flexible + wide
-   ========================================================= */
-.schedule-page .col-route{
-  width: auto;               /* absorbs remaining space */
-  min-width: 420px;
-  max-width: 640px;
+/* ATC Route: gets all remaining space */
+.schedule-page .col-route {
+  width: auto !important;
+  min-width: 0 !important;
+  padding-right: 8px !important;
   white-space: normal;
   overflow-wrap: anywhere;
+  word-break: break-word;
   line-height: 1.5;
   font-size: 12px;
+  font-family: monospace;
+}
+.schedule-page .route-text {
+  max-width: none !important;
 }
 
-/* =========================================================
-   Action columns
-   ========================================================= */
-
-/* Book Slot */
-.schedule-page .col-book{
-  width: 96px;
-  text-align: center;
-}
-
-/* Plan */
-.schedule-page .col-plan{
-  width: 140px;
-  text-align: center;
-}
-
-/* =========================================================
-   Card width correction (sidebar aware)
-   Prevents overflow when sidebar is expanded
-   ========================================================= */
-
-.schedule-page .card-full{
-  max-width: calc(100vw - var(--sidebar-expanded) - 64px);
-  box-sizing: border-box;
-}
-
-/* Sidebar collapsed */
-body.sidebar-collapsed .schedule-page .card-full{
-  max-width: calc(100vw - var(--sidebar-collapsed) - 64px);
-}
-
-/* =========================================================
-   Small screens: force horizontal scroll, not squeeze
-   ========================================================= */
-@media (max-width: 1200px){
-  .schedule-page .departures-table{
-    min-width: 980px;
+/* Mobile */
+@media (max-width: 900px) {
+  .schedule-page .card {
+    padding: 10px 8px;
+    overflow-x: auto;
   }
+  .schedule-page .departures-table { min-width: 800px; }
 }
-/* =========================================================
-   FINAL WIDTH OPTIMIZATION — Schedule table only
-   ========================================================= */
-
-/* Reduce padding slightly to free horizontal space */
-.schedule-page .departures-table th,
-.schedule-page .departures-table td{
-  padding: 3px 6px;   /* was 4px 8px */
-}
-
-/* Date can be tighter */
-.schedule-page .col-date{
-  width: 96px;
-}
-
-/* Dep / Arr windows: reduce width */
-.schedule-page .col-window{
-  width: 118px;
-}
-
-/* Block time can be very small */
-/* col-time: see final sizing block */
-
-/* Book Slot button column */
-.schedule-page .col-book{
-  width: 88px;
-}
-
-/* Plan button column */
-.schedule-page .col-plan{
-  width: 124px;
-}
-
-/* =========================================================
-   ATC Route — give it the freed space
-   ========================================================= */
-
-.schedule-page .col-route{
-  min-width: 520px;   /* ↑ significantly wider */
-  max-width: 820px;   /* ↑ allow long routes */
-  font-size: 12px;
-  line-height: 1.5;
-}
-/* =========================================================
-   Schedule table – header & button width fixes
-   ========================================================= */
-
-/* Block Time: ensure header fits comfortably */
-/* col-time: see final sizing block */
-
-/* Book Slot column: enforce minimum usable button width */
-.schedule-page .col-book{
-  width: 104px;
-  min-width: 104px;
-  text-align: center;
-}
-
-/* Plan column: wider due to icon + text */
-.schedule-page .col-plan{
-  width: 152px;
-  min-width: 152px;
-  text-align: center;
-}
-
-/* Ensure buttons themselves do not shrink */
-.schedule-page .col-book .book-slot-btn,
-.schedule-page .col-plan .plan-btn{
-  min-width: 88px;
-  white-space: nowrap;
-}
-
-/* =========================================================
-   FINAL column reservation – Schedule departures table
-   ========================================================= */
-
-/* --- Block Time: reserve header + data space --- */
-/* col-time: see final sizing block */
-
-/* --- Book Slot column --- */
-.schedule-page .col-book{
-  width: 112px;
-  min-width: 112px;
-  max-width: 112px;
-  text-align: center;
-}
-
-/* --- Plan column (SB icon + text) --- */
-.schedule-page .col-plan{
-  width: 168px;
-  min-width: 168px;
-  max-width: 168px;
-  text-align: center;
-}
-
-/* --- Ensure buttons NEVER shrink --- */
-.schedule-page .col-book button,
-.schedule-page .col-plan button{
-  min-width: 96px;
-  white-space: nowrap;
-}
-
-/* --- Let ATC Route yield first when space is tight --- */
-.schedule-page .col-route{
-  min-width: 460px;   /* still wide */
-  max-width: none;    /* allow it to give up space */
-}
-/* =========================================================
-   Schedule page – final column rebalance
-   Fixes SimBrief overflow, trims Arr Window
-   ========================================================= */
-
-/* nth-child column overrides removed — use class-based sizing instead */
-.schedule-page .col-window {
-  width: 120px;
-  min-width: 120px;
-}
-
-/* --- Plan column MUST be protected --- */
-.schedule-page .col-plan{
-  width: 190px;          /* enough for full label */
-  min-width: 190px;
-  max-width: 190px;
-  text-align: center;
-}
-
-/* --- SimBrief button must never clip --- */
-.schedule-page .col-plan .simbrief-btn,
-.schedule-page .col-plan button,
-.schedule-page .col-plan a{
-  white-space: nowrap;
-  min-width: 160px;
-  flex-shrink: 0;
-}
-
-/* --- Book Slot also protected --- */
-.schedule-page .col-book{
-  width: 112px;
-  min-width: 112px;
-  max-width: 112px;
-}
-
-/* --- Final schedule column sizing --- */
-.schedule-page .col-wf-sector { width: 80px;  min-width: 80px; }
-.schedule-page .col-from,
-.schedule-page .col-to        { width: 60px;  min-width: 60px; }
-.schedule-page .col-date      { width: 110px; min-width: 110px; }
-.schedule-page .col-window    { width: 105px; min-width: 105px; max-width: 105px; }
-.schedule-page .col-block { width: 52px; min-width: 52px; max-width: 52px; text-align: center; padding: 3px 4px; overflow: visible !important; text-overflow: clip !important; }
-.schedule-page .col-route     { width: auto;  min-width: 200px; max-width: none; }
-.schedule-page .col-book      { width: 160px; min-width: 160px; text-align: center; overflow: visible; }
-.schedule-page .col-plan      { width: 180px; min-width: 180px; text-align: center; }
 
 /* ======================================================
    WF WORLD MAP — FULL PAGE LAYOUT
@@ -6264,19 +6221,25 @@ main.dashboard.map-layout {
   background: none;
   cursor: pointer;
   transition: all .2s ease;
+  position: relative;
 }
 .col-book .flowtype-pill {
   cursor: default;
   pointer-events: none;
 }
 .book-pill .book-pill-hover {
-  display: none;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
 }
 .book-pill:hover .book-pill-label {
-  display: none;
+  visibility: hidden;
 }
 .book-pill:hover .book-pill-hover {
-  display: inline;
+  opacity: 1;
 }
 
 /* Booking Required → amber, hover → blue action */

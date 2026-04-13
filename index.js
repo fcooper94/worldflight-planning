@@ -645,7 +645,7 @@ io.use((socket, next) => {
 
 
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots', 'wf-portal-banner'];
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
 // Division → ICAO prefix mapping for document upload permissions
@@ -1492,6 +1492,35 @@ function requireMasterUser(req, res, next) {
   next();
 }
 
+/* ===== BOOKING-ONLY CAPACITY ===== */
+function getBookingOnlyCapacity(fromIcao, toIcao) {
+  const sectorKey = `${fromIcao}-${toIcao}`;
+  const rate = sharedDepFlows[sectorKey] || 0;
+  if (!rate) return { total: 0, used: 0, remaining: 0 };
+
+  // Find the leg to get dep window duration
+  const leg = adminSheetCache.find(r => r.from === fromIcao && r.to === toIcao);
+  let windowHours = 2; // default 2 hour window
+  if (leg && leg.dep_time_utc) {
+    // Window is typically dep_time +/- 1hr = 2hr window
+    windowHours = 2;
+  }
+
+  const total = Math.floor(rate * windowHours);
+
+  // Count existing bookings for this sector (bookingKey format = cid:slotKey), exclude fakes
+  let used = 0;
+  const slotSuffix = '|BOOKING_ONLY';
+  const prefix = `${fromIcao}-${toIcao}|`;
+  for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+    if (key.includes(':') && b.slotKey && b.slotKey.startsWith(prefix) && b.slotKey.endsWith(slotSuffix) && !b._fake) {
+      used++;
+    }
+  }
+
+  return { total, used, remaining: Math.max(0, total - used) };
+}
+
 /* ===== GOOGLE SHEET (MULTI-EVENT) ===== */
 const DEFAULT_SHEET_URL =
   'https://docs.google.com/spreadsheets/d/e/2PACX-1vRG6DbmhAQpFmOophiGjjSh_UUGdTo-LA_sNNexrMpkkH2ECHl8eDsdxM24iY8Itw06pUZZXWtvmUNg/pub?output=csv';
@@ -1653,18 +1682,38 @@ function clearTSAT(sectorKey, callsign) {
   delete sharedTSAT[callsign];
 }
 
+let bootstrapComplete = false;
+let bootstrapStatus = { step: 0, total: 8, label: 'Starting...' };
+
+function setBootstrapStatus(step, label) {
+  bootstrapStatus = { step, total: 8, label };
+}
+
 async function bootstrap() {
+  setBootstrapStatus(1, 'Loading navigation data');
   loadNavFixes();
+
+  setBootstrapStatus(2, 'Loading FIR boundaries');
   loadFirData();
+
+  setBootstrapStatus(3, 'Loading site settings');
   await loadPageVisibility();
   await loadSiteBanner();
   await loadMasterUsers();
 
+  setBootstrapStatus(4, 'Loading event schedule');
   await refreshAdminSheet();   // 🔑 sets activeEventId + loads schedule rows
+
+  setBootstrapStatus(5, 'Loading departure flows');
   await loadDepFlowsFromDb();  // needs activeEventId
+
+  setBootstrapStatus(6, 'Loading bookings');
   await loadTobtBookingsFromDb();
 
+  setBootstrapStatus(7, 'Fetching VATSIM data');
   await refreshPilots();       // needs adminSheetCache + sharedFlowTypes for fake pilots
+
+  setBootstrapStatus(8, 'Building map cache');
   wfWorldMapCache.clear();
 
 // Warm default map cache once per server start (no overrides)
@@ -3460,8 +3509,19 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
   const slotKey =
     `${from}-${to}|${row.date_utc}|${row.dep_time_utc}|BOOKING_ONLY`;
 
-  // Prevent duplicates
-  if (tobtBookingsByKey[slotKey]) return;
+  // Check capacity
+  const capacity = getBookingOnlyCapacity(from, to);
+  if (capacity.total > 0 && capacity.remaining <= 0) {
+    socket.emit('bookingError', { error: 'No remaining bookings for this sector' });
+    return;
+  }
+
+  // Prevent duplicate per user
+  const userBookingKey = `${Number(user.cid)}:${slotKey}`;
+  if (tobtBookingsByKey[userBookingKey]) {
+    socket.emit('bookingError', { error: 'You already have a booking for this sector' });
+    return;
+  }
 
   await prisma.tobtBooking.create({
     data: {
@@ -3476,7 +3536,7 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
     }
   });
 
-  tobtBookingsByKey[slotKey] = {
+  const bookingData = {
     slotKey,
     cid: Number(user.cid),
     callsign: String(user.cid),
@@ -3488,10 +3548,14 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
     createdAtISO: new Date().toISOString()
   };
 
+  const bookingKey = `${Number(user.cid)}:${slotKey}`;
+  tobtBookingsByKey[bookingKey] = bookingData;
+  tobtBookingsByKey[slotKey] = bookingData; // last writer wins for raw key
+
   if (!tobtBookingsByCid[user.cid]) {
     tobtBookingsByCid[user.cid] = new Set();
   }
-  tobtBookingsByCid[user.cid].add(slotKey);
+  tobtBookingsByCid[user.cid].add(bookingKey);
 
   io.emit('bookingCreated', { slotKey });
 });
@@ -4075,6 +4139,15 @@ app.get('/api/icao/:icao/map', async (req, res) => {
     return res.status(404).json({ error: 'Airport not found' });
   }
 
+  // Always use real VATSIM data for airport maps
+  let livePilots = [];
+  try {
+    const vatsimRes = await axios.get('https://data.vatsim.net/v3/vatsim-data.json');
+    livePilots = vatsimRes.data.pilots || [];
+  } catch (e) {
+    livePilots = cachedPilots.filter(p => p.server !== 'FAKE');
+  }
+
   function distanceNm(lat1, lon1, lat2, lon2) {
   const R = 3440;
   const toRad = d => d * Math.PI / 180;
@@ -4091,7 +4164,7 @@ app.get('/api/icao/:icao/map', async (req, res) => {
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-const aircraft = cachedPilots
+const aircraft = livePilots
   // must have a flight plan
   .filter(p => p.flight_plan)
 
@@ -4139,9 +4212,8 @@ const aircraft = cachedPilots
 
 
 // Loading page while bootstrap is running
-let bootstrapComplete = false;
 app.use((req, res, next) => {
-  if (req.path === '/api/health') return res.json({ ready: bootstrapComplete });
+  if (req.path === '/api/health') return res.json({ ready: bootstrapComplete, ...bootstrapStatus });
   if (bootstrapComplete) return next();
   if (req.path.match(/\.(css|js|png|jpg|ico|svg|woff2?)$/)) return next();
 
@@ -4157,49 +4229,179 @@ app.use((req, res, next) => {
       min-height:100vh; background:#020617; color:#e5e7eb;
       font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
       display:flex; align-items:center; justify-content:center; flex-direction:column;
+      overflow:hidden;
+    }
+    .planes-bg {
+      position:fixed; top:0; left:0; width:100%; height:100%; z-index:0;
+      pointer-events:none; overflow:hidden;
+    }
+    .bg-plane {
+      position:absolute;
+      opacity:0.04;
+      animation-timing-function:linear;
+      animation-iteration-count:infinite;
+    }
+    .bg-plane.right { animation-name:flyRight; }
+    .bg-plane.left  { animation-name:flyLeft; }
+    @keyframes flyRight {
+      0%   { transform: translateX(-40px) rotate(90deg); }
+      100% { transform: translateX(calc(100vw + 40px)) rotate(90deg); }
+    }
+    @keyframes flyLeft {
+      0%   { transform: translateX(calc(100vw + 40px)) rotate(-90deg); }
+      100% { transform: translateX(-40px) rotate(-90deg); }
     }
     .loader-card {
-      text-align:center; padding:48px 56px; max-width:460px;
+      text-align:center; padding:40px 48px; max-width:480px; width:90%;
       background:linear-gradient(160deg,#0b1220,#0f172a);
       border:1px solid #1e293b; border-radius:16px;
       box-shadow:0 20px 40px rgba(0,0,0,.5);
+      position:relative; z-index:1;
     }
-    .loader-card img { width:80px; height:80px; border-radius:50%; margin-bottom:20px; }
-    .loader-card h1 { font-size:20px; color:#38bdf8; margin-bottom:8px; }
-    .loader-card p { font-size:14px; color:#94a3b8; margin-bottom:24px; line-height:1.6; }
-    .spinner {
-      width:40px; height:40px; margin:0 auto 16px;
-      border:3px solid rgba(255,255,255,0.1);
-      border-top-color:#38bdf8;
-      border-radius:50%;
-      animation:spin .8s linear infinite;
+    .loader-card img { width:72px; height:72px; border-radius:50%; margin-bottom:16px; }
+    .loader-card h1 { font-size:22px; color:#38bdf8; margin-bottom:4px; }
+    .loader-card .subtitle { font-size:13px; color:#64748b; margin-bottom:24px; }
+
+    /* Plane animation */
+    .plane-track {
+      position:relative; width:100%; height:40px; margin-bottom:20px; overflow:hidden;
     }
-    @keyframes spin { to { transform:rotate(360deg); } }
-    .dots { color:#64748b; font-size:12px; }
-    .dots::after {
-      content:''; animation:dots 1.5s steps(4,end) infinite;
+    .plane-svg {
+      position:absolute; top:50%; transform:translateY(-50%);
+      animation:flyPlane 6s ease-in-out infinite;
+      filter:drop-shadow(0 0 6px rgba(56,189,248,0.5));
     }
-    @keyframes dots {
-      0% { content:''; }
-      25% { content:'.'; }
-      50% { content:'..'; }
-      75% { content:'...'; }
+    @keyframes flyPlane {
+      0% { left:-30px; transform:translateY(-50%) rotate(90deg); }
+      45% { left:calc(100% - 10px); transform:translateY(-50%) rotate(90deg); }
+      50% { left:calc(100% - 10px); transform:translateY(-50%) rotate(-90deg); }
+      95% { left:-30px; transform:translateY(-50%) rotate(-90deg); }
+      100% { left:-30px; transform:translateY(-50%) rotate(90deg); }
     }
+    .plane-trail {
+      position:absolute; top:50%; left:0; right:0; height:1px;
+      background:linear-gradient(90deg, transparent, rgba(56,189,248,0.15), transparent);
+    }
+
+    /* Progress bar */
+    .progress-wrap {
+      width:100%; height:6px; background:rgba(255,255,255,0.06);
+      border-radius:3px; overflow:hidden; margin-bottom:16px;
+    }
+    .progress-bar {
+      height:100%; width:0%; border-radius:3px;
+      background:linear-gradient(90deg,#38bdf8,#818cf8);
+      transition:width 0.6s ease;
+    }
+
+    /* Steps */
+    .step-label {
+      font-size:13px; color:#94a3b8; margin-bottom:6px;
+      min-height:20px; transition:opacity 0.3s;
+    }
+    .step-count { font-size:11px; color:#475569; }
+
+    /* Steps list */
+    .steps-list {
+      text-align:left; margin-top:20px; padding-top:16px;
+      border-top:1px solid rgba(255,255,255,0.05);
+    }
+    .step-item {
+      display:flex; align-items:center; gap:8px;
+      font-size:12px; color:#334155; padding:3px 0;
+      transition:color 0.3s;
+    }
+    .step-item.done { color:#4ade80; }
+    .step-item.active { color:#38bdf8; }
+    .step-dot {
+      width:6px; height:6px; border-radius:50%;
+      background:#334155; flex-shrink:0;
+      transition:background 0.3s;
+    }
+    .step-item.done .step-dot { background:#4ade80; }
+    .step-item.active .step-dot { background:#38bdf8; box-shadow:0 0 6px rgba(56,189,248,0.5); }
   </style>
 </head>
 <body>
+  <div class="planes-bg" id="planesBg"></div>
   <div class="loader-card">
     <img src="/logo.png" alt="WorldFlight" />
-    <div class="spinner"></div>
     <h1>WorldFlight Planning</h1>
-    <p>Server Initialising</p>
-    <div class="dots">Please wait</div>
+    <div class="subtitle">Preparing your experience</div>
+
+    <div class="plane-track">
+      <div class="plane-trail"></div>
+      <svg class="plane-svg" width="28" height="28" viewBox="0 0 24 24" fill="none">
+        <path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" fill="#38bdf8"/>
+      </svg>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <div class="step-label" id="stepLabel">Starting...</div>
+    <div class="step-count" id="stepCount"></div>
+
+    <div class="steps-list" id="stepsList">
+      <div class="step-item" data-step="1"><span class="step-dot"></span>Loading navigation data</div>
+      <div class="step-item" data-step="2"><span class="step-dot"></span>Loading FIR boundaries</div>
+      <div class="step-item" data-step="3"><span class="step-dot"></span>Loading site settings</div>
+      <div class="step-item" data-step="4"><span class="step-dot"></span>Loading event schedule</div>
+      <div class="step-item" data-step="5"><span class="step-dot"></span>Loading departure flows</div>
+      <div class="step-item" data-step="6"><span class="step-dot"></span>Loading bookings</div>
+      <div class="step-item" data-step="7"><span class="step-dot"></span>Fetching VATSIM data</div>
+      <div class="step-item" data-step="8"><span class="step-dot"></span>Building map cache</div>
+    </div>
   </div>
+
   <script>
+    // Generate background planes
+    (function() {
+      var bg = document.getElementById('planesBg');
+      var planeSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" fill="#38bdf8"/></svg>';
+      for (var i = 0; i < 60; i++) {
+        var el = document.createElement('div');
+        el.className = 'bg-plane ' + (i % 2 === 0 ? 'right' : 'left');
+        el.innerHTML = planeSvg;
+        var size = 16 + Math.random() * 16;
+        el.style.top = (Math.random() * 100) + '%';
+        el.style.width = size + 'px';
+        el.style.height = size + 'px';
+        el.style.animationDuration = (15 + Math.random() * 25) + 's';
+        el.style.animationDelay = (-Math.random() * 30) + 's';
+        el.style.opacity = 0.02 + Math.random() * 0.04;
+        bg.appendChild(el);
+      }
+    })();
+
     (function check() {
       fetch('/api/health').then(function(r) { return r.json(); }).then(function(d) {
-        if (d.ready) window.location.reload();
-        else setTimeout(check, 1500);
+        if (d.ready) {
+          document.getElementById('progressBar').style.width = '100%';
+          document.getElementById('stepLabel').textContent = 'Ready!';
+          document.getElementById('stepLabel').style.color = '#4ade80';
+          document.getElementById('stepCount').textContent = '';
+          document.querySelectorAll('.step-item').forEach(function(el) {
+            el.classList.remove('active');
+            el.classList.add('done');
+          });
+          setTimeout(function() { window.location.reload(); }, 500);
+          return;
+        }
+        var pct = Math.round((d.step / d.total) * 100);
+        document.getElementById('progressBar').style.width = pct + '%';
+        document.getElementById('stepLabel').textContent = d.label || 'Loading...';
+        document.getElementById('stepCount').textContent = 'Step ' + d.step + ' of ' + d.total;
+
+        document.querySelectorAll('.step-item').forEach(function(el) {
+          var s = Number(el.dataset.step);
+          el.classList.remove('done', 'active');
+          if (s < d.step) el.classList.add('done');
+          else if (s === d.step) el.classList.add('active');
+        });
+
+        setTimeout(check, 800);
       }).catch(function() { setTimeout(check, 1500); });
     })();
   </script>
@@ -4532,29 +4734,59 @@ app.get('/', (req, res) => {
 // ===============================
 
 function parseLatLonFix(token) {
-  // Supports: 52N020W, 5230N02000W, 52N020E, 52S020W
+  // Supports: 52N020W, 5230N02000W, 52N020E, 52S020W, 7930S8430W, 7575W, 8128S17000W
   // Returns { lat, lon } or null
   const t = token.toUpperCase().trim();
 
-  // 52N020W
+  // ddNdddE — 52N020W (2-digit lat, 3-digit lon)
   let m = t.match(/^(\d{2})(N|S)(\d{3})(E|W)$/);
   if (m) {
-    const lat = Number(m[1]) * (m[2] === 'S' ? -1 : 1);
-    const lon = Number(m[3]) * (m[4] === 'W' ? -1 : 1);
-    return { lat, lon };
+    return { lat: Number(m[1]) * (m[2] === 'S' ? -1 : 1), lon: Number(m[3]) * (m[4] === 'W' ? -1 : 1) };
   }
 
-  // 5230N02000W (ddmm + dddmm)
+  // ddmmNdddmmE — 5230N02000W (ddmm + dddmm)
   m = t.match(/^(\d{2})(\d{2})(N|S)(\d{3})(\d{2})(E|W)$/);
   if (m) {
-    const latDeg = Number(m[1]);
-    const latMin = Number(m[2]);
-    const lonDeg = Number(m[4]);
-    const lonMin = Number(m[5]);
+    return {
+      lat: (Number(m[1]) + Number(m[2]) / 60) * (m[3] === 'S' ? -1 : 1),
+      lon: (Number(m[4]) + Number(m[5]) / 60) * (m[6] === 'W' ? -1 : 1)
+    };
+  }
 
-    const lat = (latDeg + latMin / 60) * (m[3] === 'S' ? -1 : 1);
-    const lon = (lonDeg + lonMin / 60) * (m[6] === 'W' ? -1 : 1);
-    return { lat, lon };
+  // ddmmSddmmW — 7930S8430W (ddmm lat, ddmm lon)
+  m = t.match(/^(\d{2})(\d{2})(N|S)(\d{2})(\d{2})(E|W)$/);
+  if (m) {
+    return {
+      lat: (Number(m[1]) + Number(m[2]) / 60) * (m[3] === 'S' ? -1 : 1),
+      lon: (Number(m[4]) + Number(m[5]) / 60) * (m[6] === 'W' ? -1 : 1)
+    };
+  }
+
+  // ddmmSdddmmW — 8128S17000W (ddmm lat, dddmm lon)
+  m = t.match(/^(\d{2})(\d{2})(N|S)(\d{3})(\d{2})(E|W)$/);
+  if (m) {
+    return {
+      lat: (Number(m[1]) + Number(m[2]) / 60) * (m[3] === 'S' ? -1 : 1),
+      lon: (Number(m[4]) + Number(m[5]) / 60) * (m[6] === 'W' ? -1 : 1)
+    };
+  }
+
+  // ddddW shorthand — 7575W means 75S 75W (oceanic shorthand, always south)
+  m = t.match(/^(\d{2})(\d{2})(E|W)$/);
+  if (m) {
+    return {
+      lat: -Number(m[1]),
+      lon: Number(m[2]) * (m[3] === 'W' ? -1 : 1)
+    };
+  }
+
+  // dddddW shorthand — 80085W means 80S 085W
+  m = t.match(/^(\d{2})(\d{3})(E|W)$/);
+  if (m) {
+    return {
+      lat: -Number(m[1]),
+      lon: Number(m[2]) * (m[3] === 'W' ? -1 : 1)
+    };
   }
 
   return null;
@@ -5041,6 +5273,528 @@ app.get('/auth/login', (req, res, next) => {
   next();
 }, vatsimLogin);
 app.get('/auth/callback', vatsimCallback);
+/* ===== SECTOR INFO PAGE ===== */
+app.get('/sector/:wf/:from/:to', (req, res) => {
+  const user = req.session?.user?.data || null;
+  const cid = user ? Number(user.cid) : null;
+  const isAdmin = cid ? ADMIN_CIDS.includes(cid) : false;
+
+  const { wf, from, to } = req.params;
+  const fromIcao = from.toUpperCase();
+  const toIcao = to.toUpperCase();
+  const wfNum = wf.toUpperCase();
+
+  // Find the leg in the schedule
+  const leg = adminSheetCache.find(r => r.number === wfNum && r.from === fromIcao && r.to === toIcao);
+  const sectorKey = `${fromIcao}-${toIcao}`;
+  const flowType = sharedFlowTypes[sectorKey] || 'NONE';
+  const depFlow = sharedDepFlows[sectorKey] || 0;
+  const bookingCap = flowType === 'BOOKING_ONLY' ? getBookingOnlyCapacity(fromIcao, toIcao) : null;
+  const bookingsFull = bookingCap && bookingCap.total > 0 && bookingCap.remaining <= 0;
+
+  // Count slots for slotted mode
+  let slotTotal = 0, slotsLeft = 0;
+  if (flowType === 'SLOTTED') {
+    const slotPrefix = `${fromIcao}-${toIcao}|`;
+    for (const [k, s] of Object.entries(allTobtSlots)) {
+      if (k.startsWith(slotPrefix)) {
+        slotTotal++;
+        if (!tobtBookingsByKey[k]) slotsLeft++;
+      }
+    }
+  }
+
+  const remainingText = bookingsFull ? '' :
+    flowType === 'SLOTTED' && slotTotal > 0 ? slotsLeft + ' Slot' + (slotsLeft !== 1 ? 's' : '') + ' Left' :
+    flowType === 'BOOKING_ONLY' && bookingCap && bookingCap.total > 0 ? bookingCap.remaining + ' Booking' + (bookingCap.remaining !== 1 ? 's' : '') + ' Left' : '';
+
+  const slotsFull = flowType === 'SLOTTED' && slotTotal > 0 && slotsLeft <= 0;
+  const flowLabel = bookingsFull ? 'No Bookings Left!' : slotsFull ? 'No Slots Left!' : (flowType === 'SLOTTED' ? 'Time Slot Required' : flowType === 'BOOKING_ONLY' ? 'Booking Required' : 'No Restrictions');
+  const flowClass = (bookingsFull || slotsFull) ? 'full' : (flowType === 'SLOTTED' ? 'slotted' : flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
+
+  // Check if user has a booking for this sector
+  let userBooking = null;
+  if (cid && leg) {
+    const bookingPrefix = `${fromIcao}-${toIcao}|${leg.date_utc}|${leg.dep_time_utc}`;
+    for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+      if (key.startsWith(bookingPrefix) && b.cid === cid) {
+        userBooking = b;
+        break;
+      }
+    }
+  }
+  const hasBooking = !!userBooking;
+  const bookingTobt = userBooking?.tobtTimeUtc || null;
+
+  const content = `
+    <a href="/schedule" class="back-link">\u2190 Back to Schedule</a>
+    <section class="card card-full">
+      <div style="margin-bottom:20px;">
+        <h1 style="margin:0;font-size:28px;font-weight:800;letter-spacing:0.5px;">
+          <span style="color:var(--accent);">${wfNum}</span>
+          <span style="color:var(--muted);font-weight:400;margin:0 8px;">\u2014</span>
+          <span style="color:var(--text);">${fromIcao}</span>
+          <span style="color:var(--muted);margin:0 6px;">\u2192</span>
+          <span style="color:var(--text);">${toIcao}</span>
+        </h1>
+      </div>
+
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;align-items:stretch;">
+        <div style="width:calc(60% - 8px);min-width:300px;padding:16px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:12px;box-sizing:border-box;display:flex;flex-direction:column;gap:14px;">
+          <div style="display:flex;gap:24px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              <div><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);">Date</div><div style="font-size:15px;font-weight:600;color:var(--text);">${leg ? leg.date_utc : '-'}</div></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <div><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);">Dep Window</div><div style="font-size:15px;font-weight:600;color:var(--text);">${leg && leg.dep_time_utc ? buildTimeWindow(leg.dep_time_utc) : '-'}</div></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 8 14"/></svg>
+              <div><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);">Block Time</div><div style="font-size:15px;font-weight:600;color:var(--text);">${leg ? leg.block_time || '-' : '-'}</div></div>
+            </div>
+          </div>
+          ${leg && leg.atc_route ? '<div style="border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">ATC Route</div><div style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text);word-break:break-all;">' + leg.atc_route + '</div></div>' : ''}
+        </div>
+        ${!isPageEnabled('book-slot') ? `
+        <div class="sector-banner sector-banner-flow-full" style="width:calc(40% - 8px);min-width:250px;flex-direction:column;justify-content:center;padding:16px;box-sizing:border-box;">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:8px;">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
+            <div class="sector-banner-text" style="align-items:center;"><span class="sector-banner-label">Flow Restrictions</span><span class="sector-banner-icao" style="color:#64748b;">No flow information available yet</span></div>
+          </div>
+        </div>
+        ` : `
+        <div class="sector-banner sector-banner-flow-${flowClass}" style="width:calc(40% - 8px);min-width:250px;flex-direction:column;justify-content:space-between;padding:16px;box-sizing:border-box;overflow:hidden;">
+          <div style="font-size:11px;color:inherit;opacity:0.7;text-align:center;line-height:1.4;">
+            ${flowType === 'SLOTTED' ? 'The FIR Manager has set a restriction on this route. To participate you require a Time Slot.' : flowType === 'BOOKING_ONLY' ? 'The FIR Manager has set a restriction on this route. To participate you require a Booking.' : 'There are no flow restrictions on this route. You may depart freely within the departure window.'}
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:center;gap:8px;">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
+            <div class="sector-banner-text" style="align-items:center;"><span class="sector-banner-label">Flow Restrictions</span><span class="sector-banner-icao">${flowLabel}</span>${remainingText ? '<span style="font-size:12px;color:inherit;opacity:0.7;margin-top:2px;">' + remainingText + '</span>' : ''}</div>
+          </div>
+          <div style="font-size:12px;text-align:center;font-style:italic;">
+            ${flowType !== 'NONE' ? '<span style="color:#94a3b8;">Reason:</span> <span style="color:inherit;opacity:0.8;">Congestion at departure airfield</span>' : ''}
+          </div>
+          ${flowType !== 'NONE' ? '<a href="' + (user
+            ? (flowType === 'SLOTTED'
+              ? '/book?from=' + fromIcao + '&to=' + toIcao + '&dateUtc=' + encodeURIComponent(leg ? leg.date_utc : '') + '&depTimeUtc=' + encodeURIComponent(leg ? leg.dep_time_utc : '')
+              : '#" id="sectorBookingBtn" data-sector="' + fromIcao + '-' + toIcao + '|' + (leg ? leg.date_utc : '') + '|' + (leg ? leg.dep_time_utc : ''))
+            : '/auth/login?next=' + encodeURIComponent('/sector/' + wfNum + '/' + fromIcao + '/' + toIcao)) + '" style="display:block;text-align:center;padding:10px;margin:0 -17px -17px;border-top:1px solid rgba(255,255,255,0.08);border-radius:0 0 11px 11px;width:calc(100% + 34px);font-size:13px;font-weight:600;text-decoration:none;transition:background 0.15s;'
+            + (hasBooking
+              ? 'background:rgba(74,222,128,0.1);color:#4ade80;cursor:default;position:relative;overflow:hidden;" onclick="event.preventDefault()">'
+                + (flowType === 'SLOTTED' && bookingTobt ? 'You have a Time Slot: <strong style="color:#fbbf24;">' + bookingTobt + ' UTC</strong> <span class="col-help" title="This is a TOBT (Target Off-Blocks Time).&#10;Please connect at least 30 minutes before this time.&#10;You should be ready to push at this time.&#10;The actual push time may differ depending on&#10;ramp and airfield congestion." style="cursor:help;color:var(--muted);font-style:normal;">?</span>' : 'You already have a Booking')
+                + '<span id="cancelBookingBtn" data-slotkey="' + (userBooking ? userBooking.slotKey : '').replace(/"/g, '&quot;') + '" style="position:absolute;right:0;top:0;bottom:0;display:flex;align-items:center;padding:0 16px;background:rgba(239,68,68,0.2);color:#f87171;font-size:12px;font-weight:600;cursor:pointer;border-left:1px solid rgba(239,68,68,0.3);border-radius:0 0 11px 0;animation:slideInRight 0.5s ease 0.3s both;white-space:nowrap;">' + (flowType === 'SLOTTED' ? 'Cancel Slot' : 'Cancel Booking') + '</span>'
+              : !user
+                ? 'background:rgba(255,255,255,0.04);color:#fbbf24;">'
+                  + (flowType === 'SLOTTED' ? 'Login to book a Time Slot \u2192' : 'Login to make a Booking \u2192')
+                : 'background:rgba(255,255,255,0.04);color:var(--accent);" onmouseover="this.style.background=\'rgba(255,255,255,0.08)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'">'
+                  + (bookingsFull ? 'No remaining bookings' : flowType === 'SLOTTED' ? 'Click here to book a Time Slot \u2192' : 'Click here to book \u2192'))
+            + '</a>' : ''}
+        </div>
+        `}
+      </div>
+
+      <div style="display:flex;gap:16px;flex-wrap:wrap;">
+        <div id="sectorMap" style="width:calc(60% - 8px);min-width:300px;height:450px;border-radius:8px;border:1px solid var(--border);background:#0b1220;"></div>
+        <div style="width:calc(40% - 8px);min-width:250px;display:flex;flex-direction:column;gap:8px;">
+          <a href="/icao/${fromIcao}" class="sector-banner sector-banner-dep">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22h20"/><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>
+            <div class="sector-banner-text"><span class="sector-banner-label">Departure</span><span class="sector-banner-icao">${fromIcao} Portal</span></div>
+          </a>
+          <a href="/icao/${toIcao}" class="sector-banner sector-banner-arr">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22h20"/><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>
+            <div class="sector-banner-text"><span class="sector-banner-label">Arrival</span><span class="sector-banner-icao">${toIcao} Portal</span></div>
+          </a>
+          ${leg ? '<a href="https://dispatch.simbrief.com/options/custom?orig=' + fromIcao + '&dest=' + toIcao + '&route=' + encodeURIComponent(leg.atc_route || '') + '&manualrmk=' + encodeURIComponent('Route validated from www.worldflight.center') + '" target="_blank" rel="noopener" class="sector-banner sector-banner-sb"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg><div class="sector-banner-text"><span class="sector-banner-label">Flight Planning</span><span class="sector-banner-icao" style="color:#4ade80;">Plan with SimBrief</span></div></a>' : ''}
+        </div>
+      </div>
+
+    </section>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      var fromIcao = '${fromIcao}';
+      var toIcao = '${toIcao}';
+      var route = ${leg ? JSON.stringify(leg.atc_route || '') : "''"};
+
+      var map = L.map('sectorMap', { zoomControl: true, worldCopyJump: false, maxZoom: 7 }).setView([30, 0], 3);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 7 }).addTo(map);
+
+      // Resolve and render route
+      fetch('/api/resolve-route?from=' + fromIcao + '&to=' + toIcao + '&route=' + encodeURIComponent(route) + '&depTime=&blockTime=')
+        .then(function(r) { return r.json(); })
+        .then(function(routeData) {
+          if (!routeData.points || routeData.points.length < 2) return;
+
+          var pts = routeData.points;
+
+          // Fix antimeridian: ensure consecutive points don't jump >180 degrees
+          for (var i = 1; i < pts.length; i++) {
+            while (pts[i].lon - pts[i-1].lon > 180) pts[i].lon -= 360;
+            while (pts[i].lon - pts[i-1].lon < -180) pts[i].lon += 360;
+          }
+
+          var coords = pts.map(function(p) { return [p.lat, p.lon]; });
+
+          // Full route line
+          var routeLine = L.polyline(coords, { color: '#38bdf8', weight: 3, opacity: 0.8 }).addTo(map);
+
+          // Chevron arrows
+          if (L.polylineDecorator) {
+            L.polylineDecorator(routeLine, {
+              patterns: [{
+                offset: '15%',
+                repeat: '80px',
+                symbol: L.Symbol.arrowHead({
+                  pixelSize: 8,
+                  polygon: false,
+                  pathOptions: { color: '#38bdf8', weight: 2, opacity: 0.7 }
+                })
+              }]
+            }).addTo(map);
+          }
+
+          // Waypoint labels
+          pts.forEach(function(p, i) {
+            if (!p.name || i === 0 || i === pts.length - 1) return;
+            // Skip DCT and speed/level
+            if (/^(DCT|N\\d)/.test(p.name)) return;
+            L.marker([p.lat, p.lon], {
+              icon: L.divIcon({
+                html: '<div style="width:8px;height:8px;background:#fff;border-radius:50%;margin:11px;opacity:0.7;"></div>',
+                className: '',
+                iconSize: [30, 30],
+                iconAnchor: [15, 15]
+              }),
+              zIndexOffset: 2000
+            }).addTo(map)
+              .bindTooltip(p.name, { direction: 'top', className: 'sector-wpt-label', offset: [0, -8] });
+          });
+
+          // Airway labels — only shown when zoomed in enough
+          var awyLayer = L.layerGroup();
+          (function() {
+            var tokens = route.toUpperCase().split(/\\s+/).filter(Boolean);
+            var ptNames = pts.map(function(p) { return p.name ? p.name.toUpperCase() : ''; });
+
+            for (var t = 0; t < tokens.length; t++) {
+              var tok = tokens[t];
+              if (tok === 'DCT') continue;
+              if (/^N\\d/.test(tok)) continue;
+              if (ptNames.indexOf(tok) !== -1) continue;
+              if (!/^[A-Z]{1,2}\\d{1,4}[A-Z]?$/.test(tok)) continue;
+
+              var prevFix = null, nextFix = null;
+              for (var b = t - 1; b >= 0; b--) {
+                var pi = ptNames.indexOf(tokens[b].toUpperCase());
+                if (pi !== -1) { prevFix = pi; break; }
+              }
+              for (var a = t + 1; a < tokens.length; a++) {
+                var ni = ptNames.indexOf(tokens[a].toUpperCase());
+                if (ni !== -1) { nextFix = ni; break; }
+              }
+
+              if (prevFix !== null && nextFix !== null && prevFix < pts.length && nextFix < pts.length) {
+                var midLat = (pts[prevFix].lat + pts[nextFix].lat) / 2;
+                var midLon = (pts[prevFix].lon + pts[nextFix].lon) / 2;
+
+                var dLon = (pts[nextFix].lon - pts[prevFix].lon) * Math.cos((midLat * Math.PI) / 180);
+                var dLat = pts[nextFix].lat - pts[prevFix].lat;
+                var angle = Math.atan2(dLon, dLat) * 180 / Math.PI;
+                var cssAngle = -(90 - angle);
+                if (cssAngle > 90) cssAngle -= 180;
+                if (cssAngle < -90) cssAngle += 180;
+
+                L.marker([midLat, midLon], {
+                  icon: L.divIcon({
+                    html: '<div style="transform:rotate(' + cssAngle.toFixed(1) + 'deg);font-size:10px;font-weight:600;color:#94a3b8;font-family:monospace;white-space:nowrap;background:rgba(15,23,42,0.85);padding:1px 4px;border-radius:2px;text-align:center;display:inline-block;">' + tok + '</div>',
+                    className: '',
+                    iconSize: [70, 16],
+                    iconAnchor: [35, 8]
+                  }),
+                  interactive: false
+                }).addTo(awyLayer);
+              }
+            }
+          })();
+
+          // Show/hide airway labels based on zoom
+          function updateAwyLabels() {
+            if (map.getZoom() >= 5) { if (!map.hasLayer(awyLayer)) map.addLayer(awyLayer); }
+            else { if (map.hasLayer(awyLayer)) map.removeLayer(awyLayer); }
+          }
+          map.on('zoomend', updateAwyLabels);
+          updateAwyLabels();
+
+          // DEP marker
+          var depPt = pts[0];
+          L.circleMarker([depPt.lat, depPt.lon], { radius: 7, color: '#4ade80', fillColor: '#4ade80', fillOpacity: 0.9, weight: 2 }).addTo(map)
+            .bindTooltip('<strong>' + fromIcao + '</strong><br>Departure', { permanent: true, direction: 'top', className: 'sector-airport-label' });
+
+          // ARR marker
+          var arrPt = pts[pts.length - 1];
+          L.circleMarker([arrPt.lat, arrPt.lon], { radius: 7, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.9, weight: 2 }).addTo(map)
+            .bindTooltip('<strong>' + toIcao + '</strong><br>Arrival', { permanent: true, direction: 'top', className: 'sector-airport-label' });
+
+          // Fit bounds to route — handle antimeridian
+          var lons = pts.map(function(p) { return p.lon; });
+          var minLon = Math.min.apply(null, lons);
+          var maxLon = Math.max.apply(null, lons);
+          var crossesAntimeridian = minLon < -170 || maxLon > 170 || (maxLon - minLon) > 300;
+
+          if (crossesAntimeridian) {
+            // Use custom bounds with the normalized coordinates
+            var latMin = Math.min.apply(null, pts.map(function(p) { return p.lat; }));
+            var latMax = Math.max.apply(null, pts.map(function(p) { return p.lat; }));
+            map.fitBounds([[latMin, minLon], [latMax, maxLon]], { padding: [50, 50], maxZoom: 7 });
+          } else {
+            map.fitBounds(routeLine.getBounds(), { padding: [50, 50], maxZoom: 7 });
+          }
+
+          // Show all FIR boundaries faintly
+          fetch('/fir-boundaries.geojson')
+            .then(function(r) { return r.json(); })
+            .then(function(geoData) {
+              var firStyle = { color: '#334155', weight: 0.8, fillOpacity: 0, opacity: 0.5 };
+              L.geoJSON(geoData, { style: firStyle }).addTo(map);
+
+              // For antimeridian routes, render shifted copies both directions
+              if (crossesAntimeridian) {
+                [-360, 360].forEach(function(offset) {
+                  var shifted = JSON.parse(JSON.stringify(geoData));
+                  shifted.features.forEach(function(f) {
+                    function shiftCoords(coords) {
+                      for (var i = 0; i < coords.length; i++) {
+                        if (Array.isArray(coords[i][0])) shiftCoords(coords[i]);
+                        else coords[i][0] += offset;
+                      }
+                    }
+                    if (f.geometry && f.geometry.coordinates) shiftCoords(f.geometry.coordinates);
+                  });
+                  L.geoJSON(shifted, { style: firStyle }).addTo(map);
+                });
+              }
+            });
+
+        });
+
+      // Weather radar overlay (RainViewer) — on by default
+      var weatherLayer = null;
+      var weatherOn = false;
+
+      // Add toggle button
+      var wxDiv = document.createElement('div');
+      wxDiv.style.cssText = 'position:absolute;top:10px;right:10px;z-index:1000;';
+      wxDiv.innerHTML = '<button id="wxToggle" style="background:rgba(56,189,248,0.15);border:1px solid #38bdf8;color:#38bdf8;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">Precipitation ON</button>';
+      document.getElementById('sectorMap').appendChild(wxDiv);
+
+      function loadWeather() {
+        fetch('https://api.rainviewer.com/public/weather-maps.json')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var radar = data.radar && data.radar.past && data.radar.past.length
+              ? data.radar.past[data.radar.past.length - 1]
+              : null;
+            if (!radar) return;
+
+            weatherLayer = L.tileLayer(data.host + radar.path + '/256/{z}/{x}/{y}/6/1_1.png', {
+              opacity: 0.4,
+              zIndex: 5
+            }).addTo(map);
+            weatherOn = true;
+          });
+      }
+
+      // Load on startup
+      loadWeather();
+
+      document.getElementById('wxToggle').addEventListener('click', function() {
+        if (weatherOn && weatherLayer) {
+          map.removeLayer(weatherLayer);
+          weatherLayer = null;
+          weatherOn = false;
+          this.textContent = 'Precipitation OFF';
+          this.style.background = '#0b1220';
+          this.style.borderColor = 'rgba(255,255,255,0.2)';
+          this.style.color = '#e5e7eb';
+        } else {
+          this.textContent = 'Loading...';
+          var btn = this;
+          loadWeather();
+          setTimeout(function() {
+            btn.textContent = 'Precipitation ON';
+            btn.style.background = 'rgba(56,189,248,0.15)';
+            btn.style.borderColor = '#38bdf8';
+            btn.style.color = '#38bdf8';
+          }, 1000);
+        }
+      });
+
+      // Cancel booking
+      var cancelBtn = document.getElementById('cancelBookingBtn');
+      if (cancelBtn) {
+        var cancelSlotKey = cancelBtn.dataset.slotkey;
+        cancelBtn.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          var overlay = document.createElement('div');
+          overlay.className = 'modal';
+          overlay.innerHTML = '<div class="modal-backdrop"></div>'
+            + '<div class="modal-dialog" style="width:360px;padding:24px;text-align:center;">'
+            + '<h3 style="margin:0 0 8px;color:#f87171;">Cancel ${flowType === 'SLOTTED' ? 'Time Slot' : 'Booking'}?</h3>'
+            + '<p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Are you sure you want to cancel your ${flowType === 'SLOTTED' ? 'time slot' : 'booking'} for this sector? This cannot be undone.</p>'
+            + '<div id="cancelBookMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
+            + '<div class="modal-actions" style="gap:8px;">'
+            + '<button class="modal-btn modal-btn-cancel" id="cancelBookNo">Keep</button>'
+            + '<button class="modal-btn" id="cancelBookYes" style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid #f87171;">Cancel ${flowType === 'SLOTTED' ? 'Slot' : 'Booking'}</button>'
+            + '</div></div>';
+          document.body.appendChild(overlay);
+
+          overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+          document.getElementById('cancelBookNo').addEventListener('click', function() { overlay.remove(); });
+
+          document.getElementById('cancelBookYes').addEventListener('click', async function() {
+            this.disabled = true;
+            this.textContent = 'Cancelling...';
+            try {
+              var res = await fetch('/api/tobt/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ slotKey: cancelSlotKey })
+              });
+              // Always reload — either cancelled successfully or already gone
+              window.location.reload();
+            } catch (err) {
+              this.disabled = false;
+              this.textContent = 'Cancel ${flowType === 'SLOTTED' ? 'Slot' : 'Booking'}';
+            }
+          });
+        });
+      }
+
+      // Booking-only modal
+      var bookBtn = document.getElementById('sectorBookingBtn');
+      if (bookBtn) {
+        bookBtn.addEventListener('click', function(e) {
+          e.preventDefault();
+          var sector = this.dataset.sector;
+          var overlay = document.createElement('div');
+          overlay.className = 'modal';
+          overlay.innerHTML = '<div class="modal-backdrop"></div>'
+            + '<div class="modal-dialog" style="width:380px;padding:24px;text-align:center;">'
+            + '<h3 style="margin:0 0 8px;">Confirm Your CID</h3>'
+            + '<p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Please re-enter your VATSIM CID to confirm this booking.</p>'
+            + '<input type="text" id="sectorCidInput" placeholder="ENTER CID" style="width:100%;padding:12px;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:16px;text-align:center;font-weight:700;letter-spacing:1px;margin-bottom:12px;" />'
+            + '<p style="color:var(--muted);font-size:11px;margin-bottom:16px;">Your booking will be tied to your CID. You can connect with any callsign.</p>'
+            + '<div id="sectorBookMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
+            + '<div class="modal-actions" style="gap:8px;">'
+            + '<button class="modal-btn modal-btn-cancel" id="sectorBookCancel">Cancel</button>'
+            + '<button class="modal-btn modal-btn-submit" id="sectorBookConfirm">Confirm</button>'
+            + '</div></div>';
+          document.body.appendChild(overlay);
+
+          overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+          document.getElementById('sectorBookCancel').addEventListener('click', function() { overlay.remove(); });
+
+          document.getElementById('sectorBookConfirm').addEventListener('click', async function() {
+            var cid = document.getElementById('sectorCidInput').value.trim();
+            var msg = document.getElementById('sectorBookMsg');
+            if (!cid) { msg.textContent = 'Please enter your CID'; msg.style.color = '#f87171'; msg.style.display = ''; return; }
+            this.disabled = true;
+            this.textContent = 'Booking...';
+            try {
+              var res = await fetch('/api/tobt/book', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ slotKey: sector + '|BOOKING_ONLY', callsign: cid })
+              });
+              var data = await res.json();
+              if (res.ok) {
+                msg.textContent = 'Booking confirmed!';
+                msg.style.color = '#4ade80';
+                msg.style.display = '';
+                setTimeout(function() { overlay.remove(); location.reload(); }, 1500);
+              } else {
+                msg.textContent = data.error || 'Booking failed';
+                msg.style.color = '#f87171';
+                msg.style.display = '';
+                this.disabled = false;
+                this.textContent = 'Confirm';
+              }
+            } catch (err) {
+              msg.textContent = 'Error. Please try again.';
+              msg.style.color = '#f87171';
+              msg.style.display = '';
+              this.disabled = false;
+              this.textContent = 'Confirm';
+            }
+          });
+        });
+      }
+    });
+    </script>
+  `;
+
+  res.send(renderLayout({
+    title: wfNum + ': ' + fromIcao + ' \u2192 ' + toIcao,
+    user,
+    isAdmin,
+    content,
+    layoutClass: 'dashboard-full'
+  }));
+});
+
+// Live VATSIM traffic for sector page (always real data)
+app.get('/api/sector-traffic/:wf/:from/:to', async (req, res) => {
+  const wfNum = req.params.wf.toUpperCase();
+  const fromIcao = req.params.from.toUpperCase();
+  const toIcao = req.params.to.toUpperCase();
+
+  // Find current, previous, and next legs
+  const legIdx = adminSheetCache.findIndex(r => r.number === wfNum && r.from === fromIcao && r.to === toIcao);
+  const sectors = [];
+  if (legIdx > 0) sectors.push({ from: adminSheetCache[legIdx - 1].from, to: adminSheetCache[legIdx - 1].to, label: 'prev', wf: adminSheetCache[legIdx - 1].number });
+  if (legIdx >= 0) sectors.push({ from: fromIcao, to: toIcao, label: 'current', wf: wfNum });
+  if (legIdx >= 0 && legIdx < adminSheetCache.length - 1) sectors.push({ from: adminSheetCache[legIdx + 1].from, to: adminSheetCache[legIdx + 1].to, label: 'next', wf: adminSheetCache[legIdx + 1].number });
+
+  // Fetch live VATSIM data directly (bypass fake pilots)
+  let livePilots = [];
+  try {
+    const vatsimRes = await axios.get('https://data.vatsim.net/v3/vatsim-data.json');
+    livePilots = vatsimRes.data.pilots || [];
+  } catch (err) {
+    return res.json([]);
+  }
+
+  const pilots = [];
+  livePilots.forEach(p => {
+    if (!p.flight_plan) return;
+    const dep = p.flight_plan.departure;
+    const arr = p.flight_plan.arrival;
+    const match = sectors.find(s => s.from === dep && s.to === arr);
+    if (match) {
+      pilots.push({
+        callsign: p.callsign,
+        lat: p.latitude,
+        lon: p.longitude,
+        alt: p.altitude,
+        gs: p.groundspeed,
+        heading: p.heading,
+        from: dep,
+        to: arr,
+        sector: match.label,
+        wf: match.wf,
+        aircraft: p.flight_plan.aircraft_short || p.flight_plan.aircraft_faa || ''
+      });
+    }
+  });
+
+  res.json(pilots);
+});
+
 app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
   const isAdmin = ADMIN_CIDS.includes(cid);
@@ -5056,15 +5810,16 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
       <table class="departures-table">
         <thead>
           <tr>
-            <th class="col-wf-sector">WF</th>
+            <th class="col-wf-sector">Sector</th>
             <th class="col-from">Dep</th>
             <th class="col-to">Arr</th>
             <th class="col-date">Date</th>
-            <th class="col-window">Dep Window</th>
+            <th class="col-window">Dep Window <span class="col-help" title="There is no published departure time.&#10;Please aim to depart within this window." style="cursor:help;color:var(--muted);">?</span></th>
             <th class="col-block">Block</th>
             <th class="col-route">ATC Route</th>
             ${showBookSlot ? '<th class="col-book">Book</th>' : ''}
-            <th class="col-plan">Plan</th>
+            <th class="col-details"></th>
+            <!-- <th class="col-plan">Plan</th> -->
           </tr>
         </thead>
 
@@ -5081,7 +5836,7 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
 
             return `
             <tr>
-              <td class="col-wf-sector">${r.number}</td>
+              <td class="col-wf-sector"><button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${escapeHtml(r.atc_route)}">${r.number}</button></td>
 
               <td class="col-from">
                 <a href="/icao/${r.from}">${r.from}</a>
@@ -5125,7 +5880,8 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
                     const booking = tobtBookingsByKey[mySlotKey];
                     const bookedCid = booking?.cid || 'Booked';
                     const tobt = booking?.tobtTimeUtc || '';
-                    const pillLabel = tobt ? bookedCid + ' (' + tobt.slice(0, 5) + ')' : String(bookedCid);
+                    const isBookingOnly = tobt === 'BOOKING_ONLY' || !tobt || tobt === 'null';
+                    const pillLabel = isBookingOnly ? 'Booked' : bookedCid + ' (' + tobt.slice(0, 5) + ')';
                     const rawSlotKey = booking?.slotKey || mySlotKey;
                     return '<td class="col-book">'
                       + '<button class="book-pill book-pill-booked" data-slot-key="' + rawSlotKey + '">'
@@ -5149,34 +5905,59 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
                 }
 
                 if (flowtype === 'BOOKING_ONLY') {
+                  const cap = getBookingOnlyCapacity(r.from, r.to);
+                  if (cap.total > 0 && cap.remaining <= 0) {
+                    return '<td class="col-book"><span class="flowtype-pill flowtype-full">No Bookings Left!</span></td>';
+                  }
+                  const remainLabel = cap.total > 0 ? cap.remaining + ' Booking' + (cap.remaining !== 1 ? 's' : '') + ' Left' : '';
                   return '<td class="col-book">'
                     + '<button class="book-pill booking-only ' + pillClass + '" data-sector="' + sk + '">'
-                    + '<span class="book-pill-label">' + label + '</span>'
+                    + '<span class="book-pill-label pill-rotate">'
+                    + '<span class="pill-line pill-line-1">' + label + '</span>'
+                    + (remainLabel ? '<span class="pill-line pill-line-2">' + remainLabel + '</span>' : '')
+                    + '</span>'
                     + '<span class="book-pill-hover">' + hoverLabel + '</span>'
                     + '</button></td>';
                 }
 
+                // Slotted — count available slots from allTobtSlots
+                const slotSectorPrefix = r.from + '-' + r.to + '|';
+                let slotTotal = 0, slotsLeft = 0;
+                for (const [k, s] of Object.entries(allTobtSlots)) {
+                  if (k.startsWith(slotSectorPrefix)) {
+                    slotTotal++;
+                    if (!tobtBookingsByKey[k]) slotsLeft++;
+                  }
+                }
+                const slotRemainLabel = slotTotal > 0 ? slotsLeft + ' Slot' + (slotsLeft !== 1 ? 's' : '') + ' Left' : '';
+
+                if (slotTotal > 0 && slotsLeft <= 0) {
+                  return '<td class="col-book"><span class="flowtype-pill flowtype-full">No Slots Left!</span></td>';
+                }
+
                 return '<td class="col-book">'
                   + '<a class="book-pill ' + pillClass + '" href="/book?from=' + r.from + '&to=' + r.to + '&dateUtc=' + encodeURIComponent(r.date_utc) + '&depTimeUtc=' + r.dep_time_utc + '">'
-                  + '<span class="book-pill-label">' + label + '</span>'
+                  + '<span class="book-pill-label pill-rotate">'
+                  + '<span class="pill-line pill-line-1">' + label + '</span>'
+                  + (slotRemainLabel ? '<span class="pill-line pill-line-2">' + slotRemainLabel + '</span>' : '')
+                  + '</span>'
                   + '<span class="book-pill-hover">' + hoverLabel + '</span>'
                   + '</a></td>';
               })() : ''}
 
 
-              <!-- ✅ SIMBRIEF PLAN -->
+              <!-- SIMBRIEF PLAN (commented out for now)
               <td class="col-plan">
   ${
     (() => {
       let url =
-        `https://dispatch.simbrief.com/options/custom` +
-        `?orig=${r.from}` +
-        `&dest=${r.to}` +
-        `&route=${encodeURIComponent(r.atc_route)}`;
+        'https://dispatch.simbrief.com/options/custom' +
+        '?orig=' + r.from +
+        '&dest=' + r.to +
+        '&route=' + encodeURIComponent(r.atc_route);
 
-      // 🔑 Optionally enrich with TOBT if user has one
       if (myBookings) {
-        const sectorKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
+        const sectorKey = r.from + '-' + r.to + '|' + r.date_utc + '|' + r.dep_time_utc;
         const mySlotKey = [...myBookings].find(k =>
           k.startsWith(sectorKey + '|')
         );
@@ -5190,30 +5971,31 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
             const mm = String(m).padStart(2, '0');
 
             url +=
-              `&callsign=${encodeURIComponent(booking.callsign)}` +
-              `&deph=${hh}` +
-              `&depm=${mm}` +
-              `&manualrmk=${encodeURIComponent(
-                `WF TOBT [SLOT] ${hh}:${mm} UTC - Route validated from www.worldflight.center`
-              )}`;
+              '&callsign=' + encodeURIComponent(booking.callsign) +
+              '&deph=' + hh +
+              '&depm=' + mm +
+              '&manualrmk=' + encodeURIComponent(
+                'WF TOBT [SLOT] ' + hh + ':' + mm + ' UTC - Route validated from www.worldflight.center'
+              );
           }
         }
       }
 
-      // Default remark (always present)
-      url += `&manualrmk=${encodeURIComponent(
+      url += '&manualrmk=' + encodeURIComponent(
         'Route validated from www.worldflight.center'
-      )}`;
+      );
 
-      return `
-        <a class="simbrief-btn" href="${url}" target="_blank" rel="noopener">
-          <span class="simbrief-logo">SB</span>
-          <span class="simbrief-text">Plan with SimBrief</span>
-        </a>
-      `;
+      return '<a class="simbrief-btn" href="' + url + '" target="_blank" rel="noopener">' +
+        '<span class="simbrief-logo">SB</span>' +
+        '<span class="simbrief-text">Plan with SimBrief</span>' +
+        '</a>';
     })()
   }
 </td>
+              -->
+              <td class="col-details">
+                <button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${escapeHtml(r.atc_route)}">Sector Details</button>
+              </td>
             </tr>
             `;
           }).join('')}
@@ -5223,6 +6005,16 @@ app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
     </section>
 
 <script>
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.sector-details-btn');
+  if (!btn) return;
+  e.preventDefault();
+  var wf = btn.dataset.wf;
+  var from = btn.dataset.from;
+  var to = btn.dataset.to;
+  window.location.href = '/sector/' + wf + '/' + from + '/' + to;
+});
+
 document.addEventListener('click', async (e) => {
   const btn = e.target.closest('.booking-only');
   if (!btn) return;
@@ -7302,10 +8094,34 @@ app.get('/icao/:icao', async (req, res) => {
     where: { icao },
     orderBy: { uploadedAt: 'desc' }
   });
+  // Find ALL WF legs involving this airport
+  const activeEvent = wfEvents.find(e => e.id === activeEventId);
+  const activeEventName = activeEvent ? activeEvent.name : 'WorldFlight';
+  const wfDepartures = adminSheetCache.filter(r => r.from === icao);
+  const wfArrivals = adminSheetCache.filter(r => r.to === icao);
+  const wfDeparture = wfDepartures[0] || null;
+  const wfArrival = wfArrivals[0] || null;
+  const wfInvolved = wfDeparture || wfArrival;
+  const wfButtons = [
+    ...wfArrivals.map(r => ({ label: r.number + ': ' + r.from + ' \u2192 ' + icao, href: '/sector/' + r.number + '/' + r.from + '/' + r.to, type: 'arr' })),
+    ...wfDepartures.map(r => ({ label: r.number + ': ' + icao + ' \u2192 ' + r.to, href: '/sector/' + r.number + '/' + r.from + '/' + r.to, type: 'dep' }))
+  ];
+
   const content = `
+  <!-- Arrival/Departure slot banners (commented out)
   <div class="portal-header portal-width" id="slotBannerHeader">
   <div id="slotBanners" class="slot-banners"></div>
 </div>
+  -->
+
+  ${wfInvolved && isPageEnabled('wf-portal-banner') ? '<div style="padding:14px 20px;background:linear-gradient(135deg,rgba(56,189,248,0.1),rgba(139,92,246,0.08));border:1px solid rgba(56,189,248,0.25);border-radius:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">'
+    + '<div>'
+    + '<div style="font-size:16px;font-weight:800;color:var(--accent);margin-bottom:2px;">' + activeEventName + '!</div>'
+    + '<div style="font-size:13px;color:var(--muted);">This airport has been selected to take part in ' + activeEventName + (wfDeparture && wfArrival ? ' as both a departure and arrival airfield' : wfDeparture ? ' as a departure airfield' : ' as an arrival airfield') + '.</div>'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
+    + wfButtons.map(function(b) { return '<a href="' + b.href + '" class="sector-details-btn" style="text-decoration:none;padding:8px 16px;font-size:13px;">' + b.label + '</a>'; }).join('')
+    + '</div></div>' : ''}
 
 
   <section class="card">
@@ -9160,6 +9976,7 @@ app.post('/api/tobt/cancel', requireLogin, async (req, res) => {
 
     // 🔥 Delete from memory
     delete tobtBookingsByKey[bookingKey];
+    delete tobtBookingsByKey[slotKey];
 
     if (tobtBookingsByCid[cid]) {
       tobtBookingsByCid[cid].delete(bookingKey);
@@ -12797,7 +13614,7 @@ async function _buildFirAnalysisInner() {
       const sLat = points[segIdx].lat + (points[segIdx + 1].lat - points[segIdx].lat) * segFrac;
       const sLon = points[segIdx].lon + (points[segIdx + 1].lon - points[segIdx].lon) * segFrac;
 
-      const firs = getFirsForPoint(sLat, sLon);
+      const firs = getFirsForPoint(sLat, sLon).filter(f => f !== 'EGTM');
       const firId = firs[0] || null;
 
       if (firId && firId !== lastFir) {
@@ -12932,30 +13749,7 @@ app.get('/api/airspace-management', async (req, res) => {
 function clearFirAnalysisCache() { firAnalysisCache = { eventId: null, data: null }; }
 
 function parseNavLatLon(token) {
-  const t = token.toUpperCase().trim();
-  // 52N020W
-  let m = t.match(/^(\d{2})(N|S)(\d{3})(E|W)$/);
-  if (m) {
-    return { lat: Number(m[1]) * (m[2] === 'S' ? -1 : 1), lon: Number(m[3]) * (m[4] === 'W' ? -1 : 1) };
-  }
-  // 5230N02000W (ddmm + dddmm)
-  m = t.match(/^(\d{2})(\d{2})(N|S)(\d{3})(\d{2})(E|W)$/);
-  if (m) {
-    return {
-      lat: (Number(m[1]) + Number(m[2]) / 60) * (m[3] === 'S' ? -1 : 1),
-      lon: (Number(m[4]) + Number(m[5]) / 60) * (m[6] === 'W' ? -1 : 1)
-    };
-  }
-  // 8128S17000W (dddmm format)
-  m = t.match(/^(\d{2,3})(\d{2})(S|N)(\d{3,5})(W|E)$/);
-  if (m) {
-    const latDeg = m[1].length === 3 ? Number(m[1]) : Number(m[1]);
-    return {
-      lat: (Number(m[1]) + Number(m[2]) / 60) * (m[3] === 'S' ? -1 : 1),
-      lon: Number(m[4]) * (m[5] === 'W' ? -1 : 1)
-    };
-  }
-  return null;
+  return parseLatLonFix(token);
 }
 
 /* ===== SCHEDULE ROW EDITING API ===== */
@@ -13618,8 +14412,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
     { key: 'atc',             label: 'WF Flow Control',  icon: '🎧', desc: 'Controller departure management view' },
     { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' },
     { key: 'airspace',        label: 'Airspace Management',  icon: '🌐', desc: 'FIR staffing requirements and timelines' },
-    { key: 'arrival-info',    label: 'Arrival Info',         icon: '🛬', desc: 'Arrival banner on airport portal pages' },
-    { key: 'departure-info',  label: 'Departure Info',       icon: '🛫', desc: 'Departure banner on airport portal pages' },
+    { key: 'wf-portal-banner', label: 'Portal - Airport Selected for WF', icon: '✈️', desc: 'WorldFlight event banner on airport portal pages' },
     { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
   ];
 
@@ -17489,7 +18282,8 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             if (!L.polylineDecorator) return;
             L.polylineDecorator(line, {
               patterns: [{
-                offset: '15%',
+                offset: 30,
+                endOffset: 30,
                 repeat: '80px',
                 symbol: L.Symbol.arrowHead({
                   pixelSize: 8,
@@ -17563,6 +18357,11 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
                 var allCoords = pts.map(function(p) { return [p.lat, p.lon]; });
                 var routeLine = L.polyline(allCoords, { color: color, weight: 1.5, opacity: 0.25 }).addTo(divisionMap);
                 addChevrons(routeLine, color, divisionMap);
+
+                // Dep/Arr markers
+                L.circleMarker(allCoords[0], { radius: 4, color: color, fillColor: color, fillOpacity: 0.9, weight: 1 }).addTo(divisionMap);
+                L.circleMarker(allCoords[allCoords.length - 1], { radius: 4, color: color, fillColor: color, fillOpacity: 0.9, weight: 1 }).addTo(divisionMap);
+
                 // Invisible wide hit target for hover
                 L.polyline(allCoords, { color: color, weight: 16, opacity: 0 }).addTo(divisionMap)
                   .on('mouseover', function() {
@@ -17762,6 +18561,10 @@ app.get('/book', (req, res) => {
       ? `${from}-${to}-${depTimeUtc}`
       : null;
 
+  // Find WF number for sector page link
+  const bookLeg = from && to ? adminSheetCache.find(r => r.from === from && r.to === to) : null;
+  const sectorUrl = bookLeg ? `/sector/${bookLeg.number}/${from}/${to}` : '/schedule';
+
 
   const user = req.session.user.data;
   const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
@@ -17769,9 +18572,6 @@ app.get('/book', (req, res) => {
   const content = `
   <div id="bookingSuccessBanner" class="booking-banner success hidden">
   <span id="successMessage"></span>
-  <button id="viewBookingsBtn" class="banner-action success">
-    View my booked slots →
-  </button>
 </div>
 
 <div id="bookingCancelBanner" class="booking-banner cancel hidden">
@@ -17790,7 +18590,7 @@ app.get('/book', (req, res) => {
 
   <section class="card card-full tobt-card">
       <div style="margin-bottom:12px;">
-        <a href="#" onclick="history.back();return false;" style="color:var(--accent);text-decoration:none;font-size:13px;">&larr; Back</a>
+        <a href="${sectorUrl}" style="color:var(--accent);text-decoration:none;font-size:13px;">&larr; Back to Sector</a>
       </div>
       <h2>Make a Booking</h2>
 <div class="tobt-controls">
@@ -17823,6 +18623,10 @@ const selected = value === preselectedKey ? 'selected' : '';
 
       </select>
 </div>
+      <div style="padding:14px 18px;margin-bottom:16px;background:linear-gradient(135deg,rgba(239,68,68,0.08),rgba(239,68,68,0.03));border:1px solid rgba(239,68,68,0.25);border-radius:10px;line-height:1.6;">
+        <div style="font-size:14px;font-weight:700;color:#f87171;margin-bottom:6px;">What is a TOBT (Target Off-Blocks Time)?</div>
+        <div style="font-size:13px;color:#e5e7eb;">This is your scheduled departure time. Please connect at least <strong>30 minutes</strong> before this time. You should be ready to push back at this time. The actual push time may differ depending on ramp and airfield congestion.</div>
+      </div>
       <table class="tobt-table">
         <thead>
           <tr>
@@ -18084,9 +18888,15 @@ if (slot.byMe) {
     msg.textContent =
       'You have successfully booked a slot for ' +
       data.from + ' → ' + data.to +
-      ' at ' + data.tobt + ' UTC.';
+      ' at ' + data.tobt + ' UTC. Redirecting...';
 
     banner.classList.remove('hidden');
+
+    // Redirect back to sector page if we came from there
+    var sectorRedirect = '${sectorUrl}';
+    if (sectorRedirect && sectorRedirect !== '/schedule') {
+      setTimeout(function() { window.location.href = sectorRedirect; }, 1500);
+    }
   }
 
   function showBookingCancelled(data) {
