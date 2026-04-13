@@ -1470,6 +1470,9 @@ function hasOutboundFlow(icao) {
 /* ===== ADMIN CID WHITELIST ===== */
 const ADMIN_CIDS = [10000010, 1303570, 10000005];
 
+// DEV: CID alias for VATSIM controller lookups (test user → real VATSIM CID)
+const CID_CONTROLLER_ALIASES = { 10000002: 1303570 };
+
 /* ===== MASTER USER TOKENS ===== */
 const masterUserCids = new Set();
 
@@ -5327,7 +5330,7 @@ app.get('/sector/:wf/:from/:to', (req, res) => {
   const bookingTobt = userBooking?.tobtTimeUtc || null;
 
   const content = `
-    <a href="/schedule" class="back-link">\u2190 Back to Schedule</a>
+    <div style="margin-bottom:12px;"><a href="/schedule" class="sector-details-btn" style="text-decoration:none;padding:14px 20px;font-size:14px;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.3);color:#a78bfa;">\u2190 Back to Schedule</a></div>
     <section class="card card-full">
       <div style="margin-bottom:20px;">
         <h1 style="margin:0;font-size:28px;font-weight:800;letter-spacing:0.5px;">
@@ -5472,60 +5475,7 @@ app.get('/sector/:wf/:from/:to', (req, res) => {
               .bindTooltip(p.name, { direction: 'top', className: 'sector-wpt-label', offset: [0, -8] });
           });
 
-          // Airway labels — only shown when zoomed in enough
-          var awyLayer = L.layerGroup();
-          (function() {
-            var tokens = route.toUpperCase().split(/\\s+/).filter(Boolean);
-            var ptNames = pts.map(function(p) { return p.name ? p.name.toUpperCase() : ''; });
-
-            for (var t = 0; t < tokens.length; t++) {
-              var tok = tokens[t];
-              if (tok === 'DCT') continue;
-              if (/^N\\d/.test(tok)) continue;
-              if (ptNames.indexOf(tok) !== -1) continue;
-              if (!/^[A-Z]{1,2}\\d{1,4}[A-Z]?$/.test(tok)) continue;
-
-              var prevFix = null, nextFix = null;
-              for (var b = t - 1; b >= 0; b--) {
-                var pi = ptNames.indexOf(tokens[b].toUpperCase());
-                if (pi !== -1) { prevFix = pi; break; }
-              }
-              for (var a = t + 1; a < tokens.length; a++) {
-                var ni = ptNames.indexOf(tokens[a].toUpperCase());
-                if (ni !== -1) { nextFix = ni; break; }
-              }
-
-              if (prevFix !== null && nextFix !== null && prevFix < pts.length && nextFix < pts.length) {
-                var midLat = (pts[prevFix].lat + pts[nextFix].lat) / 2;
-                var midLon = (pts[prevFix].lon + pts[nextFix].lon) / 2;
-
-                var dLon = (pts[nextFix].lon - pts[prevFix].lon) * Math.cos((midLat * Math.PI) / 180);
-                var dLat = pts[nextFix].lat - pts[prevFix].lat;
-                var angle = Math.atan2(dLon, dLat) * 180 / Math.PI;
-                var cssAngle = -(90 - angle);
-                if (cssAngle > 90) cssAngle -= 180;
-                if (cssAngle < -90) cssAngle += 180;
-
-                L.marker([midLat, midLon], {
-                  icon: L.divIcon({
-                    html: '<div style="transform:rotate(' + cssAngle.toFixed(1) + 'deg);font-size:10px;font-weight:600;color:#94a3b8;font-family:monospace;white-space:nowrap;background:rgba(15,23,42,0.85);padding:1px 4px;border-radius:2px;text-align:center;display:inline-block;">' + tok + '</div>',
-                    className: '',
-                    iconSize: [70, 16],
-                    iconAnchor: [35, 8]
-                  }),
-                  interactive: false
-                }).addTo(awyLayer);
-              }
-            }
-          })();
-
-          // Show/hide airway labels based on zoom
-          function updateAwyLabels() {
-            if (map.getZoom() >= 5) { if (!map.hasLayer(awyLayer)) map.addLayer(awyLayer); }
-            else { if (map.hasLayer(awyLayer)) map.removeLayer(awyLayer); }
-          }
-          map.on('zoomend', updateAwyLabels);
-          updateAwyLabels();
+          // Airway labels removed
 
           // DEP marker
           var depPt = pts[0];
@@ -8114,6 +8064,19 @@ app.get('/icao/:icao', async (req, res) => {
 </div>
   -->
 
+  <div id="backToSector" style="display:none;margin-bottom:4px;"></div>
+  <script>
+  (function() {
+    var ref = document.referrer || '';
+    var match = ref.match(/\\/sector\\/(WF\\d+)\\/([A-Z]{4})\\/([A-Z]{4})/);
+    if (match) {
+      var el = document.getElementById('backToSector');
+      el.innerHTML = '<a href="' + match[0] + '" class="sector-details-btn" style="text-decoration:none;padding:14px 20px;font-size:14px;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.3);color:#a78bfa;display:inline-block;">&larr; Back to ' + match[1] + ': ' + match[2] + ' &rarr; ' + match[3] + '</a>';
+      el.style.display = '';
+    }
+  })();
+  </script>
+
   ${wfInvolved && isPageEnabled('wf-portal-banner') ? '<div style="padding:14px 20px;background:linear-gradient(135deg,rgba(56,189,248,0.1),rgba(139,92,246,0.08));border:1px solid rgba(56,189,248,0.25);border-radius:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">'
     + '<div>'
     + '<div style="font-size:16px;font-weight:800;color:var(--accent);margin-bottom:2px;">' + activeEventName + '!</div>'
@@ -10380,7 +10343,7 @@ app.get('/user-management', requireLogin, async (req, res) => {
       </div>
 
       <div id="umAddSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;">
-        <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Add Permission</div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;" id="umAddLabel">Add Permission</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <select id="umAddPattern" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
             ${managedPatterns.map(p => '<option value="' + p + '">' + p + '</option>').join('')}
@@ -10427,6 +10390,7 @@ app.get('/user-management', requireLogin, async (req, res) => {
           .then(function(data) {
             document.getElementById('umResults').style.display = '';
             document.getElementById('umAddSection').style.display = '';
+            document.getElementById('umAddLabel').textContent = 'Add Permission for CID ' + searchedCid;
             document.getElementById('umMasterSection').style.display = '';
 
             var headerParts = [data.cid];
@@ -15091,9 +15055,8 @@ app.get('/departures', async (req, res) => {
   }
 
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
-
-  
+  const userCid = Number(user.cid);
+  const isAdmin = ADMIN_CIDS.includes(userCid);
 
   // 2️⃣ ICAO — DEFINE ONCE
   const pageIcao = req.query.icao?.toUpperCase();
@@ -15101,17 +15064,24 @@ app.get('/departures', async (req, res) => {
     return res.redirect('/atc');
   }
 
+  // 3️⃣ Controller connection check — look up live VATSIM data
+  const lookupCid = CID_CONTROLLER_ALIASES[userCid] || userCid;
+  let controllerCallsign = '';
+  let isAerodromeController = false;
+  try {
+    const vatsimRes = await axios.get('https://data.vatsim.net/v3/vatsim-data.json');
+    const allControllers = vatsimRes.data.controllers || [];
+    const myConnection = allControllers.find(c => c.cid === lookupCid);
+    if (myConnection) {
+      controllerCallsign = myConnection.callsign || '';
+      isAerodromeController = controllerCallsign.startsWith(pageIcao + '_') && !controllerCallsign.endsWith('_OBS');
+    }
+  } catch (e) {
+    // Fallback to session callsign
+    controllerCallsign = user.callsign || '';
+    isAerodromeController = controllerCallsign.startsWith(pageIcao + '_') && !controllerCallsign.endsWith('_OBS');
+  }
 
-  
-  // 3️⃣ Controller connection check
-  const controllerCallsign = user.callsign || '';
-
-  // "Connected" to the aerodrome if callsign is ICAO_* and not ICAO_OBS
-  const isAerodromeController =
-    controllerCallsign.startsWith(pageIcao + '_') &&
-    !controllerCallsign.endsWith('_OBS');
-
-  // Kept for backwards compatibility (if anything still uses it)
   const isConnectedToIcao = controllerCallsign.startsWith(pageIcao + '_');
 
   // Admins can always edit; otherwise must be connected as ICAO_* (except ICAO_OBS)
@@ -15391,7 +15361,7 @@ const filedRoute = p.flight_plan.route || '';
 
  const content = `
     <section class="card departures-page">
-      <a href="/atc" class="back-link">← Back to WF Flow Control</a>
+      <div style="margin-bottom:20px;"><a href="/atc" class="sector-details-btn" style="text-decoration:none;padding:8px 16px;font-size:13px;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.3);color:#a78bfa;">\u2190 Back to WF Flow Control</a></div>
 
       <div class="dep-page-header">
         <div class="dep-icao-badge">${pageIcao}</div>
@@ -15485,13 +15455,17 @@ const filedRoute = p.flight_plan.route || '';
         </style>
       ` : ''}
 
-      ${!isAerodromeController ? `
+      ${isAerodromeController ? `
+        <div style="padding:10px 16px;background:linear-gradient(135deg,rgba(74,222,128,0.1),rgba(74,222,128,0.03));border:1px solid rgba(74,222,128,0.25);border-radius:8px;text-align:center;color:#4ade80;font-size:13px;font-weight:600;">
+          You are connected as ${controllerCallsign} — you can make changes to the below data
+        </div>
+      ` : `
         <div class="icao-warning">
           ${canEdit
             ? `Not connected as ${pageIcao}_ — editing enabled (Admin)`
             : `Not connected as ${pageIcao}_ — read-only view`}
         </div>
-      ` : ''}
+      `}
 
       <div class="tsat-wrapper" style="padding-top:0;${pageFlowMode === 'NONE' ? 'display:none;' : ''}">
         <div class="tsat-top-row ${pageFlowMode === 'SLOTTED' ? 'three-cols' : 'two-cols'}">
@@ -15655,7 +15629,7 @@ document.addEventListener('click', function(e) {
     + '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;"><span style="color:#4ade80;">Green</span> = matches published route &nbsp; <span style="color:#f87171;">Red</span> = not in published route</div>'
     + '<div style="display:flex;gap:8px;">'
     + '<button class="action-btn" style="flex:1;justify-content:center;" id="closeRouteWarningModal">Close</button>'
-    + '<button class="action-btn primary" style="flex:1;justify-content:center;" id="sendAcarsRouteBtn" data-callsign="' + callsign + '" data-dep="' + dep + '" data-arr="' + arr + '" data-wfnum="' + wfnum + '" data-route="' + wf.replace(/"/g, '&quot;') + '">Send correct route via ACARS</button>'
+    + '<button class="action-btn primary" style="flex:1;justify-content:center;" id="sendAcarsRouteBtn" data-callsign="' + callsign + '" data-dep="' + dep + '" data-arr="' + arr + '" data-wfnum="' + wfnum + '" data-route="' + wf.replace(/"/g, '&quot;') + '"' + (CAN_EDIT ? '' : ' disabled style="flex:1;justify-content:center;opacity:0.4;cursor:not-allowed;"') + '>Send correct route via ACARS</button>'
     + '</div>'
     + '<div id="acarsStatusMsg" style="text-align:right;margin-right:80px;"></div>'
     + '</div>';
@@ -15984,7 +15958,7 @@ function renderUnassignedTobtTable(data) {
     return;
   }
 
-  grid.innerHTML = data.slice(0, 20).map(function(s) {
+  grid.innerHTML = data.map(function(s) {
     return '<div class="tobt-chip" data-slotkey="' + s.slotKey + '" data-tobt="' + s.tobt + '" data-to="' + s.to + '" style="cursor:pointer;">'
       + '<span class="tobt-chip-time">' + s.tobt + '</span>'
       + '<span class="tobt-chip-dest">' + s.to + '</span>'

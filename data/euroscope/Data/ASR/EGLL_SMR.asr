@@ -1,0 +1,17 @@
+DisplayTypeName:SMR radar display
+DisplayTypeNeedRadarContent:0
+DisplayTypeGeoReferenced:1
+Geo:EGLL Ground:line
+Regions:EGLL:polygon
+PLUGIN:vSMR Vatsim UK:Airport:EGLL
+PLUGIN:vSMR Vatsim UK:ActiveProfile:Default
+PLUGIN:vSMR Vatsim UK:GndTrailsDots:0
+PLUGIN:vSMR Vatsim UK:SRW1Display:1
+PLUGIN:vSMR Vatsim UK:SRW1BottomRightX:1920
+PLUGIN:vSMR Vatsim UK:SRW1BottomRightY:1080
+PLUGIN:vSMR Vatsim UK:SRW1Filter:5500
+PLUGIN:vSMR Vatsim UK:SRW1OffsetX:0
+PLUGIN:vSMR Vatsim UK:SRW1OffsetY:0
+PLUGIN:vSMR Vatsim UK:SRW1Rotation:0
+PLUGIN:vSMR Vatsim UK:SRW1Scale:15
+PLUGIN:vSMR Vatsim UK:ShowAircraftType:1

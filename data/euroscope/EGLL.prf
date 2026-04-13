@@ -1,0 +1,8 @@
+Settings	SettingsfileSYMBOLOGY	Data\Settings\Symbology.txt
+Settings	SettingsfileTAGS	Data\Settings\Tags.txt
+Settings	SettingsfileSCREEN	Data\Settings\Screen.txt
+Settings	Settingsfile	Data\Settings\General.txt
+Settings	sector	Data\Sector_Files\EGLL.sct
+ASRFastKeys	1	Data\ASR\EGLL.asr
+RecentFiles	Recent1	Data\ASR\EGLL.asr
+LastSession	server	AUTOMATIC

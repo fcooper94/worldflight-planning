@@ -1,0 +1,272 @@
+[
+  {
+    "name": "Default",
+    "font": {
+      "font_name": "EuroScope",
+      "weight": "Regular",
+      "sizes": {
+        "one": 11,
+        "two": 12,
+        "three": 13,
+        "four": 14,
+        "five": 16
+      }
+    },
+    "filters": {
+      "hide_above_alt": 10000,
+      "hide_above_spd": 250,
+      "radar_range_nm": 50,
+      "night_alpha_setting": 110,
+      "pro_mode": {
+        "enable": false,
+        "accept_pilot_squawk": true,
+        "do_not_autocorrelate_squawks": []
+      }
+    },
+    "labels": {
+      "auto_deconfliction": true,
+      "leader_line_length": 50,
+      "use_aspeed_for_gate": false,
+      "squawk_error_color": {
+        "r": 255,
+        "g": 255,
+        "b": 0
+      },
+      "departure": {
+        "definition": [
+          [
+            "callsign"
+          ],
+          [
+            "actype",
+            "wake"
+          ]
+        ],
+        "background_color": {
+          "r": 30,
+          "g": 80,
+          "b": 180,
+          "a": 200
+        },
+        "background_color_on_runway": {
+          "r": 30,
+          "g": 80,
+          "b": 180,
+          "a": 255
+        },
+        "text_color": {
+          "r": 255,
+          "g": 255,
+          "b": 255
+        }
+      },
+      "arrival": {
+        "definition": [
+          [
+            "callsign"
+          ],
+          [
+            "actype"
+          ]
+        ],
+        "background_color": {
+          "r": 150,
+          "g": 40,
+          "b": 40,
+          "a": 200
+        },
+        "background_color_on_runway": {
+          "r": 150,
+          "g": 40,
+          "b": 40,
+          "a": 255
+        },
+        "text_color": {
+          "r": 255,
+          "g": 255,
+          "b": 255
+        }
+      },
+      "airborne": {
+        "use_departure_arrival_coloring": false,
+        "definition": [
+          [
+            "callsign"
+          ],
+          [
+            "flightlevel"
+          ]
+        ],
+        "text_color": {
+          "r": 255,
+          "g": 255,
+          "b": 255
+        },
+        "background_color": {
+          "r": 0,
+          "g": 0,
+          "b": 0,
+          "a": 0
+        },
+        "background_color_on_runway": {
+          "r": 0,
+          "g": 0,
+          "b": 0,
+          "a": 0
+        }
+      },
+      "uncorrelated": {
+        "definition": [
+          [
+            "systemid"
+          ]
+        ],
+        "text_color": {
+          "r": 255,
+          "g": 255,
+          "b": 255
+        },
+        "background_color": {
+          "r": 100,
+          "g": 20,
+          "b": 100,
+          "a": 200
+        },
+        "background_color_on_runway": {
+          "r": 100,
+          "g": 20,
+          "b": 100,
+          "a": 255
+        }
+      }
+    },
+    "rimcas": {
+      "rimcas_label_only": true,
+      "use_red_symbol_for_emergencies": true,
+      "timer": [
+        60,
+        45,
+        30,
+        15,
+        0
+      ],
+      "timer_lvp": [
+        120,
+        90,
+        60,
+        30,
+        0
+      ],
+      "rimcas_stage_two_speed_threshold": 25,
+      "background_color_stage_one": {
+        "r": 160,
+        "g": 90,
+        "b": 30,
+        "a": 255
+      },
+      "background_color_stage_two": {
+        "r": 150,
+        "g": 0,
+        "b": 0,
+        "a": 255
+      },
+      "alert_text_color": {
+        "r": 255,
+        "g": 255,
+        "b": 255
+      }
+    },
+    "targets": {
+      "show_primary_target": true,
+      "target_color": {
+        "r": 255,
+        "g": 242,
+        "b": 73,
+        "a": 255
+      },
+      "history_one_color": {
+        "r": 0,
+        "g": 255,
+        "b": 255,
+        "a": 255
+      },
+      "history_two_color": {
+        "r": 0,
+        "g": 200,
+        "b": 200,
+        "a": 255
+      },
+      "history_three_color": {
+        "r": 0,
+        "g": 150,
+        "b": 150,
+        "a": 255
+      },
+      "history_four_color": {
+        "r": 0,
+        "g": 100,
+        "b": 100,
+        "a": 255
+      }
+    },
+    "maps": {
+      "KJFK": {
+        "runways": [
+          {
+            "runway_name": "04L/22R",
+            "path": [
+              [
+                "N040.37.19.206",
+                "W073.47.08.156"
+              ],
+              [
+                "N040.38.55.680",
+                "W073.45.52.927"
+              ]
+            ]
+          },
+          {
+            "runway_name": "04R/22L",
+            "path": [
+              [
+                "N040.37.31.442",
+                "W073.46.13.087"
+              ],
+              [
+                "N040.38.42.716",
+                "W073.45.17.633"
+              ]
+            ]
+          },
+          {
+            "runway_name": "13L/31R",
+            "path": [
+              [
+                "N040.39.28.076",
+                "W073.47.24.717"
+              ],
+              [
+                "N040.38.37.319",
+                "W073.45.33.481"
+              ]
+            ]
+          },
+          {
+            "runway_name": "13R/31L",
+            "path": [
+              [
+                "N040.38.54.238",
+                "W073.49.00.134"
+              ],
+              [
+                "N040.37.40.437",
+                "W073.46.17.756"
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    "approach_insets": {}
+  }
+]
