@@ -721,10 +721,13 @@ async function main() {
   // Airport positions (DEL/GND/TWR/APP/OBS)
   for (const [icao] of [[FROM], [TO]]) {
     const aptFreqs = xp12Freqs[icao] || [];
-    const twrFreq = aptFreqs.find(f => f.role === 'twr')?.freqs[0] || '118.500';
+    const hasTwr = !!aptFreqs.find(f => f.role === 'twr');
+    const hasApp = !!aptFreqs.find(f => f.role === 'tracon');
+    const hasGnd = !!aptFreqs.find(f => f.role === 'gnd');
     for (const { s, n, r, f } of [{s:'OBS',n:'Observer',r:100,f:0},{s:'APP',n:'Approach',r:100,f:5},{s:'TWR',n:'Tower',r:30,f:4},{s:'GND',n:'Ground',r:20,f:3},{s:'DEL',n:'Delivery',r:20,f:2}]) {
+      const isReal = s === 'OBS' || (s === 'TWR' && hasTwr) || (s === 'APP' && hasApp) || (s === 'GND' && hasGnd);
       profLines.push(`PROFILE:${icao}_${s}:${r}:${f}`);
-      profLines.push(`ATIS2:${icao} ${n}`);
+      profLines.push(`ATIS2:${isReal ? `${icao} ${n}` : 'WorldFlight Temporary Position'}`);
       profLines.push(`ATIS3:`);
       profLines.push(`ATIS4:WorldFlight 2026`);
     }

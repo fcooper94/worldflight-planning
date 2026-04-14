@@ -12,11 +12,11 @@ ATIS2:FACT Tower
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FACT_GND:20:3
-ATIS2:FACT Ground
+ATIS2:WorldFlight Temporary Position
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FACT_DEL:20:2
-ATIS2:FACT Delivery
+ATIS2:WorldFlight Temporary Position
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FKKD_OBS:100:0
@@ -32,11 +32,11 @@ ATIS2:FKKD Tower
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FKKD_GND:20:3
-ATIS2:FKKD Ground
+ATIS2:WorldFlight Temporary Position
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FKKD_DEL:20:2
-ATIS2:FKKD Delivery
+ATIS2:WorldFlight Temporary Position
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FACA_CTR:300:6
