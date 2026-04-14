@@ -1,150 +1,22 @@
 VOICE
-AG:FACT TWR:118.100
-AG:FACT APP:119.700
-AG:FACT APP:120.050
-AG:FACT APP:124.350
-AG:FKKD TWR:119.700
-AG:FKKD TWR:129.500
-AG:FKKD APP:119.700
-AG:FKKD APP:129.500
-AG:FACA_CTR - Cape Town (Bandbox) - Cape Town:124.700
-AG:FACA_CTR - Cape Town (Bandbox) - Cape Town:125.100
-AG:FACA_CTR - Cape Town (Bandbox) - Cape Town:127.570
-AG:FACA_CTR - Cape Town (Bandbox) - Cape Town:131.120
-AG:FACA_E_CTR - Cape Town ACC (East) - Cape Town:124.700
-AG:FACA_E_CTR - Cape Town ACC (East) - Cape Town:125.100
-AG:FACA_E_CTR - Cape Town ACC (East) - Cape Town:127.570
-AG:FACA_E_CTR - Cape Town ACC (East) - Cape Town:131.120
-AG:FACA_W_CTR - Cape Town ACC (West) - Cape Town:124.700
-AG:FACA_W_CTR - Cape Town ACC (West) - Cape Town:125.100
-AG:FACA_W_CTR - Cape Town ACC (West) - Cape Town:127.570
-AG:FACA_W_CTR - Cape Town ACC (West) - Cape Town:131.120
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:118.500
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:118.550
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:119.500
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:120.300
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:126.700
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:127.400
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:128.300
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:128.900
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:129.100
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:132.150
-AG:FAJA_CTR - Johannesburg ACC (Bandbox) - Johannesburg:134.400
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:118.500
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:118.550
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:119.500
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:120.300
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:126.700
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:127.400
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:128.300
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:128.900
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:129.100
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:132.150
-AG:FAJA_C_CTR - Johannesburg ACC (Central) - Johannesburg:134.400
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:118.500
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:118.550
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:119.500
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:120.300
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:126.700
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:127.400
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:128.300
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:128.900
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:129.100
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:132.150
-AG:FAJA_E_CTR - Johannesburg ACC (East) - Johannesburg:134.400
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:118.500
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:118.550
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:119.500
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:120.300
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:126.700
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:127.400
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:128.300
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:128.900
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:129.100
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:132.150
-AG:FAJA_N_CTR - Johannesburg ACC (North) - Johannesburg:134.400
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:118.500
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:118.550
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:119.500
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:120.300
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:126.700
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:127.400
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:128.300
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:128.900
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:129.100
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:132.150
-AG:FAJA_NE_CTR - Johannesburg ACC (Sector 1) - Johannesburg:134.400
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:118.500
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:118.550
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:119.500
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:120.300
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:126.700
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:127.400
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:128.300
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:128.900
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:129.100
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:132.150
-AG:FAJA_NW_CTR - Johannesburg ACC (Sector 2) - Johannesburg:134.400
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:118.500
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:118.550
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:119.500
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:120.300
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:126.700
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:127.400
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:128.300
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:128.900
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:129.100
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:132.150
-AG:FAJA_S_CTR - Johannesburg ACC (South) - Johannesburg:134.400
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:118.500
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:118.550
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:119.500
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:120.300
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:126.700
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:127.400
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:128.300
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:128.900
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:129.100
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:132.150
-AG:FAJA_SE_CTR - Johannesburg ACC (Sector 3) - Johannesburg:134.400
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:118.500
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:118.550
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:119.500
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:120.300
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:126.700
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:127.400
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:128.300
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:128.900
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:129.100
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:132.150
-AG:FAJA_SW_CTR - Johannesburg ACC (Sector 4) - Johannesburg:134.400
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:118.500
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:118.550
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:119.500
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:120.300
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:126.700
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:127.400
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:128.300
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:128.900
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:129.100
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:132.150
-AG:FAJA_W_CTR - Johannesburg ACC (West) - Johannesburg:134.400
-AG:FCCC_CTR - Brazzaville:118.700
-AG:FCCC_CTR - Brazzaville:119.700
-AG:FCCC_CTR - Brazzaville:121.100
-AG:FCCC_CTR - Brazzaville:126.500
-AG:FCCC_CTR - Brazzaville:127.500
-AG:FCCC_CTR - Brazzaville:128.900
-AG:FCCC_CTR - Brazzaville:129.500
-AG:FNAN_CTR - Luanda:118.500
-AG:FNAN_CTR - Luanda:124.600
-AG:FNAN_CTR - Luanda:126.900
-AG:FNAN_CTR - Luanda:129.300
-AG:FYWF_CTR - Windhoek:118.700
-AG:FYWF_CTR - Windhoek:120.500
-AG:FYWF_CTR - Windhoek:123.800
-AG:FYWF_CTR - Windhoek:124.700
-AG:FYWF_CTR - Windhoek:124.800
-AG:FYWF_CTR - Windhoek:126.800
-AG:FYWF_CTR - Windhoek:129.600
+AG:FACT_TWR:118.100
+AG:FACT_APP:119.700
+AG:FKKD_TWR:119.700
+AG:FKKD_APP:119.700
+AG:FACA_CTR:124.700
+AG:FACA_E_CTR:124.700
+AG:FACA_W_CTR:124.700
+AG:FAJA_CTR:118.500
+AG:FAJA_C_CTR:118.500
+AG:FAJA_E_CTR:118.500
+AG:FAJA_N_CTR:118.500
+AG:FAJA_NE_CTR:118.500
+AG:FAJA_NW_CTR:118.500
+AG:FAJA_S_CTR:118.500
+AG:FAJA_SE_CTR:118.500
+AG:FAJA_SW_CTR:118.500
+AG:FAJA_W_CTR:118.500
+AG:FCCC_CTR:118.700
+AG:FNAN_CTR:118.500
+AG:FYWF_CTR:118.700
 END

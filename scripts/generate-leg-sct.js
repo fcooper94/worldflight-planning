@@ -731,26 +731,25 @@ async function main() {
 
   // ===== VOICE SETUP =====
   const voiceLines = ['VOICE'];
-  // Airport frequencies
+  // Airport frequencies — primary freq per role
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
     const aptFreqs = xp12Freqs[icao] || [];
-    for (const entry of aptFreqs) {
-      const roleName = entry.role === 'twr' ? 'TWR' : entry.role === 'tracon' ? 'APP' : entry.role === 'gnd' ? 'GND' : 'CTR';
-      for (const freq of entry.freqs) {
-        voiceLines.push(`AG:${icao} ${roleName}:${freq}`);
-      }
-    }
+    const twr = aptFreqs.find(f => f.role === 'twr')?.freqs[0];
+    const app = aptFreqs.find(f => f.role === 'tracon')?.freqs[0];
+    const gnd = aptFreqs.find(f => f.role === 'gnd')?.freqs[0];
+    if (twr) voiceLines.push(`AG:${icao}_TWR:${twr}`);
+    if (app) voiceLines.push(`AG:${icao}_APP:${app}`);
+    if (gnd) voiceLines.push(`AG:${icao}_GND:${gnd}`);
   }
-  // Enroute FIR frequencies
-  const addedVoiceFreqs = new Set();
+  // Enroute CTR positions — primary freq per callsign
+  const addedVoice = new Set();
   for (const vp of vatspy.positions) {
+    if (addedVoice.has(vp.callsign)) continue;
+    addedVoice.add(vp.callsign);
     const firBase = vp.firId.split('-')[0];
-    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
-    for (const freq of firFreqs) {
-      const key = `${vp.name}:${freq}`;
-      if (addedVoiceFreqs.has(key)) continue;
-      addedVoiceFreqs.add(key);
-      voiceLines.push(`AG:${vp.callsign}_CTR - ${vp.name}:${freq}`);
+    const primaryFreq = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs[0];
+    if (primaryFreq) {
+      voiceLines.push(`AG:${vp.callsign}_CTR:${primaryFreq}`);
     }
   }
   voiceLines.push('END');
