@@ -5,11 +5,26 @@ Airports:EGLL:symbol
 Airports:EGLL:name
 Airports:EHAM:symbol
 Airports:EHAM:name
+ARTCC boundary:EGTT
+ARTCC boundary:EGTT-C
+ARTCC boundary:EGTT-D
+ARTCC boundary:EGTT-E
+ARTCC boundary:EGTT-H
+ARTCC boundary:EGTT-M
+ARTCC boundary:EGTT-N
+ARTCC boundary:EGTT-NE
+ARTCC boundary:EGTT-NW
+ARTCC boundary:EGTT-S
+ARTCC boundary:EGTT-SC
+ARTCC boundary:EGTT-W
+ARTCC boundary:EGTL
+ARTCC boundary:EGTL-N
+ARTCC boundary:EGTL-S
+ARTCC boundary:EHAA
+Geo:Coastline:
 SHOWC:EGLL_TWR:1
 SHOWC:EHAM_TWR:1
-SHOWC:1
 SHOWSB:1
-BELOW:66000
 ABOVE:0
 LEADER:3
 SHOWLEADER:1
