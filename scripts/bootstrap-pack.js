@@ -82,6 +82,10 @@ const COPY_FILES = [
     dest: 'Data/Plugin/TopSky/TopSky.dll',
     src: 'Data/Plugin/TopSky_NERC/TopSky.dll',
   },
+  {
+    dest: 'Data/Plugin/UKControllerPlugin.dll',
+    src: 'Data/Plugin/UKControllerPlugin.dll',
+  },
 ];
 
 // Files generated with inline content (not from UK pack)

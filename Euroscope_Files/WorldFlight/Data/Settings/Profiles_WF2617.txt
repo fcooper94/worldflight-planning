@@ -1,0 +1,186 @@
+PROFILE
+PROFILE:KLAX_APP:100:5
+ATIS2:KLAX Approach
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:KLAX_TWR:30:4
+ATIS2:KLAX Tower
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:KLAX_GND:20:3
+ATIS2:KLAX Ground
+ATIS3:WorldFlight Temporary Position
+ATIS4:WorldFlight 2026
+PROFILE:KLAX_DEL:20:2
+ATIS2:KLAX Delivery
+ATIS3:WorldFlight Temporary Position
+ATIS4:WorldFlight 2026
+PROFILE:EGPN_APP:100:5
+ATIS2:EGPN Approach
+ATIS3:WorldFlight Temporary Position
+ATIS4:WorldFlight 2026
+PROFILE:EGPN_TWR:30:4
+ATIS2:EGPN Tower
+ATIS3:WorldFlight Temporary Position
+ATIS4:WorldFlight 2026
+PROFILE:EGPN_GND:20:3
+ATIS2:EGPN Ground
+ATIS3:WorldFlight Temporary Position
+ATIS4:WorldFlight 2026
+PROFILE:EGPN_DEL:20:2
+ATIS2:EGPN Delivery
+ATIS3:WorldFlight Temporary Position
+ATIS4:WorldFlight 2026
+PROFILE:BGGL_CTR:300:6
+ATIS2:Nuuk
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_CTR:300:6
+ATIS2:Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_S1_CTR:300:6
+ATIS2:Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_S2_CTR:300:6
+ATIS2:Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_S3_CTR:300:6
+ATIS2:Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_E_CTR:300:6
+ATIS2:Reykjavik ACC (East) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_E1_CTR:300:6
+ATIS2:Reykjavik ACC (East) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_E2_CTR:300:6
+ATIS2:Reykjavik ACC (East) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_E3_CTR:300:6
+ATIS2:Reykjavik ACC (East) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_N_CTR:300:6
+ATIS2:Reykjavik ACC (North) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_S_CTR:300:6
+ATIS2:Reykjavik ACC (South) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_W_CTR:300:6
+ATIS2:Reykjavik ACC (West) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_W1_CTR:300:6
+ATIS2:Reykjavik ACC (West) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_W2_CTR:300:6
+ATIS2:Reykjavik ACC (West) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:BIRD_W3_CTR:300:6
+ATIS2:Reykjavik ACC (West) - Reykjavik
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:EDM_CTR:300:6
+ATIS2:Edmonton
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:ZEG_CTR:300:6
+ATIS2:Edmonton
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:WPG_CTR:300:6
+ATIS2:Winnipeg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:ZWG_CTR:300:6
+ATIS2:Winnipeg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:EGGX_CTR:300:6
+ATIS2:Shanwick Oceanic
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_CTR:300:6
+ATIS2:Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:STC_A_CTR:300:6
+ATIS2:Scottish TMA Antrim (Up to FL255) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_D_CTR:300:6
+ATIS2:Scottish ACC (Deancross) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:STC_CTR:300:6
+ATIS2:Scottish TMA (Up to FL255) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:STC_W_CTR:300:6
+ATIS2:Scottish TMA (Up to FL255) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:STC_E_CTR:300:6
+ATIS2:Scottish TMA (Up to FL255) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_E_CTR:300:6
+ATIS2:Scottish ACC (East) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_N_CTR:300:6
+ATIS2:Scottish ACC (North) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_S_CTR:300:6
+ATIS2:Scottish ACC (South) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCL_TAY_CTR:300:6
+ATIS2:Scottish ACC (Tay) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_W_CTR:300:6
+ATIS2:Scottish ACC (West) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_R_CTR:300:6
+ATIS2:Scottish ACC (Rathlin) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SCO_WD_CTR:300:6
+ATIS2:Scottish ACC (West/Deancross) - Scottish
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:LAX_CTR:300:6
+ATIS2:Los Angeles
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:LA_CTR:300:6
+ATIS2:Los Angeles
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SLC_CTR:300:6
+ATIS2:Salt Lake City
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:OAK_CTR:300:6
+ATIS2:Oakland
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:SEA_CTR:300:6
+ATIS2:Seattle
+ATIS3:
+ATIS4:WorldFlight 2026
+END

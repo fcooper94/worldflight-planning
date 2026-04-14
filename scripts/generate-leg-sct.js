@@ -158,8 +158,14 @@ function buildAppAsr(icao, airport) {
     if (rwy.ident2) lines.push(`Sids:${icao}-${rwy.ident2}`);
   }
   lines.push(`SHOWC:${icao}_TWR:1`);
+  lines.push('SHOWC:1', 'SHOWSB:0');
+  lines.push('TAGFAMILY:AC-TopSky');
   lines.push(`m_Latitude:${airport.lat}`, `m_Longitude:${airport.lon}`);
   lines.push('m_Zoom:7');
+  // UKCP display defaults
+  lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
+  lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
+  lines.push('PLUGIN:UK Controller Plugin:DisplayCountdown:1');
   return lines;
 }
 
@@ -196,14 +202,12 @@ async function main() {
   const airways = await parseAirways(path.join(NAVDATA_DIR, 'earth_awy.dat'), routeCenters, RADIUS);
   console.log(`  ${fixes.length} fixes, ${vors.length} VORs, ${ndbs.length} NDBs, ${airways.high.length} high/${airways.low.length} low airways`);
 
-  // Parse FIR boundaries along route
-  const routeFirs = parseRouteFIRs(FIR_GEOJSON, depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon);
-  console.log(`  ${routeFirs.length} FIRs along route`);
+  // FIR boundaries — initially use straight line, will re-parse with actual route later
+  let routeFirs = parseRouteFIRs(FIR_GEOJSON, depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon);
+  console.log(`  ${routeFirs.length} FIRs along route (initial)`);
 
-  // Parse VATSpy for real VATSIM positions and radar coverage grid
-  const transitFirIds = routeFirs.map(f => f.icao);
-  const vatspy = parseVATSpyForFIRs(VATSPY_DAT, FIR_BOUNDS, transitFirIds);
-  console.log(`  ${vatspy.positions.length} VATSIM positions, ${vatspy.radars.length} radar sites for ${vatspy.firBounds.length} FIRs`);
+  // VATSpy parsing deferred until after route expansion (to use actual route FIRs)
+  let vatspy = null;
 
   // Load ground layouts
   console.log('Loading ground layouts...');
@@ -312,22 +316,29 @@ async function main() {
       }
     }
   }
-  // Scan full fix file for any missing waypoints
+  // Scan full fix file for any missing waypoints — pick closest to route midpoint
   const missingFixes = [...allProcFixes].filter(n => !wpLookup.has(n));
   if (missingFixes.length > 0) {
     const missingSet = new Set(missingFixes);
+    const candidates = {}; // name -> [{lat, lon, dist}]
     const fixFile = fs.readFileSync(path.join(NAVDATA_DIR, 'earth_fix.dat'), 'utf-8');
     for (const line of fixFile.split('\n')) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 3) continue;
-      if (missingSet.has(parts[2]) && !wpLookup.has(parts[2])) {
+      if (missingSet.has(parts[2])) {
         const lat = parseFloat(parts[0]), lon = parseFloat(parts[1]);
         if (!isNaN(lat) && !isNaN(lon)) {
-          wpLookup.set(parts[2], { ident: parts[2], lat, lon });
-          missingSet.delete(parts[2]);
+          if (!candidates[parts[2]]) candidates[parts[2]] = [];
+          const dist = haversineNm(mid.lat, mid.lon, lat, lon);
+          candidates[parts[2]].push({ ident: parts[2], lat, lon, dist });
         }
       }
-      if (missingSet.size === 0) break;
+    }
+    // Pick closest candidate for each missing fix
+    for (const [name, options] of Object.entries(candidates)) {
+      if (wpLookup.has(name)) continue;
+      options.sort((a, b) => a.dist - b.dist);
+      wpLookup.set(name, options[0]);
     }
   }
 
@@ -364,8 +375,9 @@ async function main() {
       awyGraph[name][fix1].push({ fix: fix2, lat: lat2, lon: lon2 });
       awyGraph[name][fix2].push({ fix: fix1, lat: lat1, lon: lon1 });
       // Also add to wpLookup
-      if (!wpLookup.has(fix1)) wpLookup.set(fix1, { ident: fix1, lat: lat1, lon: lon1 });
-      if (!wpLookup.has(fix2)) wpLookup.set(fix2, { ident: fix2, lat: lat2, lon: lon2 });
+      // Only add to wpLookup if reasonably close to the route (avoid global duplicates)
+      if (!wpLookup.has(fix1) && haversineNm(mid.lat, mid.lon, lat1, lon1) < dist + 500) wpLookup.set(fix1, { ident: fix1, lat: lat1, lon: lon1 });
+      if (!wpLookup.has(fix2) && haversineNm(mid.lat, mid.lon, lat2, lon2) < dist + 500) wpLookup.set(fix2, { ident: fix2, lat: lat2, lon: lon2 });
     }
 
     // Expand airway between two fixes using BFS
@@ -403,7 +415,7 @@ async function main() {
         // Skip first element (already added) and add the rest
         for (let j = 1; j < expanded.length; j++) expandedFixes.push(expanded[j]);
         i += 2; // skip the airway and the next fix (already added via expansion)
-      } else if (!isAirway) {
+      } else if (!isAirway && current !== 'DCT') {
         expandedFixes.push(current);
         i++;
       } else {
@@ -411,11 +423,33 @@ async function main() {
       }
     }
 
+    // Parse coordinate waypoints (e.g. 66N071W, 5530N02000W, etc.)
+    function parseCoordWaypoint(name) {
+      // Format: DDN/SDDDW/E (e.g. 66N071W, 67N057W)
+      let m = name.match(/^(\d{2})([NS])(\d{2,3})([EW])$/);
+      if (m) {
+        const lat = parseInt(m[1]) * (m[2] === 'S' ? -1 : 1);
+        const lon = parseInt(m[3]) * (m[4] === 'W' ? -1 : 1);
+        return { lat, lon };
+      }
+      // Format: DDMMN/SDDDMME/W (e.g. 5530N02000W)
+      m = name.match(/^(\d{2})(\d{2})([NS])(\d{3})(\d{2})([EW])$/);
+      if (m) {
+        const lat = (parseInt(m[1]) + parseInt(m[2]) / 60) * (m[3] === 'S' ? -1 : 1);
+        const lon = (parseInt(m[4]) + parseInt(m[5]) / 60) * (m[6] === 'W' ? -1 : 1);
+        return { lat, lon };
+      }
+      return null;
+    }
+
     // Build route points from expanded fixes
     const routePoints = [{ lat: depAirport.lat, lon: depAirport.lon, name: FROM }];
     for (const name of expandedFixes) {
       const wp = wpLookup.get(name);
-      if (wp) routePoints.push({ lat: wp.lat, lon: wp.lon, name });
+      if (wp) { routePoints.push({ lat: wp.lat, lon: wp.lon, name }); continue; }
+      const coord = parseCoordWaypoint(name);
+      if (coord) { routePoints.push({ lat: coord.lat, lon: coord.lon, name }); continue; }
+      // Skip DCT and other non-waypoint tokens
     }
     routePoints.push({ lat: arrAirport.lat, lon: arrAirport.lon, name: TO });
 
@@ -428,6 +462,13 @@ async function main() {
       L.push(`${LEG_NAME.padEnd(14)} ${coordPair(deduped[i].lat, deduped[i].lon)} ${coordPair(deduped[i + 1].lat, deduped[i + 1].lon)}`);
     }
     console.log(`  Route: ${deduped.length} waypoints (expanded from "${ATC_ROUTE}")`);
+    // Re-parse FIRs using actual route waypoints instead of straight line
+    routeFirs = parseRouteFIRs(FIR_GEOJSON, depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon, deduped);
+    console.log(`  ${routeFirs.length} FIRs along actual route`);
+    // Now parse VATSpy with correct FIR IDs from actual route
+    const transitFirIds = routeFirs.map(f => f.icao);
+    vatspy = parseVATSpyForFIRs(VATSPY_DAT, FIR_BOUNDS, transitFirIds);
+    console.log(`  ${vatspy.positions.length} VATSIM positions, ${vatspy.radars.length} radar sites for ${vatspy.firBounds.length} FIRs`);
   }
   L.push('');
 
@@ -579,15 +620,19 @@ async function main() {
   // Real VATSIM FIR/sector positions from VATSpy with XP12 frequencies
   const addedPrefixes = new Set();
   const positionShortIds = []; // collect short IDs for OWNER line
+  const firFreqIndex = {}; // track which freq to assign next per FIR
   for (const vp of vatspy.positions) {
     if (addedPrefixes.has(vp.callsign)) continue;
     addedPrefixes.add(vp.callsign);
     const shortId = vp.callsign;
     positionShortIds.push(shortId);
-    // Look up FIR frequency from XP12 (use first CTR freq for the FIR)
+    // Distribute FIR frequencies across sub-sectors
     const firBase = vp.firId.split('-')[0];
     const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
-    const primaryFreq = firFreqs[0] || '199.998';
+    if (!firFreqIndex[firBase]) firFreqIndex[firBase] = 0;
+    const freqIdx = firFreqIndex[firBase] % Math.max(firFreqs.length, 1);
+    const primaryFreq = firFreqs[freqIdx] || '199.998';
+    firFreqIndex[firBase]++;
     E.push(`${vp.callsign}_CTR:${vp.name}:${primaryFreq}:${shortId}:C:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
     // Add wildcard freq for any-frequency matching
     if (primaryFreq !== '199.998') {
@@ -706,9 +751,12 @@ async function main() {
     `RecentFiles\tRecent5\t\\..\\Data\\ASR\\${LEG_NAME}_${TO}_APP.asr`,
     `Plugins\tPlugin0\t\\..\\Data\\Plugin\\vSMR\\vSMR.dll`,
     `Plugins\tPlugin0Display0\tSMR radar display`,
-    `Plugins\tPlugin1\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
+    `Plugins\tPlugin1\t\\..\\Data\\Plugin\\UKControllerPlugin.dll`,
     `Plugins\tPlugin1Display0\tStandard ES radar screen`,
     `Plugins\tPlugin1Display1\tSMR radar display`,
+    `Plugins\tPlugin2\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
+    `Plugins\tPlugin2Display0\tStandard ES radar screen`,
+    `Plugins\tPlugin2Display1\tSMR radar display`,
     `LastSession\tserver\tAUTOMATIC`,
     `LastSession\tcallsign\t${FROM}_OBS`,
   ];
@@ -724,11 +772,11 @@ async function main() {
     const hasTwr = !!aptFreqs.find(f => f.role === 'twr');
     const hasApp = !!aptFreqs.find(f => f.role === 'tracon');
     const hasGnd = !!aptFreqs.find(f => f.role === 'gnd');
-    for (const { s, n, r, f } of [{s:'OBS',n:'Observer',r:100,f:0},{s:'APP',n:'Approach',r:100,f:5},{s:'TWR',n:'Tower',r:30,f:4},{s:'GND',n:'Ground',r:20,f:3},{s:'DEL',n:'Delivery',r:20,f:2}]) {
+    for (const { s, n, r, f } of [{s:'APP',n:'Approach',r:100,f:5},{s:'TWR',n:'Tower',r:30,f:4},{s:'GND',n:'Ground',r:20,f:3},{s:'DEL',n:'Delivery',r:20,f:2}]) {
       const isReal = s === 'OBS' || (s === 'TWR' && hasTwr) || (s === 'APP' && hasApp) || (s === 'GND' && hasGnd);
       profLines.push(`PROFILE:${icao}_${s}:${r}:${f}`);
-      profLines.push(`ATIS2:${isReal ? `${icao} ${n}` : 'WorldFlight Temporary Position'}`);
-      profLines.push(`ATIS3:`);
+      profLines.push(`ATIS2:${icao} ${n}`);
+      profLines.push(`ATIS3:${isReal ? '' : 'WorldFlight Temporary Position'}`);
       profLines.push(`ATIS4:WorldFlight 2026`);
     }
   }
@@ -754,15 +802,20 @@ async function main() {
       voiceLines.push(`AG:${pos.callsign}:${pos.freq}`);
     }
   }
-  // Enroute CTR positions — primary freq per callsign
+  // Enroute CTR positions — distributed freqs per callsign
   const addedVoice = new Set();
+  const voiceFreqIndex = {};
   for (const vp of vatspy.positions) {
     if (addedVoice.has(vp.callsign)) continue;
     addedVoice.add(vp.callsign);
     const firBase = vp.firId.split('-')[0];
-    const primaryFreq = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs[0];
-    if (primaryFreq) {
-      voiceLines.push(`AG:${vp.callsign}_CTR:${primaryFreq}`);
+    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
+    if (!voiceFreqIndex[firBase]) voiceFreqIndex[firBase] = 0;
+    const freqIdx = voiceFreqIndex[firBase] % Math.max(firFreqs.length, 1);
+    const freq = firFreqs[freqIdx] || null;
+    voiceFreqIndex[firBase]++;
+    if (freq) {
+      voiceLines.push(`AG:${vp.callsign}_CTR:${freq}`);
     }
   }
   voiceLines.push('END');
@@ -794,7 +847,8 @@ async function main() {
   if (ATC_ROUTE) enroute.push(`Sids:${LEG_NAME}:`);
   enroute.push(
     `SHOWC:${FROM}_TWR:1`, `SHOWC:${TO}_TWR:1`,
-    'SHOWSB:1',
+    'SHOWC:1',
+    'SHOWSB:0',
     'ABOVE:0',
     'LEADER:3',
     'SHOWLEADER:1',
@@ -804,9 +858,19 @@ async function main() {
     'DISABLEPANNING:0',
     'DISABLEZOOMING:0',
     'DisplayRotation:0.00000',
-    'TAGFAMILY:AC-TopSky-Easy',
+    'TAGFAMILY:AC-TopSky',
     `m_Latitude:${mid.lat}`, `m_Longitude:${mid.lon}`,
     `m_Zoom:${enrZoom}`,
+    // UKCP display defaults
+    'PLUGIN:UK Controller Plugin:DisplayMinStack:0',
+    'PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0',
+    'PLUGIN:UK Controller Plugin:DisplayCountdown:1',
+    'PLUGIN:UK Controller Plugin:HistoryTrailDisplay:1',
+    'PLUGIN:UK Controller Plugin:HistoryTrailLength:15',
+    'PLUGIN:UK Controller Plugin:HistoryTrailDotSize:4',
+    'PLUGIN:UK Controller Plugin:HistoryTrailColour:255,130,20',
+    'PLUGIN:UK Controller Plugin:HistoryTrailDegrade:1',
+    'PLUGIN:UK Controller Plugin:HistoryTrailFade:1',
   );
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_Enroute.asr`), enroute.join('\r\n'), 'utf-8');
 

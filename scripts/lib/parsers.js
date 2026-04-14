@@ -176,7 +176,7 @@ export function parseCIFP(filePath, icao) {
  * Samples points along the great circle between centers, checks which FIR each point is in.
  * Returns unique FIRs with their polygon boundary points for SCT [ARTCC] output.
  */
-export function parseRouteFIRs(geojsonPath, depLat, depLon, arrLat, arrLon) {
+export function parseRouteFIRs(geojsonPath, depLat, depLon, arrLat, arrLon, routePoints = null) {
   if (!fs.existsSync(geojsonPath)) return [];
   const data = JSON.parse(fs.readFileSync(geojsonPath, 'utf-8'));
   const features = data.features || [];
@@ -210,14 +210,30 @@ export function parseRouteFIRs(geojsonPath, depLat, depLon, arrLat, arrLon) {
     return null;
   }
 
-  // Sample 100 points along route to find transited top-level FIRs
+  // Sample points along route to find transited top-level FIRs
   const transitTopFirs = new Set();
-  for (let i = 0; i <= 100; i++) {
-    const frac = i / 100;
-    const lat = depLat + (arrLat - depLat) * frac;
-    const lon = depLon + (arrLon - depLon) * frac;
-    const fir = getFirAtPoint(lat, lon);
-    if (fir) transitTopFirs.add(fir);
+  if (routePoints && routePoints.length >= 2) {
+    // Sample along actual route waypoints
+    for (let seg = 0; seg < routePoints.length - 1; seg++) {
+      const p1 = routePoints[seg], p2 = routePoints[seg + 1];
+      const samples = 10;
+      for (let s = 0; s <= samples; s++) {
+        const frac = s / samples;
+        const lat = p1.lat + (p2.lat - p1.lat) * frac;
+        const lon = p1.lon + (p2.lon - p1.lon) * frac;
+        const fir = getFirAtPoint(lat, lon);
+        if (fir) transitTopFirs.add(fir);
+      }
+    }
+  } else {
+    // Fallback: straight line between dep/arr
+    for (let i = 0; i <= 100; i++) {
+      const frac = i / 100;
+      const lat = depLat + (arrLat - depLat) * frac;
+      const lon = depLon + (arrLon - depLon) * frac;
+      const fir = getFirAtPoint(lat, lon);
+      if (fir) transitTopFirs.add(fir);
+    }
   }
 
   // Collect ALL features (including sub-sectors) that belong to transited FIRs

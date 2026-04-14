@@ -1,0 +1,19 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:EGPN:symbol
+Airports:EGPN:name
+Runways:EGPN:09:centerline
+Runways:EGPN:27:centerline
+Sids:EGPN-09
+Sids:EGPN-27
+SHOWC:EGPN_TWR:1
+SHOWC:1
+SHOWSB:0
+TAGFAMILY:AC-TopSky
+m_Latitude:56.45249938964844
+m_Longitude:-3.025830030441284
+m_Zoom:7
+PLUGIN:UK Controller Plugin:DisplayMinStack:0
+PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0
+PLUGIN:UK Controller Plugin:DisplayCountdown:1
