@@ -1,5 +1,4 @@
-Settings	SettingsfileSYMBOLOGY	\..\Data\Settings\Symbology.txt
-Settings	SettingsfileTAGS	\..\Data\Settings\Tags.txt
+Settings	SettingsfileSYMBOLOGY	\..\Data\Settings\Symbology_Enroute.txt
 Settings	SettingsfileSCREEN	\..\Data\Settings\Screen.txt
 Settings	Settingsfile	\..\Data\Settings\General.txt
 Settings	SettingsfilePROFILE	\..\Data\Settings\Profiles_WF2601.txt

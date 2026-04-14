@@ -221,15 +221,16 @@ async function main() {
 
   // INFO centered on departure
   L.push('[INFO]');
-  L.push(LEG_NAME);
+  L.push('');
+  L.push(`${LEG_NAME} (${FROM} -> ${TO})`);
   L.push(`${FROM}_CTR`);
   L.push(FROM);
   L.push(coordPair(depAirport.lat, depAirport.lon).split(' ')[0]);
   L.push(coordPair(depAirport.lat, depAirport.lon).split(' ')[1]);
   L.push('60');
-  L.push('38');
-  L.push('0');
+  L.push('36.06');
   L.push('1.0');
+  L.push('10');
   L.push('');
 
   // Both airports
@@ -538,7 +539,7 @@ async function main() {
   E.push('[POSITIONS]');
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
     for (const pos of [{s:'OBS',n:'Observer',f:'199.998'},{s:'DEL',n:'Delivery',f:'121.700'},{s:'GND',n:'Ground',f:'121.800'},{s:'TWR',n:'Tower',f:'118.500'},{s:'APP',n:'Approach',f:'119.000'}]) {
-      E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.s.charAt(0)}:${icao}:${pos.s}:-:-:0100:0177:35:${coordPair(apt.lat, apt.lon)}`);
+      E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.s.charAt(0)}:${icao}:${pos.s}:-:-:0100:0177:${coordPair(apt.lat, apt.lon).replace(' ', ':')}`);
     }
   }
   E.push('');
@@ -600,7 +601,7 @@ async function main() {
   fs.mkdirSync(prfDir, { recursive: true });
   const prf = [
     `Settings\tSettingsfileSYMBOLOGY\t\\..\\Data\\Settings\\Symbology_Enroute.txt`,
-    `Settings\tSettingsfileTAGS\t\\..\\Data\\Settings\\Tags.txt`,
+    // Tags.txt removed - use EuroScope built-in tags (UK Tags.txt requires TopSky/UKCP plugins)
     `Settings\tSettingsfileSCREEN\t\\..\\Data\\Settings\\Screen.txt`,
     `Settings\tSettingsfile\t\\..\\Data\\Settings\\General.txt`,
     `Settings\tSettingsfilePROFILE\t\\..\\Data\\Settings\\Profiles_${LEG_NAME}.txt`,
@@ -627,7 +628,7 @@ async function main() {
     `RecentFiles\tRecent5\t\\..\\Data\\ASR\\${LEG_NAME}_${TO}_APP.asr`,
     `Plugins\tPlugin0\t\\..\\Data\\Plugin\\vSMR\\vSMR.dll`,
     `Plugins\tPlugin0Display0\tSMR radar display`,
-    // TopSky disabled until rendering issue resolved
+    // TopSky disabled - causes crash on connect
     // `Plugins\tPlugin1\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
     // `Plugins\tPlugin1Display0\tStandard ES radar screen`,
     // `Plugins\tPlugin1Display1\tSMR radar display`,

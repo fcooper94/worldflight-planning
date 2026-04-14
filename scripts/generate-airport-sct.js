@@ -199,7 +199,7 @@ async function main() {
   E.push('');
   E.push('[POSITIONS]');
   for (const pos of [{s:'OBS',n:'Observer',f:'199.998'},{s:'DEL',n:'Delivery',f:'121.700'},{s:'GND',n:'Ground',f:'121.800'},{s:'TWR',n:'Tower',f:'118.500'},{s:'APP',n:'Approach',f:'119.000'}]) {
-    E.push(`${ICAO}_${pos.s}:${airport.name} ${pos.n}:${pos.f}:${ICAO}:${pos.s.charAt(0)}:${ICAO}:${pos.s}:-:-:0100:0177:35:${coordPair(airport.lat, airport.lon)}`);
+    E.push(`${ICAO}_${pos.s}:${airport.name} ${pos.n}:${pos.f}:${ICAO}:${pos.s.charAt(0)}:${ICAO}:${pos.s}:-:-:0100:0177:${coordPair(airport.lat, airport.lon).replace(' ', ':')}`);
   }
   E.push('');
   E.push('[SIDSSTARS]');
