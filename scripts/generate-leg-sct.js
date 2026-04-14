@@ -591,10 +591,86 @@ async function main() {
   const xp12Freqs = parseXP12Frequencies(XP12_ATC);
   const afvFreqs = parseAFVStations(AFV_STATIONS);
   // Helper: look up frequency from AFV first, then XP12 fallback
+  // Tries multiple callsign variants for regional naming conventions
   const getFreq = (callsign, xp12Role, xp12Icao) => {
     if (afvFreqs[callsign]) return afvFreqs[callsign];
+    // Extract ICAO and suffix (e.g. KLAX_TWR -> KLAX + _TWR)
+    const underIdx = callsign.indexOf('_');
+    if (underIdx > 0) {
+      const icaoPart = callsign.substring(0, underIdx);
+      const suffix = callsign.substring(underIdx);
+      // US: KLAX -> LAX (drop K)
+      if (icaoPart.startsWith('K') && icaoPart.length === 4) {
+        const us = icaoPart.substring(1) + suffix;
+        if (afvFreqs[us]) return afvFreqs[us];
+      }
+      // Canada: CYVR -> YVR (drop C)
+      if (icaoPart.startsWith('C') && icaoPart.length === 4) {
+        const ca = icaoPart.substring(1) + suffix;
+        if (afvFreqs[ca]) return afvFreqs[ca];
+      }
+      // Australia: YSSY -> SY (drop Y, take last 2 chars)
+      if (icaoPart.startsWith('Y') && icaoPart.length === 4) {
+        const au = icaoPart.substring(2) + suffix;
+        if (afvFreqs[au]) return afvFreqs[au];
+      }
+      // Generic: try last 2 or 3 chars of ICAO
+      if (icaoPart.length === 4) {
+        const short3 = icaoPart.substring(1) + suffix;
+        const short2 = icaoPart.substring(2) + suffix;
+        if (afvFreqs[short3]) return afvFreqs[short3];
+        if (afvFreqs[short2]) return afvFreqs[short2];
+      }
+    }
     const xp12 = xp12Freqs[xp12Icao]?.find(f => f.role === xp12Role)?.freqs[0];
     return xp12 || null;
+  };
+  // Convert ICAO callsign to AFV callsign (KLAX_TWR -> LAX_TWR, YSSY_GND -> SY_GND)
+  const toAFVCallsign = (callsign) => {
+    const underIdx = callsign.indexOf('_');
+    if (underIdx <= 0) return callsign;
+    const icaoPart = callsign.substring(0, underIdx);
+    const suffix = callsign.substring(underIdx);
+    // Try exact first
+    if (afvFreqs[callsign]) return callsign;
+    // US: KLAX -> LAX
+    if (icaoPart.startsWith('K') && icaoPart.length === 4) {
+      const us = icaoPart.substring(1) + suffix;
+      if (afvFreqs[us]) return us;
+    }
+    // Canada: CYVR -> YVR
+    if (icaoPart.startsWith('C') && icaoPart.length === 4) {
+      const ca = icaoPart.substring(1) + suffix;
+      if (afvFreqs[ca]) return ca;
+    }
+    // Australia: YSSY -> SY
+    if (icaoPart.startsWith('Y') && icaoPart.length === 4) {
+      const au = icaoPart.substring(2) + suffix;
+      if (afvFreqs[au]) return au;
+    }
+    // Generic: try 3 or 2 char
+    if (icaoPart.length === 4) {
+      const s3 = icaoPart.substring(1) + suffix;
+      if (afvFreqs[s3]) return s3;
+      const s2 = icaoPart.substring(2) + suffix;
+      if (afvFreqs[s2]) return s2;
+    }
+    return callsign; // fallback to original
+  };
+
+  // Same lookup for AFV existence check
+  const inAFV = (callsign) => {
+    if (afvFreqs[callsign]) return true;
+    const underIdx = callsign.indexOf('_');
+    if (underIdx <= 0) return false;
+    const icaoPart = callsign.substring(0, underIdx);
+    const suffix = callsign.substring(underIdx);
+    if (icaoPart.startsWith('K') && icaoPart.length === 4 && afvFreqs[icaoPart.substring(1) + suffix]) return true;
+    if (icaoPart.startsWith('C') && icaoPart.length === 4 && afvFreqs[icaoPart.substring(1) + suffix]) return true;
+    if (icaoPart.startsWith('Y') && icaoPart.length === 4 && afvFreqs[icaoPart.substring(2) + suffix]) return true;
+    if (icaoPart.length === 4 && afvFreqs[icaoPart.substring(1) + suffix]) return true;
+    if (icaoPart.length === 4 && afvFreqs[icaoPart.substring(2) + suffix]) return true;
+    return false;
   };
 
   // Airport-specific positions with real freqs (AFV first, XP12 fallback)
@@ -773,17 +849,21 @@ async function main() {
     const hasApp = !!aptFreqs.find(f => f.role === 'tracon');
     const hasGnd = !!aptFreqs.find(f => f.role === 'gnd');
     for (const { s, n, r, f } of [{s:'APP',n:'Approach',r:100,f:5},{s:'TWR',n:'Tower',r:30,f:4},{s:'GND',n:'Ground',r:20,f:3},{s:'DEL',n:'Delivery',r:20,f:2}]) {
-      const isReal = s === 'OBS' || (s === 'TWR' && hasTwr) || (s === 'APP' && hasApp) || (s === 'GND' && hasGnd);
-      profLines.push(`PROFILE:${icao}_${s}:${r}:${f}`);
-      profLines.push(`ATIS2:${icao} ${n}`);
-      profLines.push(`ATIS3:${isReal ? '' : 'WorldFlight Temporary Position'}`);
+      const icaoCallsign = `${icao}_${s}`;
+      if (!inAFV(icaoCallsign)) continue;
+      const afvCallsign = toAFVCallsign(icaoCallsign);
+      profLines.push(`PROFILE:${afvCallsign}:${r}:${f}`);
+      profLines.push(`ATIS2:${afvCallsign.split('_')[0]} ${n}`);
+      profLines.push(`ATIS3:`);
       profLines.push(`ATIS4:WorldFlight 2026`);
     }
   }
-  // Enroute CTR positions from VATSpy with XP12 frequencies
+  // Enroute CTR positions — only those in AFV
   for (const vp of vatspy.positions) {
     if (addedPrefixes.has('PROF_' + vp.callsign)) continue;
     addedPrefixes.add('PROF_' + vp.callsign);
+    const callsign = `${vp.callsign}_CTR`;
+    if (!inAFV(callsign)) continue; // Skip if not in AFV
     const firBase = vp.firId.split('-')[0];
     const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
     profLines.push(`PROFILE:${vp.callsign}_CTR:300:6`);
@@ -796,21 +876,26 @@ async function main() {
 
   // ===== VOICE SETUP =====
   const voiceLines = ['VOICE'];
-  // Airport frequencies — all positions
+  // Airport frequencies — only AFV-listed positions
   for (const [icao] of [[FROM], [TO]]) {
     for (const pos of (airportPositions[icao] || [])) {
-      voiceLines.push(`AG:${pos.callsign}:${pos.freq}`);
+      if (!inAFV(pos.callsign)) continue;
+      const afvCs = toAFVCallsign(pos.callsign);
+      const freq = afvFreqs[afvCs];
+      if (freq) {
+        voiceLines.push(`AG:${afvCs}:${freq}`);
+      }
     }
   }
-  // Enroute CTR positions — real AFV freqs
+  // Enroute CTR positions — only AFV-listed
   const addedVoice = new Set();
   for (const vp of vatspy.positions) {
     if (addedVoice.has(vp.callsign)) continue;
     addedVoice.add(vp.callsign);
-    const firBase = vp.firId.split('-')[0];
-    const freq = getFreq(`${vp.callsign}_CTR`, 'ctr', firBase);
+    const callsign = `${vp.callsign}_CTR`;
+    const freq = afvFreqs[callsign];
     if (freq) {
-      voiceLines.push(`AG:${vp.callsign}_CTR:${freq}`);
+      voiceLines.push(`AG:${callsign}:${freq}`);
     }
   }
   voiceLines.push('END');
