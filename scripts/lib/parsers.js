@@ -362,3 +362,43 @@ export function parseVATSpyForFIRs(vatspyPath, firBoundariesPath, transitFirIds)
 
   return { positions, radars, firBounds, firPositions };
 }
+
+/**
+ * Parse XP12 ATC data to get real frequencies for positions.
+ * Returns map of ICAO -> { role, freqs[] }
+ */
+export function parseXP12Frequencies(atcDatPath) {
+  if (!fs.existsSync(atcDatPath)) return {};
+  const content = fs.readFileSync(atcDatPath, 'utf-8');
+  const result = {};
+  let currentId = null;
+  let currentRole = null;
+  let currentFreqs = [];
+
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('FACILITY_ID ')) {
+      if (currentId && currentRole && currentFreqs.length > 0) {
+        if (!result[currentId]) result[currentId] = [];
+        result[currentId].push({ role: currentRole, freqs: [...currentFreqs] });
+      }
+      currentId = trimmed.split(' ')[1];
+      currentRole = null;
+      currentFreqs = [];
+    } else if (trimmed.startsWith('ROLE ')) {
+      currentRole = trimmed.split(' ')[1];
+    } else if (trimmed.startsWith('FREQ ') || trimmed.startsWith('CHAN ')) {
+      const raw = parseInt(trimmed.split(' ')[1]);
+      if (!isNaN(raw)) {
+        // Convert: 11870 -> 118.700, 118480 -> 118.480
+        const freq = raw > 100000 ? (raw / 1000).toFixed(3) : (raw / 100).toFixed(3);
+        if (!currentFreqs.includes(freq)) currentFreqs.push(freq);
+      }
+    }
+  }
+  if (currentId && currentRole && currentFreqs.length > 0) {
+    if (!result[currentId]) result[currentId] = [];
+    result[currentId].push({ role: currentRole, freqs: [...currentFreqs] });
+  }
+  return result;
+}

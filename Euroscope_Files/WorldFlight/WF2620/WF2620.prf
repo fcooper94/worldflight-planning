@@ -3,6 +3,7 @@ Settings	SettingsfileTAGS	\..\Data\Settings\Tags.txt
 Settings	SettingsfileSCREEN	\..\Data\Settings\Screen.txt
 Settings	Settingsfile	\..\Data\Settings\General.txt
 Settings	SettingsfilePROFILE	\..\Data\Settings\Profiles_WF2620.txt
+Settings	SettingsfileVOICE	\..\Data\Settings\Voice_WF2620.txt
 Settings	SettingsfileARR	\..\Data\Settings\Lists.txt
 Settings	SettingsfileDEP	\..\Data\Settings\Lists.txt
 Settings	SettingsfileFP	\..\Data\Settings\Lists.txt

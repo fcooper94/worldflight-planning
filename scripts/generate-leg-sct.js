@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { decimalToDMS, coordPair, bearing, projectPoint, haversineNm, midpoint } from './lib/geo.js';
-import { parseFixes, parseNavaids, parseAirways, parseCIFP, parseRouteFIRs, parseVATSpyForFIRs } from './lib/parsers.js';
+import { parseFixes, parseNavaids, parseAirways, parseCIFP, parseRouteFIRs, parseVATSpyForFIRs, parseXP12Frequencies } from './lib/parsers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prisma = new PrismaClient();
@@ -21,6 +21,7 @@ const CIFP_DIR = path.join(__dirname, '..', 'data', 'XP12', 'CIFP');
 const FIR_GEOJSON = path.join(__dirname, '..', 'public', 'fir-boundaries.geojson');
 const VATSPY_DAT = path.join(__dirname, '..', 'data', 'VATSPY', 'VATSpy.dat');
 const FIR_BOUNDS = path.join(__dirname, '..', 'data', 'VATSPY', 'FIRBoundaries.dat');
+const XP12_ATC = path.join(__dirname, '..', 'data', 'XP12', '1200 atc data', 'Earth nav data', 'atc.dat');
 const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
 function loadGround(icao) {
@@ -544,23 +545,40 @@ async function main() {
   E.push(`; ${LEG_NAME} Extended Sector File (${FROM} -> ${TO})`);
   E.push('');
   E.push('[POSITIONS]');
-  // Airport-specific positions (DEL/GND/TWR/APP)
+  // Parse XP12 ATC frequencies
+  const xp12Freqs = parseXP12Frequencies(XP12_ATC);
+
+  // Airport-specific positions (DEL/GND/TWR/APP) with real freqs from XP12
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
-    for (const pos of [{s:'OBS',n:'Observer',f:'199.998'},{s:'DEL',n:'Delivery',f:'121.700'},{s:'GND',n:'Ground',f:'121.800'},{s:'TWR',n:'Tower',f:'118.500'},{s:'APP',n:'Approach',f:'119.000'}]) {
-      E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.s.charAt(0)}:${icao}:${pos.s}:-:-:0100:0177:${coordPair(apt.lat, apt.lon).replace(' ', ':')}`);
+    const aptFreqs = xp12Freqs[icao] || [];
+    const twrFreq = aptFreqs.find(f => f.role === 'twr')?.freqs[0] || '118.500';
+    const appFreq = aptFreqs.find(f => f.role === 'tracon')?.freqs[0] || '119.000';
+    const gndFreq = aptFreqs.find(f => f.role === 'gnd')?.freqs[0] || '121.800';
+    for (const pos of [{s:'OBS',n:'Observer',f:'199.998',c:'O'},{s:'DEL',n:'Delivery',f:'121.700',c:'D'},{s:'GND',n:'Ground',f:gndFreq,c:'G'},{s:'TWR',n:'Tower',f:twrFreq,c:'T'},{s:'APP',n:'Approach',f:appFreq,c:'A'}]) {
+      E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coordPair(apt.lat, apt.lon).replace(' ', ':')}`);
+      // Add wildcard freq duplicate for matching any connection
+      if (pos.f !== '199.998') {
+        E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:199.998:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coordPair(apt.lat, apt.lon).replace(' ', ':')}`);
+      }
     }
   }
-  // Real VATSIM FIR/sector positions from VATSpy (CTR, APP, etc.)
+  // Real VATSIM FIR/sector positions from VATSpy with XP12 frequencies
   const addedPrefixes = new Set();
   const positionShortIds = []; // collect short IDs for OWNER line
   for (const vp of vatspy.positions) {
     if (addedPrefixes.has(vp.callsign)) continue;
     addedPrefixes.add(vp.callsign);
-    const facilityChar = 'C';
-    // Short ID: use callsign prefix as-is (matches UK pattern)
     const shortId = vp.callsign;
     positionShortIds.push(shortId);
-    E.push(`${vp.callsign}_CTR:${vp.name}:199.998:${shortId}:${facilityChar}:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
+    // Look up FIR frequency from XP12 (use first CTR freq for the FIR)
+    const firBase = vp.firId.split('-')[0];
+    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
+    const primaryFreq = firFreqs[0] || '199.998';
+    E.push(`${vp.callsign}_CTR:${vp.name}:${primaryFreq}:${shortId}:C:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
+    // Add wildcard freq for any-frequency matching
+    if (primaryFreq !== '199.998') {
+      E.push(`${vp.callsign}_CTR:${vp.name}:199.998:${shortId}:C:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
+    }
   }
   E.push('');
   E.push('[SIDSSTARS]');
@@ -650,6 +668,7 @@ async function main() {
     `Settings\tSettingsfileSCREEN\t\\..\\Data\\Settings\\Screen.txt`,
     `Settings\tSettingsfile\t\\..\\Data\\Settings\\General.txt`,
     `Settings\tSettingsfilePROFILE\t\\..\\Data\\Settings\\Profiles_${LEG_NAME}.txt`,
+    `Settings\tSettingsfileVOICE\t\\..\\Data\\Settings\\Voice_${LEG_NAME}.txt`,
     `Settings\tSettingsfileARR\t\\..\\Data\\Settings\\Lists.txt`,
     `Settings\tSettingsfileDEP\t\\..\\Data\\Settings\\Lists.txt`,
     `Settings\tSettingsfileFP\t\\..\\Data\\Settings\\Lists.txt`,
@@ -685,7 +704,10 @@ async function main() {
   const profilesDir = path.join(OUTPUT_DIR, 'Data', 'Settings');
   fs.mkdirSync(profilesDir, { recursive: true });
   const profLines = ['PROFILE'];
+  // Airport positions (DEL/GND/TWR/APP/OBS)
   for (const [icao] of [[FROM], [TO]]) {
+    const aptFreqs = xp12Freqs[icao] || [];
+    const twrFreq = aptFreqs.find(f => f.role === 'twr')?.freqs[0] || '118.500';
     for (const { s, n, r, f } of [{s:'OBS',n:'Observer',r:100,f:0},{s:'APP',n:'Approach',r:100,f:5},{s:'TWR',n:'Tower',r:30,f:4},{s:'GND',n:'Ground',r:20,f:3},{s:'DEL',n:'Delivery',r:20,f:2}]) {
       profLines.push(`PROFILE:${icao}_${s}:${r}:${f}`);
       profLines.push(`ATIS2:${icao} ${n}`);
@@ -693,8 +715,46 @@ async function main() {
       profLines.push(`ATIS4:WorldFlight 2026`);
     }
   }
+  // Enroute CTR positions from VATSpy with XP12 frequencies
+  for (const vp of vatspy.positions) {
+    if (addedPrefixes.has('PROF_' + vp.callsign)) continue;
+    addedPrefixes.add('PROF_' + vp.callsign);
+    const firBase = vp.firId.split('-')[0];
+    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
+    profLines.push(`PROFILE:${vp.callsign}_CTR:300:6`);
+    profLines.push(`ATIS2:${vp.name}`);
+    profLines.push(`ATIS3:`);
+    profLines.push(`ATIS4:WorldFlight 2026`);
+  }
   profLines.push('END');
   fs.writeFileSync(path.join(profilesDir, `Profiles_${LEG_NAME}.txt`), profLines.join('\r\n'), 'utf-8');
+
+  // ===== VOICE SETUP =====
+  const voiceLines = ['VOICE'];
+  // Airport frequencies
+  for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
+    const aptFreqs = xp12Freqs[icao] || [];
+    for (const entry of aptFreqs) {
+      const roleName = entry.role === 'twr' ? 'TWR' : entry.role === 'tracon' ? 'APP' : entry.role === 'gnd' ? 'GND' : 'CTR';
+      for (const freq of entry.freqs) {
+        voiceLines.push(`AG:${icao} ${roleName}:${freq}`);
+      }
+    }
+  }
+  // Enroute FIR frequencies
+  const addedVoiceFreqs = new Set();
+  for (const vp of vatspy.positions) {
+    const firBase = vp.firId.split('-')[0];
+    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
+    for (const freq of firFreqs) {
+      const key = `${vp.name}:${freq}`;
+      if (addedVoiceFreqs.has(key)) continue;
+      addedVoiceFreqs.add(key);
+      voiceLines.push(`AG:${vp.callsign}_CTR - ${vp.name}:${freq}`);
+    }
+  }
+  voiceLines.push('END');
+  fs.writeFileSync(path.join(profilesDir, `Voice_${LEG_NAME}.txt`), voiceLines.join('\r\n'), 'utf-8');
 
   // ===== ASR FILES =====
   const asrDir = path.join(OUTPUT_DIR, 'Data', 'ASR');

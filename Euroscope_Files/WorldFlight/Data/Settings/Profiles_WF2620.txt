@@ -39,4 +39,48 @@ PROFILE:FKKD_DEL:20:2
 ATIS2:FKKD Delivery
 ATIS3:
 ATIS4:WorldFlight 2026
+PROFILE:FACA_E_CTR:300:6
+ATIS2:Cape Town ACC (East) - Cape Town
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FACA_W_CTR:300:6
+ATIS2:Cape Town ACC (West) - Cape Town
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_C_CTR:300:6
+ATIS2:Johannesburg ACC (Central) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_E_CTR:300:6
+ATIS2:Johannesburg ACC (East) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_N_CTR:300:6
+ATIS2:Johannesburg ACC (North) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_NE_CTR:300:6
+ATIS2:Johannesburg ACC (Sector 1) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_NW_CTR:300:6
+ATIS2:Johannesburg ACC (Sector 2) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_S_CTR:300:6
+ATIS2:Johannesburg ACC (South) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_SE_CTR:300:6
+ATIS2:Johannesburg ACC (Sector 3) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_SW_CTR:300:6
+ATIS2:Johannesburg ACC (Sector 4) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_W_CTR:300:6
+ATIS2:Johannesburg ACC (West) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
 END
