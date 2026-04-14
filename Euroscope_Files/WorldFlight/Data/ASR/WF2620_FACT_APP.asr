@@ -1,0 +1,17 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:FACT:symbol
+Airports:FACT:name
+Runways:FACT:01:centerline
+Runways:FACT:19:centerline
+Sids:FACT-01
+Sids:FACT-19
+Runways:FACT:16:centerline
+Runways:FACT:34:centerline
+Sids:FACT-16
+Sids:FACT-34
+SHOWC:FACT_TWR:1
+m_Latitude:-33.9648017883
+m_Longitude:18.6016998291
+m_Zoom:7

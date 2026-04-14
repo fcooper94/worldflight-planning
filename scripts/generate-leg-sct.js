@@ -714,6 +714,13 @@ async function main() {
     'DisplayTypeGeoReferenced:1',
     `Airports:${FROM}:symbol`, `Airports:${FROM}:name`,
     `Airports:${TO}:symbol`, `Airports:${TO}:name`,
+  ];
+  // Enable all FIR ARTCC boundaries
+  for (const fir of routeFirs) enroute.push(`ARTCC boundary:${fir.icao}:`);
+  // Enable coastline and route line
+  enroute.push('Geo:Coastline:');
+  if (ATC_ROUTE) enroute.push(`Sids:${LEG_NAME}:`);
+  enroute.push(
     `SHOWC:${FROM}_TWR:1`, `SHOWC:${TO}_TWR:1`,
     'SHOWSB:1',
     'ABOVE:0',
@@ -725,10 +732,10 @@ async function main() {
     'DISABLEPANNING:0',
     'DISABLEZOOMING:0',
     'DisplayRotation:0.00000',
-    'TAGFAMILY:Matias (built in)',
+    'TAGFAMILY:AC-TopSky-Easy',
     `m_Latitude:${mid.lat}`, `m_Longitude:${mid.lon}`,
     `m_Zoom:${enrZoom}`,
-  ];
+  );
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_Enroute.asr`), enroute.join('\r\n'), 'utf-8');
 
   // F4: Arrival SMR

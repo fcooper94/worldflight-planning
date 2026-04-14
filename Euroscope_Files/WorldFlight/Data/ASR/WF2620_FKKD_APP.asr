@@ -1,0 +1,13 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:FKKD:symbol
+Airports:FKKD:name
+Runways:FKKD:12:centerline
+Runways:FKKD:30:centerline
+Sids:FKKD-12
+Sids:FKKD-30
+SHOWC:FKKD_TWR:1
+m_Latitude:4.0060801506
+m_Longitude:9.719479560849999
+m_Zoom:7
