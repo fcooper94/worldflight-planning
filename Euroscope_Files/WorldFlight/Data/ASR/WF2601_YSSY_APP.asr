@@ -1,0 +1,21 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:YSSY:symbol
+Airports:YSSY:name
+Runways:YSSY:07:centerline
+Runways:YSSY:25:centerline
+Sids:YSSY-07
+Sids:YSSY-25
+Runways:YSSY:16L:centerline
+Runways:YSSY:34R:centerline
+Sids:YSSY-16L
+Sids:YSSY-34R
+Runways:YSSY:16R:centerline
+Runways:YSSY:34L:centerline
+Sids:YSSY-16R
+Sids:YSSY-34L
+SHOWC:YSSY_TWR:1
+m_Latitude:-33.946098
+m_Longitude:151.177002
+m_Zoom:7

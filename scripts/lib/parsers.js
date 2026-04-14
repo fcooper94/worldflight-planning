@@ -171,6 +171,82 @@ export function parseCIFP(filePath, icao) {
   return result.sort();
 }
 
+/**
+ * Parse GeoJSON FIR boundaries and find FIRs that the route transits.
+ * Samples points along the great circle between centers, checks which FIR each point is in.
+ * Returns unique FIRs with their polygon boundary points for SCT [ARTCC] output.
+ */
+export function parseRouteFIRs(geojsonPath, depLat, depLon, arrLat, arrLon) {
+  if (!fs.existsSync(geojsonPath)) return [];
+  const data = JSON.parse(fs.readFileSync(geojsonPath, 'utf-8'));
+  const features = data.features || [];
+
+  function pointInPolygon(lat, lon, coords) {
+    let inside = false;
+    for (let i = 0, j = coords.length - 1; i < coords.length; j = i++) {
+      const xi = coords[i][1], yi = coords[i][0]; // GeoJSON is [lon, lat]
+      const xj = coords[j][1], yj = coords[j][0];
+      if (((yi > lon) !== (yj > lon)) && (lat < (xj - xi) * (lon - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+
+  const FIR_ALIASES = { 'EGTL': 'EGTT' };
+  function baseFirCode(id) {
+    if (!id) return null;
+    const base = id.split('-')[0];
+    return FIR_ALIASES[base] || base;
+  }
+
+  function getFirAtPoint(lat, lon) {
+    for (const f of features) {
+      const geom = f.geometry;
+      if (!geom) continue;
+      const polys = geom.type === 'MultiPolygon' ? geom.coordinates : geom.type === 'Polygon' ? [geom.coordinates] : [];
+      for (const poly of polys) {
+        if (poly[0] && pointInPolygon(lat, lon, poly[0])) return baseFirCode(f.properties?.id);
+      }
+    }
+    return null;
+  }
+
+  // Sample 100 points along route to find transited top-level FIRs
+  const transitTopFirs = new Set();
+  for (let i = 0; i <= 100; i++) {
+    const frac = i / 100;
+    const lat = depLat + (arrLat - depLat) * frac;
+    const lon = depLon + (arrLon - depLon) * frac;
+    const fir = getFirAtPoint(lat, lon);
+    if (fir) transitTopFirs.add(fir);
+  }
+
+  // Collect ALL features (including sub-sectors) that belong to transited FIRs
+  const result = [];
+  const seen = new Set();
+  for (const f of features) {
+    const rawId = f.properties?.id;
+    if (!rawId) continue;
+    const topLevel = baseFirCode(rawId);
+    if (!transitTopFirs.has(topLevel)) continue;
+    // Include this feature (sub-sector or main)
+    if (seen.has(rawId)) continue;
+    seen.add(rawId);
+    const geom = f.geometry;
+    if (!geom) continue;
+    const polys = geom.type === 'MultiPolygon' ? geom.coordinates : geom.type === 'Polygon' ? [geom.coordinates] : [];
+    for (const poly of polys) {
+      const ring = poly[0];
+      if (!ring || ring.length < 3) continue;
+      result.push({
+        icao: rawId,
+        points: ring.map(c => ({ lat: c[1], lon: c[0] }))
+      });
+    }
+  }
+
+  return result;
+}
+
 export async function parseAirways(filePath, centers, radiusNm = 200) {
   const high = [];
   const low = [];

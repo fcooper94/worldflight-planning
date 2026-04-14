@@ -52,6 +52,18 @@ export function projectPoint(lat, lon, hdg, distNm) {
   return { lat: toDeg(lat2), lon: toDeg(lon2) };
 }
 
+export function midpoint(lat1, lon1, lat2, lon2) {
+  const toRad = d => d * Math.PI / 180;
+  const toDeg = r => r * 180 / Math.PI;
+  const φ1 = toRad(lat1), λ1 = toRad(lon1);
+  const φ2 = toRad(lat2), λ2 = toRad(lon2);
+  const Bx = Math.cos(φ2) * Math.cos(λ2 - λ1);
+  const By = Math.cos(φ2) * Math.sin(λ2 - λ1);
+  const φm = Math.atan2(Math.sin(φ1) + Math.sin(φ2), Math.sqrt((Math.cos(φ1) + Bx) ** 2 + By ** 2));
+  const λm = λ1 + Math.atan2(By, Math.cos(φ1) + Bx);
+  return { lat: toDeg(φm), lon: toDeg(λm) };
+}
+
 export function runwayLengthFt(lat1, lon1, lat2, lon2) {
   return haversineNm(lat1, lon1, lat2, lon2) * 6076.12;
 }

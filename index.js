@@ -14787,39 +14787,39 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
   const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
 
-  // Get unique airports from active event schedule
-  const scheduleAirports = new Set();
-  for (const row of adminSheetCache) {
-    if (row.from) scheduleAirports.add(row.from);
-    if (row.to) scheduleAirports.add(row.to);
-  }
-  const airports = [...scheduleAirports].sort();
+  // Get legs from active event schedule
+  const legs = adminSheetCache.filter(r => r.from && r.to && r.number).map(r => ({
+    number: r.number,
+    legName: `WF26${String(r.number).padStart(2, '0')}`,
+    from: r.from,
+    to: r.to,
+    route: r.atcRoute || ''
+  }));
 
   const content = `
     <section class="card card-full">
       <h2>Controller Pack Generator</h2>
       <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">
-        Generate EuroScope controller pack files (SCT, ESE, ASR, PRF) with ground layouts, navdata, SID/STARs, and vSMR profiles for WorldFlight airports.
+        Generate per-leg EuroScope packs. Each leg includes departure &amp; arrival ground layouts, navdata, SID/STARs, vSMR, and 5 ASR views (F1-F5).
       </p>
 
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px;">
-        <input type="text" id="addIcao" placeholder="Add ICAO..." style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);text-transform:uppercase;" maxlength="4" />
-        <button onclick="addAirport()" class="action-btn" style="padding:6px 16px;">Add</button>
         <div style="flex:1;"></div>
         <button onclick="toggleAll(true)" class="action-btn" style="padding:6px 12px;font-size:12px;">Select All</button>
         <button onclick="toggleAll(false)" class="action-btn" style="padding:6px 12px;font-size:12px;">Deselect All</button>
       </div>
 
-      <div id="airportList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:24px;">
-        ${airports.map(icao => `
-          <div class="cp-airport-row" data-icao="${icao}">
+      <div id="legList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:24px;">
+        ${legs.map(leg => `
+          <div class="cp-leg-row" data-leg="${leg.legName}" data-num="${leg.number}" data-from="${leg.from}" data-to="${leg.to}" data-route="${leg.route.replace(/"/g, '&quot;')}">
             <label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;">
-              <input type="checkbox" checked class="cp-toggle" data-icao="${icao}" />
-              <span style="font-weight:600;font-family:monospace;font-size:14px;">${icao}</span>
+              <input type="checkbox" checked class="cp-toggle" />
+              <span style="font-weight:600;font-family:monospace;font-size:14px;">${leg.legName}</span>
+              <span style="color:var(--muted);font-size:13px;">${leg.from} &rarr; ${leg.to}</span>
             </label>
             <div class="cp-progress" style="flex:2;display:none;">
               <div class="cp-progress-bar"><div class="cp-progress-fill"></div></div>
-              <span class="cp-progress-text" style="font-size:12px;color:var(--muted);min-width:80px;text-align:right;"></span>
+              <span class="cp-progress-text" style="font-size:12px;color:var(--muted);min-width:120px;text-align:right;"></span>
             </div>
             <span class="cp-status" style="font-size:12px;min-width:60px;text-align:right;"></span>
           </div>
@@ -14831,28 +14831,6 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
       </button>
 
       <script>
-        function addAirport() {
-          const input = document.getElementById('addIcao');
-          const icao = input.value.trim().toUpperCase();
-          if (!icao || icao.length < 3 || icao.length > 4) return;
-          if (document.querySelector('[data-icao="' + icao + '"]')) { input.value = ''; return; }
-          const row = document.createElement('div');
-          row.className = 'cp-airport-row';
-          row.dataset.icao = icao;
-          row.innerHTML = '<label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;">' +
-            '<input type="checkbox" checked class="cp-toggle" data-icao="' + icao + '" />' +
-            '<span style="font-weight:600;font-family:monospace;font-size:14px;">' + icao + '</span>' +
-            '</label>' +
-            '<div class="cp-progress" style="flex:2;display:none;">' +
-            '<div class="cp-progress-bar"><div class="cp-progress-fill"></div></div>' +
-            '<span class="cp-progress-text" style="font-size:12px;color:var(--muted);min-width:80px;text-align:right;"></span>' +
-            '</div>' +
-            '<span class="cp-status" style="font-size:12px;min-width:60px;text-align:right;"></span>';
-          document.getElementById('airportList').appendChild(row);
-          input.value = '';
-        }
-        document.getElementById('addIcao').addEventListener('keydown', e => { if (e.key === 'Enter') addAirport(); });
-
         function toggleAll(state) {
           document.querySelectorAll('.cp-toggle').forEach(cb => cb.checked = state);
         }
@@ -14861,33 +14839,33 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
           const btn = document.getElementById('generateBtn');
           btn.disabled = true;
           btn.textContent = 'Generating...';
-          const selected = [...document.querySelectorAll('.cp-toggle:checked')].map(cb => cb.dataset.icao);
+          const selected = [...document.querySelectorAll('.cp-leg-row')].filter(r => r.querySelector('.cp-toggle').checked).map(r => ({
+            number: r.dataset.num, from: r.dataset.from, to: r.dataset.to, legName: r.dataset.leg, route: r.dataset.route || ''
+          }));
           if (!selected.length) { btn.disabled = false; btn.textContent = 'Generate Controller Pack'; return; }
 
-          // Reset all statuses
-          document.querySelectorAll('.cp-airport-row').forEach(row => {
+          document.querySelectorAll('.cp-leg-row').forEach(row => {
             row.querySelector('.cp-status').textContent = '';
             row.querySelector('.cp-status').style.color = '';
             row.querySelector('.cp-progress').style.display = 'none';
             row.querySelector('.cp-progress-fill').style.width = '0%';
+            row.querySelector('.cp-progress-fill').style.background = '';
             row.querySelector('.cp-progress-text').textContent = '';
           });
 
-          // Start generation
           const res = await fetch('/admin/api/controller-pack/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ airports: selected })
+            body: JSON.stringify({ legs: selected })
           });
           const { jobId } = await res.json();
 
-          // Poll for progress
           const poll = setInterval(async () => {
             const pr = await fetch('/admin/api/controller-pack/progress/' + jobId);
             const data = await pr.json();
 
-            for (const [icao, info] of Object.entries(data.airports || {})) {
-              const row = document.querySelector('[data-icao="' + icao + '"]');
+            for (const [legName, info] of Object.entries(data.legs || {})) {
+              const row = document.querySelector('[data-leg="' + legName + '"]');
               if (!row) continue;
               const progress = row.querySelector('.cp-progress');
               const fill = row.querySelector('.cp-progress-fill');
@@ -14929,7 +14907,7 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
       </script>
 
       <style>
-        .cp-airport-row {
+        .cp-leg-row {
           display: flex;
           align-items: center;
           gap: 12px;
@@ -14969,73 +14947,84 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
 const cpJobs = {};
 
 app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), async (req, res) => {
-  const airports = req.body.airports || [];
-  if (!airports.length) return res.json({ error: 'No airports' });
+  const legs = req.body.legs || [];
+  if (!legs.length) return res.json({ error: 'No legs' });
   const jobId = crypto.randomUUID();
-  const job = { airports: {}, complete: false };
-  for (const icao of airports) job.airports[icao] = { status: 'queued', progress: 0, step: '' };
+  const job = { legs: {}, complete: false };
+  for (const leg of legs) job.legs[leg.legName] = { status: 'queued', progress: 0, step: '' };
   cpJobs[jobId] = job;
   res.json({ jobId });
 
-  // Process airports sequentially
   const scriptsDir = path.resolve('scripts');
-  for (const icao of airports) {
-    try {
-      job.airports[icao] = { status: 'running', progress: 5, step: 'Fetching ground...' };
-      // Step 1: Fetch ground layout
-      const groundResult = await new Promise((resolve) => {
-        const proc = spawn('node', [path.join(scriptsDir, 'fetch-airport-ground.js'), icao], { cwd: path.resolve('.') });
-        let output = '';
-        proc.stdout.on('data', d => {
-          output += d.toString();
-          const lines = output.split('\n');
-          const last = lines.filter(l => l.trim()).pop() || '';
-          if (last.includes('attempt')) {
-            const match = last.match(/attempt (\\d+)/);
-            if (match) job.airports[icao] = { status: 'running', progress: 5 + parseInt(match[1]) * 4, step: `Ground (attempt ${match[1]})...` };
-          }
-        });
-        proc.stderr.on('data', d => { output += d.toString(); });
-        proc.on('close', code => resolve({ code, output }));
-      });
-      if (groundResult.code === 2) {
-        job.airports[icao] = { status: 'running', progress: 50, step: 'No OSM data (skipped)' };
-      } else if (groundResult.code !== 0) {
-        throw new Error('Ground fetch failed: ' + groundResult.output.split('\n').filter(l => l.trim()).pop());
-      }
-      job.airports[icao] = { status: 'running', progress: 50, step: 'Generating sector...' };
 
-      // Step 2: Generate sector files
+  // Bootstrap shared static files before generating
+  try {
+    const bp = spawn('node', [path.join(scriptsDir, 'bootstrap-pack.js')], { cwd: path.resolve('.') });
+    await new Promise((resolve) => bp.on('close', resolve));
+  } catch (e) { /* non-fatal */ }
+
+  const fetchGround = (icao, legName, progressBase) => new Promise((resolve) => {
+    job.legs[legName] = { status: 'running', progress: progressBase, step: `Ground ${icao}...` };
+    const proc = spawn('node', [path.join(scriptsDir, 'fetch-airport-ground.js'), icao], { cwd: path.resolve('.') });
+    let output = '';
+    proc.stdout.on('data', d => {
+      output += d.toString();
+      const match = output.match(/attempt (\d+)/g);
+      if (match) {
+        const last = match[match.length - 1].match(/\d+/)[0];
+        job.legs[legName] = { status: 'running', progress: progressBase + parseInt(last), step: `Ground ${icao} (attempt ${last})...` };
+      }
+    });
+    proc.stderr.on('data', d => { output += d.toString(); });
+    proc.on('close', code => resolve({ code, output }));
+  });
+
+  for (const leg of legs) {
+    const { number, from, to, legName, route } = leg;
+    try {
+      // Fetch departure ground
+      const depResult = await fetchGround(from, legName, 5);
+      if (depResult.code !== 0 && depResult.code !== 2) {
+        throw new Error(`${from} ground failed: ${depResult.output.split('\\n').pop()}`);
+      }
+
+      // Fetch arrival ground
+      const arrResult = await fetchGround(to, legName, 25);
+      if (arrResult.code !== 0 && arrResult.code !== 2) {
+        throw new Error(`${to} ground failed: ${arrResult.output.split('\\n').pop()}`);
+      }
+
+      // Generate combined leg
+      job.legs[legName] = { status: 'running', progress: 50, step: 'Generating leg...' };
       await new Promise((resolve, reject) => {
-        const proc = spawn('node', [path.join(scriptsDir, 'generate-airport-sct.js'), icao], { cwd: path.resolve('.') });
+        const proc = spawn('node', [path.join(scriptsDir, 'generate-leg-sct.js'), number, from, to, route || ''], { cwd: path.resolve('.') });
         let output = '';
         proc.stdout.on('data', d => {
           output += d.toString();
-          // Parse progress from output
-          if (output.includes('fixes')) job.airports[icao] = { status: 'running', progress: 60, step: 'Navdata...' };
-          if (output.includes('navaids')) job.airports[icao] = { status: 'running', progress: 70, step: 'Navaids...' };
-          if (output.includes('airways')) job.airports[icao] = { status: 'running', progress: 80, step: 'Airways...' };
-          if (output.includes('SIDs')) job.airports[icao] = { status: 'running', progress: 90, step: 'SID/STARs...' };
+          if (output.includes('navdata')) job.legs[legName] = { status: 'running', progress: 60, step: 'Navdata...' };
+          if (output.includes('ground layouts')) job.legs[legName] = { status: 'running', progress: 70, step: 'Ground layouts...' };
+          if (output.includes('SIDs')) job.legs[legName] = { status: 'running', progress: 85, step: 'SID/STARs...' };
+          if (output.includes('Generated')) job.legs[legName] = { status: 'running', progress: 95, step: 'Finalizing...' };
         });
         proc.stderr.on('data', d => { output += d.toString(); });
         proc.on('close', code => {
           if (code === 0) resolve(output);
-          else reject(new Error(output.slice(-200)));
+          else reject(new Error(output.split('\n').filter(l => l.trim()).pop() || 'Generation failed'));
         });
       });
 
-      job.airports[icao] = { status: 'done', progress: 100, step: '' };
+      job.legs[legName] = { status: 'done', progress: 100, step: '' };
     } catch (err) {
-      job.airports[icao] = { status: 'error', progress: 100, step: '', error: err.message.slice(0, 100) };
+      job.legs[legName] = { status: 'error', progress: 100, step: '', error: err.message.slice(0, 100) };
     }
   }
   job.complete = true;
-  setTimeout(() => delete cpJobs[jobId], 60000); // Clean up after 1 min
+  setTimeout(() => delete cpJobs[jobId], 60000);
 });
 
 app.get('/admin/api/controller-pack/progress/:jobId', requireAdmin, (req, res) => {
   const job = cpJobs[req.params.jobId];
-  if (!job) return res.json({ complete: true, airports: {} });
+  if (!job) return res.json({ complete: true, legs: {} });
   res.json(job);
 });
 

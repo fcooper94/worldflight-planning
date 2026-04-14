@@ -1,5 +1,5 @@
 SIL
-m_Visible:1
+m_Visible:0
 m_X:0
 m_Y:45
 m_LineNumber:0
@@ -26,7 +26,7 @@ m_Column:XFL:7:1:52:24:24:0::::1:0.0
 m_Column:SI:3:1:64:20:20:1::::1:0.0
 END
 SEL
-m_Visible:1
+m_Visible:0
 m_X:0
 m_Y:76
 m_LineNumber:0
@@ -79,7 +79,7 @@ m_Column:ASSR:5:1:60:0:0:1::::0:0.0
 m_Column:C:1:1:58:27:0:1::::4:0.0
 END
 ARR
-m_Visible:0
+m_Visible:1
 m_X:164
 m_Y:698
 m_LineNumber:6

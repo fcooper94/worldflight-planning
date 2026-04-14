@@ -1,0 +1,50 @@
+DisplayTypeName:SMR radar display
+DisplayTypeNeedRadarContent:0
+DisplayTypeGeoReferenced:1
+Geo:EHAM Ground:
+Regions:EHAM:polygon
+Runways:EHAM:04:centerline
+Runways:EHAM:22:centerline
+Runways:EHAM:06:centerline
+Runways:EHAM:24:centerline
+Runways:EHAM:09:centerline
+Runways:EHAM:27:centerline
+Runways:EHAM:18C:centerline
+Runways:EHAM:36C:centerline
+Runways:EHAM:18L:centerline
+Runways:EHAM:36R:centerline
+Runways:EHAM:18R:centerline
+Runways:EHAM:36L:centerline
+SHOWC:EHAM_TWR:1
+SHOWSB:0
+BELOW:0
+ABOVE:0
+LEADER:5
+SHOWLEADER:1
+HISTORY_DOTS:5
+SIMULATION_MODE:1
+DISABLEPANNING:0
+DISABLEZOOMING:0
+DisplayRotation:0.00000
+TAGFAMILY:Matias (built in)
+m_Latitude:52.308601
+m_Longitude:4.76389
+WINDOWAREA:52.268601:4.711890:52.348601:4.815890
+PLUGIN:vSMR Vatsim UK:ActiveProfile:WorldFlight
+PLUGIN:vSMR Vatsim UK:Afterglow:1
+PLUGIN:vSMR Vatsim UK:Airport:EHAM
+PLUGIN:vSMR Vatsim UK:AppTrailsDots:4
+PLUGIN:vSMR Vatsim UK:FontSize:1
+PLUGIN:vSMR Vatsim UK:ShowAircraftType:1
+PLUGIN:vSMR Vatsim UK:ShowSID:1
+PLUGIN:vSMR Vatsim UK:ShowWakeTurb:1
+PLUGIN:vSMR Vatsim UK:SRW1Display:1
+PLUGIN:vSMR Vatsim UK:SRW1Filter:5500
+PLUGIN:vSMR Vatsim UK:SRW1OffsetX:0
+PLUGIN:vSMR Vatsim UK:SRW1OffsetY:0
+PLUGIN:vSMR Vatsim UK:SRW1Rotation:0
+PLUGIN:vSMR Vatsim UK:SRW1Scale:30
+PLUGIN:vSMR Vatsim UK:SRW1TopLeftX:1545
+PLUGIN:vSMR Vatsim UK:SRW1TopLeftY:629
+PLUGIN:vSMR Vatsim UK:SRW1BottomRightX:1920
+PLUGIN:vSMR Vatsim UK:SRW1BottomRightY:928

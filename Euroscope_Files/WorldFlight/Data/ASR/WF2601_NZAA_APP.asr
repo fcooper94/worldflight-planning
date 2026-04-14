@@ -1,0 +1,17 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:NZAA:symbol
+Airports:NZAA:name
+Runways:NZAA:05L:centerline
+Runways:NZAA:23R:centerline
+Sids:NZAA-05L
+Sids:NZAA-23R
+Runways:NZAA:05R:centerline
+Runways:NZAA:23L:centerline
+Sids:NZAA-05R
+Sids:NZAA-23L
+SHOWC:NZAA_TWR:1
+m_Latitude:-37.01199
+m_Longitude:174.786331
+m_Zoom:7
