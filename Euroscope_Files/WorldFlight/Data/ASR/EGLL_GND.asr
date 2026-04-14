@@ -1,8 +1,0 @@
-DisplayTypeName:Standard ES radar screen
-DisplayTypeNeedRadarContent:1
-DisplayTypeGeoReferenced:1
-Geo:EGLL Ground:line
-Regions:EGLL:polygon
-m_Latitude:51.4706
-m_Longitude:-0.461941
-m_Zoom:3

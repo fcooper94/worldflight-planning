@@ -1,9 +1,0 @@
-DisplayTypeName:Standard ES radar screen
-DisplayTypeNeedRadarContent:1
-DisplayTypeGeoReferenced:1
-Airports:SCGC:symbol
-Airports:SCGC:name
-SHOWC:SCGC_TWR:1
-m_Latitude:-79.777778
-m_Longitude:-83.320833
-m_Zoom:7
