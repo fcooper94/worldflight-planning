@@ -548,17 +548,31 @@ async function main() {
   // Parse XP12 ATC frequencies
   const xp12Freqs = parseXP12Frequencies(XP12_ATC);
 
-  // Airport-specific positions (DEL/GND/TWR/APP) with real freqs from XP12
+  // Airport-specific positions with real freqs from XP12
+  const airportPositions = {}; // icao -> [{callsign, freq, role}]
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
     const aptFreqs = xp12Freqs[icao] || [];
     const twrFreq = aptFreqs.find(f => f.role === 'twr')?.freqs[0] || '118.500';
     const appFreq = aptFreqs.find(f => f.role === 'tracon')?.freqs[0] || '119.000';
-    const gndFreq = aptFreqs.find(f => f.role === 'gnd')?.freqs[0] || '121.800';
-    for (const pos of [{s:'OBS',n:'Observer',f:'199.998',c:'O'},{s:'DEL',n:'Delivery',f:'121.700',c:'D'},{s:'GND',n:'Ground',f:gndFreq,c:'G'},{s:'TWR',n:'Tower',f:twrFreq,c:'T'},{s:'APP',n:'Approach',f:appFreq,c:'A'}]) {
-      E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coordPair(apt.lat, apt.lon).replace(' ', ':')}`);
-      // Add wildcard freq duplicate for matching any connection
+    const gndFreq = aptFreqs.find(f => f.role === 'gnd')?.freqs[0] || '121.900';
+    const delFreq = '121.750'; // Standard VATSIM delivery freq
+    const coord = coordPair(apt.lat, apt.lon).replace(' ', ':');
+    airportPositions[icao] = [];
+    // ATIS freq: use second TWR freq if available, otherwise 127.850
+    const allTwrFreqs = aptFreqs.find(f => f.role === 'twr')?.freqs || [];
+    const atisFreq = allTwrFreqs.length > 1 ? allTwrFreqs[1] : '127.850';
+    for (const pos of [
+      {s:'OBS',n:'Observer',f:'199.998',c:'O'},
+      {s:'ATIS',n:'ATIS',f:atisFreq,c:'I'},
+      {s:'DEL',n:'Delivery',f:delFreq,c:'D'},
+      {s:'GND',n:'Ground',f:gndFreq,c:'G'},
+      {s:'TWR',n:'Tower',f:twrFreq,c:'T'},
+      {s:'APP',n:'Approach',f:appFreq,c:'A'}
+    ]) {
+      E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coord}`);
       if (pos.f !== '199.998') {
-        E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:199.998:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coordPair(apt.lat, apt.lon).replace(' ', ':')}`);
+        E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:199.998:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coord}`);
+        airportPositions[icao].push({ callsign: `${icao}_${pos.s}`, freq: pos.f, role: pos.s });
       }
     }
   }
@@ -731,15 +745,11 @@ async function main() {
 
   // ===== VOICE SETUP =====
   const voiceLines = ['VOICE'];
-  // Airport frequencies — primary freq per role
-  for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
-    const aptFreqs = xp12Freqs[icao] || [];
-    const twr = aptFreqs.find(f => f.role === 'twr')?.freqs[0];
-    const app = aptFreqs.find(f => f.role === 'tracon')?.freqs[0];
-    const gnd = aptFreqs.find(f => f.role === 'gnd')?.freqs[0];
-    if (twr) voiceLines.push(`AG:${icao}_TWR:${twr}`);
-    if (app) voiceLines.push(`AG:${icao}_APP:${app}`);
-    if (gnd) voiceLines.push(`AG:${icao}_GND:${gnd}`);
+  // Airport frequencies — all positions
+  for (const [icao] of [[FROM], [TO]]) {
+    for (const pos of (airportPositions[icao] || [])) {
+      voiceLines.push(`AG:${pos.callsign}:${pos.freq}`);
+    }
   }
   // Enroute CTR positions — primary freq per callsign
   const addedVoice = new Set();
