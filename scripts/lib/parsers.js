@@ -313,11 +313,12 @@ export function parseVATSpyForFIRs(vatspyPath, firBoundariesPath, transitFirIds)
     // Check if this FIR is one we transit
     const firBase = firId.split('-')[0].replace(/_/g, '-');
     if (!topLevelIds.has(firBase) && !topLevelIds.has(firId)) continue;
-    if (callsignPrefix && !seenCallsigns.has(callsignPrefix)) {
-      seenCallsigns.add(callsignPrefix);
-      positions.push({ callsign: callsignPrefix, name, firId, boundaryId });
+    const prefix = callsignPrefix || firId.replace(/-/g, '_');
+    if (!seenCallsigns.has(prefix)) {
+      seenCallsigns.add(prefix);
+      positions.push({ callsign: prefix, name: name || firId, firId, boundaryId });
       if (!firPositions[firId]) firPositions[firId] = [];
-      firPositions[firId].push({ callsign: callsignPrefix, name, boundaryId });
+      firPositions[firId].push({ callsign: prefix, name: name || firId, boundaryId });
     }
   }
 
