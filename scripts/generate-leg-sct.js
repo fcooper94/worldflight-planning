@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { decimalToDMS, coordPair, bearing, projectPoint, haversineNm, midpoint } from './lib/geo.js';
-import { parseFixes, parseNavaids, parseAirways, parseCIFP, parseRouteFIRs, parseVATSpyForFIRs, parseXP12Frequencies } from './lib/parsers.js';
+import { parseFixes, parseNavaids, parseAirways, parseCIFP, parseRouteFIRs, parseVATSpyForFIRs, parseXP12Frequencies, parseAFVStations } from './lib/parsers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prisma = new PrismaClient();
@@ -22,6 +22,7 @@ const FIR_GEOJSON = path.join(__dirname, '..', 'public', 'fir-boundaries.geojson
 const VATSPY_DAT = path.join(__dirname, '..', 'data', 'VATSPY', 'VATSpy.dat');
 const FIR_BOUNDS = path.join(__dirname, '..', 'data', 'VATSPY', 'FIRBoundaries.dat');
 const XP12_ATC = path.join(__dirname, '..', 'data', 'XP12', '1200 atc data', 'Earth nav data', 'atc.dat');
+const AFV_STATIONS = path.join(__dirname, '..', 'data', 'afv_stations.csv');
 const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
 function loadGround(icao) {
@@ -588,20 +589,24 @@ async function main() {
   E.push('[POSITIONS]');
   // Parse XP12 ATC frequencies
   const xp12Freqs = parseXP12Frequencies(XP12_ATC);
+  const afvFreqs = parseAFVStations(AFV_STATIONS);
+  // Helper: look up frequency from AFV first, then XP12 fallback
+  const getFreq = (callsign, xp12Role, xp12Icao) => {
+    if (afvFreqs[callsign]) return afvFreqs[callsign];
+    const xp12 = xp12Freqs[xp12Icao]?.find(f => f.role === xp12Role)?.freqs[0];
+    return xp12 || null;
+  };
 
-  // Airport-specific positions with real freqs from XP12
+  // Airport-specific positions with real freqs (AFV first, XP12 fallback)
   const airportPositions = {}; // icao -> [{callsign, freq, role}]
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
-    const aptFreqs = xp12Freqs[icao] || [];
-    const twrFreq = aptFreqs.find(f => f.role === 'twr')?.freqs[0] || '118.500';
-    const appFreq = aptFreqs.find(f => f.role === 'tracon')?.freqs[0] || '119.000';
-    const gndFreq = aptFreqs.find(f => f.role === 'gnd')?.freqs[0] || '121.900';
-    const delFreq = '121.750'; // Standard VATSIM delivery freq
+    const twrFreq = getFreq(`${icao}_TWR`, 'twr', icao) || '118.500';
+    const appFreq = getFreq(`${icao}_APP`, 'tracon', icao) || '119.000';
+    const gndFreq = getFreq(`${icao}_GND`, 'gnd', icao) || '121.900';
+    const delFreq = getFreq(`${icao}_DEL`, null, null) || '121.750';
+    const atisFreq = getFreq(`${icao}_ATIS`, null, null) || '127.850';
     const coord = coordPair(apt.lat, apt.lon).replace(' ', ':');
     airportPositions[icao] = [];
-    // ATIS freq: use second TWR freq if available, otherwise 127.850
-    const allTwrFreqs = aptFreqs.find(f => f.role === 'twr')?.freqs || [];
-    const atisFreq = allTwrFreqs.length > 1 ? allTwrFreqs[1] : '127.850';
     for (const pos of [
       {s:'OBS',n:'Observer',f:'199.998',c:'O'},
       {s:'ATIS',n:'ATIS',f:atisFreq,c:'I'},
@@ -620,19 +625,14 @@ async function main() {
   // Real VATSIM FIR/sector positions from VATSpy with XP12 frequencies
   const addedPrefixes = new Set();
   const positionShortIds = []; // collect short IDs for OWNER line
-  const firFreqIndex = {}; // track which freq to assign next per FIR
   for (const vp of vatspy.positions) {
     if (addedPrefixes.has(vp.callsign)) continue;
     addedPrefixes.add(vp.callsign);
     const shortId = vp.callsign;
     positionShortIds.push(shortId);
-    // Distribute FIR frequencies across sub-sectors
+    // Look up real frequency from AFV, fallback to XP12
     const firBase = vp.firId.split('-')[0];
-    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
-    if (!firFreqIndex[firBase]) firFreqIndex[firBase] = 0;
-    const freqIdx = firFreqIndex[firBase] % Math.max(firFreqs.length, 1);
-    const primaryFreq = firFreqs[freqIdx] || '199.998';
-    firFreqIndex[firBase]++;
+    const primaryFreq = getFreq(`${vp.callsign}_CTR`, 'ctr', firBase) || '199.998';
     E.push(`${vp.callsign}_CTR:${vp.name}:${primaryFreq}:${shortId}:C:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
     // Add wildcard freq for any-frequency matching
     if (primaryFreq !== '199.998') {
@@ -802,18 +802,13 @@ async function main() {
       voiceLines.push(`AG:${pos.callsign}:${pos.freq}`);
     }
   }
-  // Enroute CTR positions — distributed freqs per callsign
+  // Enroute CTR positions — real AFV freqs
   const addedVoice = new Set();
-  const voiceFreqIndex = {};
   for (const vp of vatspy.positions) {
     if (addedVoice.has(vp.callsign)) continue;
     addedVoice.add(vp.callsign);
     const firBase = vp.firId.split('-')[0];
-    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
-    if (!voiceFreqIndex[firBase]) voiceFreqIndex[firBase] = 0;
-    const freqIdx = voiceFreqIndex[firBase] % Math.max(firFreqs.length, 1);
-    const freq = firFreqs[freqIdx] || null;
-    voiceFreqIndex[firBase]++;
+    const freq = getFreq(`${vp.callsign}_CTR`, 'ctr', firBase);
     if (freq) {
       voiceLines.push(`AG:${vp.callsign}_CTR:${freq}`);
     }

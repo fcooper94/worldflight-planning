@@ -381,6 +381,29 @@ export function parseVATSpyForFIRs(vatspyPath, firBoundariesPath, transitFirIds)
 }
 
 /**
+ * Parse AFV stations CSV to get real VATSIM frequencies per callsign.
+ * Returns map of callsign -> frequency (MHz string)
+ */
+export function parseAFVStations(csvPath) {
+  if (!fs.existsSync(csvPath)) return {};
+  const result = {};
+  const lines = fs.readFileSync(csvPath, 'utf-8').split('\n');
+  for (const line of lines) {
+    if (line.startsWith('Name,') || !line.trim()) continue;
+    // Handle BOM
+    const clean = line.replace(/^\uFEFF/, '').trim();
+    const commaIdx = clean.lastIndexOf(',');
+    if (commaIdx === -1) continue;
+    const name = clean.substring(0, commaIdx).trim();
+    const freq = clean.substring(commaIdx + 1).trim();
+    if (name && freq && !isNaN(parseFloat(freq))) {
+      result[name] = freq;
+    }
+  }
+  return result;
+}
+
+/**
  * Parse XP12 ATC data to get real frequencies for positions.
  * Returns map of ICAO -> { role, freqs[] }
  */
