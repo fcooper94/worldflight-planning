@@ -1,0 +1,25 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:CYVR:symbol
+Airports:CYVR:name
+Runways:CYVR:08L:centerline
+Runways:CYVR:26R:centerline
+Sids:CYVR-08L
+Sids:CYVR-26R
+Runways:CYVR:08R:centerline
+Runways:CYVR:26L:centerline
+Sids:CYVR-08R
+Sids:CYVR-26L
+Runways:CYVR:13:centerline
+Runways:CYVR:31:centerline
+Sids:CYVR-13
+Sids:CYVR-31
+Runways:CYVR:XX:centerline
+Runways:CYVR:26A:centerline
+Sids:CYVR-XX
+Sids:CYVR-26A
+SHOWC:CYVR_TWR:1
+m_Latitude:49.193901062
+m_Longitude:-123.183998108
+m_Zoom:7

@@ -1,0 +1,17 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:SCEL:symbol
+Airports:SCEL:name
+Runways:SCEL:17L:centerline
+Runways:SCEL:35R:centerline
+Sids:SCEL-17L
+Sids:SCEL-35R
+Runways:SCEL:17R:centerline
+Runways:SCEL:35L:centerline
+Sids:SCEL-17R
+Sids:SCEL-35L
+SHOWC:SCEL_TWR:1
+m_Latitude:-33.39300155639648
+m_Longitude:-70.78579711914062
+m_Zoom:7

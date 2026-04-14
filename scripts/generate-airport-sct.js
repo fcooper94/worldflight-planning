@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { decimalToDMS, coordPair, bearing, projectPoint } from './lib/geo.js';
-import { parseFixes, parseNavaids, parseAirways } from './lib/parsers.js';
+import { parseFixes, parseNavaids, parseAirways, parseCIFP } from './lib/parsers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prisma = new PrismaClient();
@@ -11,6 +11,7 @@ const prisma = new PrismaClient();
 const ICAO = process.argv[2] || 'EGLL';
 const RADIUS = 50; // 50nm radius for a single airport
 const NAVDATA_DIR = path.join(__dirname, '..', 'data', 'navdata');
+const CIFP_DIR = path.join(__dirname, '..', 'data', 'XP12', 'CIFP');
 const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
 async function main() {
@@ -197,11 +198,20 @@ async function main() {
   E.push(`; ${ICAO} Extended Sector File`);
   E.push('');
   E.push('[POSITIONS]');
-  for (const pos of [{s:'DEL',n:'Delivery',f:'121.700'},{s:'GND',n:'Ground',f:'121.800'},{s:'TWR',n:'Tower',f:'118.500'},{s:'APP',n:'Approach',f:'119.000'}]) {
+  for (const pos of [{s:'OBS',n:'Observer',f:'199.998'},{s:'DEL',n:'Delivery',f:'121.700'},{s:'GND',n:'Ground',f:'121.800'},{s:'TWR',n:'Tower',f:'118.500'},{s:'APP',n:'Approach',f:'119.000'}]) {
     E.push(`${ICAO}_${pos.s}:${airport.name} ${pos.n}:${pos.f}:${ICAO}:${pos.s.charAt(0)}:${ICAO}:${pos.s}:-:-:0100:0177:35:${coordPair(airport.lat, airport.lon)}`);
   }
   E.push('');
   E.push('[SIDSSTARS]');
+  // Parse CIFP data for SID/STAR procedures
+  const cifpPath = path.join(CIFP_DIR, `${ICAO}.dat`);
+  if (fs.existsSync(cifpPath)) {
+    const sidstars = parseCIFP(cifpPath, ICAO);
+    for (const entry of sidstars) E.push(entry);
+    console.log(`  ${sidstars.filter(s => s.startsWith('SID:')).length} SIDs, ${sidstars.filter(s => s.startsWith('STAR:')).length} STARs from CIFP`);
+  } else {
+    console.log('  No CIFP data found');
+  }
   E.push('');
   E.push('[AIRSPACE]');
   const pts = [];
@@ -225,6 +235,12 @@ async function main() {
     `Settings\tSettingsfileTAGS\t\\..\\Data\\Settings\\Tags.txt`,
     `Settings\tSettingsfileSCREEN\t\\..\\Data\\Settings\\Screen.txt`,
     `Settings\tSettingsfile\t\\..\\Data\\Settings\\General.txt`,
+    `Settings\tSettingsfileARR\t\\..\\Data\\Settings\\Lists.txt`,
+    `Settings\tSettingsfileDEP\t\\..\\Data\\Settings\\Lists.txt`,
+    `Settings\tSettingsfileFP\t\\..\\Data\\Settings\\Lists.txt`,
+    `Settings\tSettingsfileSEL\t\\..\\Data\\Settings\\Lists.txt`,
+    `Settings\tSettingsfileSIL\t\\..\\Data\\Settings\\Lists.txt`,
+    `Settings\tSettingsfileCONFLICT\t\\..\\Data\\Settings\\Lists.txt`,
     `Settings\tsector\t\\..\\Data\\Sector_Files\\${ICAO}.sct`,
     `Settings\tairlines\t\\..\\Data\\Datafiles\\ICAO_Airlines.txt`,
     `Settings\tairports\t\\..\\Data\\Datafiles\\ICAO_Airports.txt`,
@@ -237,7 +253,40 @@ async function main() {
     `Plugins\tPlugin0\t\\..\\Data\\Plugin\\vSMR\\vSMR.dll`,
     `Plugins\tPlugin0Display0\tSMR radar display`,
     `LastSession\tserver\tAUTOMATIC`,
+    `LastSession\tcallsign\t${ICAO}_OBS`,
   ];
+  fs.writeFileSync(path.join(prfDir, `${ICAO}.prf`), prf.join('\r\n'), 'utf-8');
+
+  // Generate connection profiles
+  const profilesDir = path.join(OUTPUT_DIR, 'Data', 'Settings');
+  const profLines = [
+    'PROFILE',
+    `PROFILE:${ICAO}_OBS:100:0`,
+    `ATIS2:${ICAO} Observer`,
+    `ATIS3:`,
+    `ATIS4:WorldFlight 2026`,
+    `PROFILE:${ICAO}_APP:100:5`,
+    `ATIS2:${ICAO} Approach`,
+    `ATIS3:`,
+    `ATIS4:WorldFlight 2026`,
+    `PROFILE:${ICAO}_TWR:30:4`,
+    `ATIS2:${ICAO} Tower`,
+    `ATIS3:`,
+    `ATIS4:WorldFlight 2026`,
+    `PROFILE:${ICAO}_GND:20:3`,
+    `ATIS2:${ICAO} Ground`,
+    `ATIS3:`,
+    `ATIS4:WorldFlight 2026`,
+    `PROFILE:${ICAO}_DEL:20:2`,
+    `ATIS2:${ICAO} Delivery`,
+    `ATIS3:`,
+    `ATIS4:WorldFlight 2026`,
+    'END',
+  ];
+  fs.writeFileSync(path.join(profilesDir, `Profiles_${ICAO}.txt`), profLines.join('\r\n'), 'utf-8');
+
+  // Add profiles reference to PRF
+  prf.splice(4, 0, `Settings\tSettingsfilePROFILE\t\\..\\Data\\Settings\\Profiles_${ICAO}.txt`);
   fs.writeFileSync(path.join(prfDir, `${ICAO}.prf`), prf.join('\r\n'), 'utf-8');
 
   // Generate ASR files

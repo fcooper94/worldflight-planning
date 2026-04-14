@@ -2,6 +2,13 @@ Settings	SettingsfileSYMBOLOGY	\..\Data\Settings\Symbology.txt
 Settings	SettingsfileTAGS	\..\Data\Settings\Tags.txt
 Settings	SettingsfileSCREEN	\..\Data\Settings\Screen.txt
 Settings	Settingsfile	\..\Data\Settings\General.txt
+Settings	SettingsfilePROFILE	\..\Data\Settings\Profiles_KJFK.txt
+Settings	SettingsfileARR	\..\Data\Settings\Lists.txt
+Settings	SettingsfileDEP	\..\Data\Settings\Lists.txt
+Settings	SettingsfileFP	\..\Data\Settings\Lists.txt
+Settings	SettingsfileSEL	\..\Data\Settings\Lists.txt
+Settings	SettingsfileSIL	\..\Data\Settings\Lists.txt
+Settings	SettingsfileCONFLICT	\..\Data\Settings\Lists.txt
 Settings	sector	\..\Data\Sector_Files\KJFK.sct
 Settings	airlines	\..\Data\Datafiles\ICAO_Airlines.txt
 Settings	airports	\..\Data\Datafiles\ICAO_Airports.txt
@@ -14,3 +21,4 @@ RecentFiles	Recent2	\..\Data\ASR\KJFK_APP.asr
 Plugins	Plugin0	\..\Data\Plugin\vSMR\vSMR.dll
 Plugins	Plugin0Display0	SMR radar display
 LastSession	server	AUTOMATIC
+LastSession	callsign	KJFK_OBS

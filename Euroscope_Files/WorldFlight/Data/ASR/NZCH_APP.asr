@@ -1,0 +1,21 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:NZCH:symbol
+Airports:NZCH:name
+Runways:NZCH:01:centerline
+Runways:NZCH:19:centerline
+Sids:NZCH-01
+Sids:NZCH-19
+Runways:NZCH:02:centerline
+Runways:NZCH:20:centerline
+Sids:NZCH-02
+Sids:NZCH-20
+Runways:NZCH:11:centerline
+Runways:NZCH:29:centerline
+Sids:NZCH-11
+Sids:NZCH-29
+SHOWC:NZCH_TWR:1
+m_Latitude:-43.489029
+m_Longitude:172.532065
+m_Zoom:7

@@ -1,0 +1,10 @@
+; NZFX Ground Layout — Generated from OpenStreetMap
+; OSM data © OpenStreetMap contributors
+
+; === REGIONS (paste into [REGIONS] section) ===
+
+
+; === GEO (paste into [GEO] section) ===
+
+
+; === LABELS (paste into [LABELS] section) ===

@@ -1,0 +1,13 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:EGPN:symbol
+Airports:EGPN:name
+Runways:EGPN:09:centerline
+Runways:EGPN:27:centerline
+Sids:EGPN-09
+Sids:EGPN-27
+SHOWC:EGPN_TWR:1
+m_Latitude:56.45249938964844
+m_Longitude:-3.025830030441284
+m_Zoom:7

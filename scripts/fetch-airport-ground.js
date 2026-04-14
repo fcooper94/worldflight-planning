@@ -6,7 +6,7 @@ import { decimalToDMS, coordPair } from './lib/geo.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const ICAO = process.argv[2] || 'EGLL';
-const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+const OVERPASS_URL = process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
 
 // EuroScope colour definitions (RGB as decimal)
 const COLOURS = {
@@ -21,15 +21,38 @@ const COLOURS = {
   standlabel: '16777215' // white
 };
 
+const MAX_RETRIES = 10;
+const RETRY_DELAY_MS = 5000;
+
 async function fetchOverpass(query) {
-  console.log('  Querying Overpass API...');
-  const res = await fetch(OVERPASS_URL, {
-    method: 'POST',
-    body: 'data=' + encodeURIComponent(query),
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-  });
-  if (!res.ok) throw new Error(`Overpass API error: ${res.status}`);
-  return res.json();
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    console.log(`  Querying Overpass API (attempt ${attempt}/${MAX_RETRIES})...`);
+    try {
+      const res = await fetch(OVERPASS_URL, {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(query),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      if (res.ok) return res.json();
+      if (res.status === 429 || res.status === 504 || res.status === 503) {
+        console.log(`  Got ${res.status}, retrying in ${RETRY_DELAY_MS / 1000}s...`);
+        if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      throw new Error(`Overpass API error: ${res.status}`);
+    } catch (err) {
+      if (err.message.includes('Overpass API error')) throw err;
+      console.log(`  Network error: ${err.message}, retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+    }
+  }
+  throw new Error(`Overpass API failed after ${MAX_RETRIES} attempts`);
+}
+
+async function checkIcaoExistsInOSM(icao) {
+  const query = `[out:json][timeout:30];(way[icao="${icao}"];relation[icao="${icao}"];node[icao="${icao}"];);out tags;`;
+  const data = await fetchOverpass(query);
+  return data.elements && data.elements.length > 0;
 }
 
 function coordToES(lat, lon) {
@@ -54,9 +77,17 @@ async function main() {
     console.log('  Using cached OSM data (use --fresh to re-fetch)');
     data = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
   } else {
+    // Check if airport exists in OSM first
+    console.log('  Checking if ICAO exists in OSM...');
+    const exists = await checkIcaoExistsInOSM(ICAO);
+    if (!exists) {
+      console.log(`  ${ICAO} not found in OSM database — skipping ground layout`);
+      process.exit(2); // Exit code 2 = ICAO not in OSM (skip, not an error)
+    }
+
     // Query OSM for airport features
     const query = `
-[out:json][timeout:60];
+[out:json][timeout:120];
 area[icao="${ICAO}"]->.airport;
 (
   way(area.airport)[aeroway=runway];

@@ -1,0 +1,44 @@
+DisplayTypeName:SMR radar display
+DisplayTypeNeedRadarContent:0
+DisplayTypeGeoReferenced:1
+Geo:SCCI Ground:
+Regions:SCCI:polygon
+Runways:SCCI:01:centerline
+Runways:SCCI:19:centerline
+Runways:SCCI:07:centerline
+Runways:SCCI:25:centerline
+Runways:SCCI:12:centerline
+Runways:SCCI:30:centerline
+SHOWC:SCCI_TWR:1
+SHOWSB:0
+BELOW:0
+ABOVE:0
+LEADER:5
+SHOWLEADER:1
+HISTORY_DOTS:5
+SIMULATION_MODE:1
+DISABLEPANNING:0
+DISABLEZOOMING:0
+DisplayRotation:0.00000
+TAGFAMILY:Matias (built in)
+m_Latitude:-53.002602
+m_Longitude:-70.854599
+WINDOWAREA:-53.042602:-70.906599:-52.962602:-70.802599
+PLUGIN:vSMR Vatsim UK:ActiveProfile:WorldFlight
+PLUGIN:vSMR Vatsim UK:Afterglow:1
+PLUGIN:vSMR Vatsim UK:Airport:SCCI
+PLUGIN:vSMR Vatsim UK:AppTrailsDots:4
+PLUGIN:vSMR Vatsim UK:FontSize:1
+PLUGIN:vSMR Vatsim UK:ShowAircraftType:1
+PLUGIN:vSMR Vatsim UK:ShowSID:1
+PLUGIN:vSMR Vatsim UK:ShowWakeTurb:1
+PLUGIN:vSMR Vatsim UK:SRW1Display:1
+PLUGIN:vSMR Vatsim UK:SRW1Filter:5500
+PLUGIN:vSMR Vatsim UK:SRW1OffsetX:0
+PLUGIN:vSMR Vatsim UK:SRW1OffsetY:0
+PLUGIN:vSMR Vatsim UK:SRW1Rotation:0
+PLUGIN:vSMR Vatsim UK:SRW1Scale:30
+PLUGIN:vSMR Vatsim UK:SRW1TopLeftX:1545
+PLUGIN:vSMR Vatsim UK:SRW1TopLeftY:629
+PLUGIN:vSMR Vatsim UK:SRW1BottomRightX:1920
+PLUGIN:vSMR Vatsim UK:SRW1BottomRightY:928

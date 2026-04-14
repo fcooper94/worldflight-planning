@@ -1,0 +1,21 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:SCCI:symbol
+Airports:SCCI:name
+Runways:SCCI:01:centerline
+Runways:SCCI:19:centerline
+Sids:SCCI-01
+Sids:SCCI-19
+Runways:SCCI:07:centerline
+Runways:SCCI:25:centerline
+Sids:SCCI-07
+Sids:SCCI-25
+Runways:SCCI:12:centerline
+Runways:SCCI:30:centerline
+Sids:SCCI-12
+Sids:SCCI-30
+SHOWC:SCCI_TWR:1
+m_Latitude:-53.002602
+m_Longitude:-70.854599
+m_Zoom:7

@@ -60,6 +60,117 @@ export async function parseNavaids(filePath, centers, radiusNm = 200) {
   return { vors, ndbs };
 }
 
+/**
+ * Parse CIFP file for SID/STAR procedures and return EuroScope [SIDSSTARS] lines.
+ * CIFP format: TYPE:SEQ,ROUTE_TYPE,PROC_NAME,TRANSITION,FIX,...
+ * Route types: 1/2=runway transition, 4=enroute transition, 5=common route, 6=runway transition (STAR)
+ * We build: SID:ICAO:RWY:PROC:FIX1 FIX2 FIX3...
+ */
+export function parseCIFP(filePath, icao) {
+  const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+  // Collect fix sequences per procedure+runway+route_type
+  // Key: "SID|STAR:procName:transition:routeType"
+  const legs = {};
+  for (const line of lines) {
+    if (!line.startsWith('SID:') && !line.startsWith('STAR:')) continue;
+    const fields = line.split(',');
+    if (fields.length < 5) continue;
+    const type = fields[0].split(':')[0]; // SID or STAR
+    const routeType = parseInt(fields[1]);
+    const procName = fields[2];
+    const transition = fields[3].trim();
+    const fix = fields[4].trim();
+    if (!fix || !procName) continue;
+    const key = `${type}:${procName}:${transition}:${routeType}`;
+    if (!legs[key]) legs[key] = [];
+    legs[key].push(fix);
+  }
+
+  // Build EuroScope SIDSSTARS entries
+  // For SIDs: runway transitions (type 2) give us runway-specific routes
+  // For STARs: common route (type 2/5) + runway transitions (type 6)
+  const result = [];
+  const seen = new Set();
+
+  // Helper to build an entry
+  const addEntry = (type, rwy, procName, fixes) => {
+    const filtered = fixes.filter(f => f && f !== icao);
+    const deduped = filtered.filter((f, i) => i === 0 || f !== filtered[i - 1]);
+    if (deduped.length === 0) return;
+    if (rwy.endsWith('B')) rwy = rwy.slice(0, -1);
+    const entryKey = `${type}:${icao}:${rwy}:${procName}`;
+    if (!seen.has(entryKey)) {
+      seen.add(entryKey);
+      result.push(`${type}:${icao}:${rwy}:${procName}:${deduped.join(' ')}`);
+    }
+  };
+
+  // Collect common route fixes per procedure
+  const commonRoute = {};
+  for (const [key, fixes] of Object.entries(legs)) {
+    const [type, procName, transition, rt] = key.split(':');
+    const routeType = parseInt(rt);
+    if (routeType === 5) {
+      commonRoute[`${type}:${procName}`] = fixes;
+    }
+  }
+
+  // Process SIDs: runway transitions are type 1, 2, or 4 with RWxx transition
+  for (const [key, fixes] of Object.entries(legs)) {
+    const [type, procName, transition, rt] = key.split(':');
+    if (type !== 'SID') continue;
+    const routeType = parseInt(rt);
+    if (![1, 2, 4].includes(routeType)) continue;
+    if (!transition.startsWith('RW')) continue;
+    const rwy = transition.substring(2);
+    const common = commonRoute[`SID:${procName}`] || [];
+    addEntry('SID', rwy, procName, [...fixes, ...common]);
+  }
+
+  // Process STARs: collect common legs, then add runway-specific entries
+  const starCommon = {};
+  for (const [key, fixes] of Object.entries(legs)) {
+    const [type, procName, transition, rt] = key.split(':');
+    if (type !== 'STAR') continue;
+    const routeType = parseInt(rt);
+    if (routeType === 5 || (routeType === 2 && transition === 'ALL') || routeType === 2) {
+      if (!starCommon[procName]) starCommon[procName] = [];
+      for (const f of fixes) {
+        if (f && !starCommon[procName].includes(f)) starCommon[procName].push(f);
+      }
+    }
+  }
+
+  // STAR runway transitions (type 6) or type 4 with RWxx
+  for (const [key, fixes] of Object.entries(legs)) {
+    const [type, procName, transition, rt] = key.split(':');
+    if (type !== 'STAR') continue;
+    const routeType = parseInt(rt);
+    if ((routeType === 6 || routeType === 4) && transition.startsWith('RW')) {
+      const rwy = transition.substring(2);
+      const common = starCommon[procName] || [];
+      addEntry('STAR', rwy, procName, [...common, ...fixes]);
+    }
+  }
+
+  // STARs with only common route (no runway-specific)
+  for (const [procName, fixes] of Object.entries(starCommon)) {
+    const hasRwyTransition = Object.keys(legs).some(k => {
+      const [t, p, tr, r] = k.split(':');
+      return t === 'STAR' && p === procName && tr.startsWith('RW') && (r === '6' || r === '4');
+    });
+    if (!hasRwyTransition && fixes.length > 0) {
+      const entryKey = `STAR:${icao}::${procName}`;
+      if (!seen.has(entryKey)) {
+        seen.add(entryKey);
+        result.push(`STAR:${icao}::${procName}:${fixes.join(' ')}`);
+      }
+    }
+  }
+
+  return result.sort();
+}
+
 export async function parseAirways(filePath, centers, radiusNm = 200) {
   const high = [];
   const low = [];

@@ -1,0 +1,5 @@
+{
+  "watch": ["index.js", "layout.js"],
+  "ignore": ["Euroscope_Files/", "data/", "WorldFlight/", "*.sct", "*.ese", "*.asr", "*.prf", "tmp_*"],
+  "ext": "js"
+}

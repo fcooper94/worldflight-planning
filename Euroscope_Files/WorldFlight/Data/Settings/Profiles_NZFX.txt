@@ -1,0 +1,18 @@
+PROFILE
+PROFILE:NZFX_APP:100:5
+ATIS2:Phoenix Airfield Approach
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:NZFX_TWR:30:4
+ATIS2:Phoenix Airfield Tower
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:NZFX_GND:20:3
+ATIS2:Phoenix Airfield Ground
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:NZFX_DEL:20:2
+ATIS2:Phoenix Airfield Delivery
+ATIS3:
+ATIS4:WorldFlight 2026
+END

@@ -1,0 +1,21 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:LPAZ:symbol
+Airports:LPAZ:name
+Runways:LPAZ:04:centerline
+Runways:LPAZ:22:centerline
+Sids:LPAZ-04
+Sids:LPAZ-22
+Runways:LPAZ:15:centerline
+Runways:LPAZ:33:centerline
+Sids:LPAZ-15
+Sids:LPAZ-33
+Runways:LPAZ:18:centerline
+Runways:LPAZ:36:centerline
+Sids:LPAZ-18
+Sids:LPAZ-36
+SHOWC:LPAZ_TWR:1
+m_Latitude:36.97140121459961
+m_Longitude:-25.17060089111328
+m_Zoom:7

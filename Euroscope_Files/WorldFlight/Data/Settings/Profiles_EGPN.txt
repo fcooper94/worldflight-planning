@@ -1,0 +1,18 @@
+PROFILE
+PROFILE:EGPN_APP:100:5
+ATIS2:Dundee Airport Approach
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:EGPN_TWR:30:4
+ATIS2:Dundee Airport Tower
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:EGPN_GND:20:3
+ATIS2:Dundee Airport Ground
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:EGPN_DEL:20:2
+ATIS2:Dundee Airport Delivery
+ATIS3:
+ATIS4:WorldFlight 2026
+END

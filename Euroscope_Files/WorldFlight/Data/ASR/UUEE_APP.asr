@@ -1,0 +1,21 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:UUEE:symbol
+Airports:UUEE:name
+Runways:UUEE:06C:centerline
+Runways:UUEE:24C:centerline
+Sids:UUEE-06C
+Sids:UUEE-24C
+Runways:UUEE:06L:centerline
+Runways:UUEE:24R:centerline
+Sids:UUEE-06L
+Sids:UUEE-24R
+Runways:UUEE:06R:centerline
+Runways:UUEE:24L:centerline
+Sids:UUEE-06R
+Sids:UUEE-24L
+SHOWC:UUEE_TWR:1
+m_Latitude:55.972599
+m_Longitude:37.4146
+m_Zoom:7

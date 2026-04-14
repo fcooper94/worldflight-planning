@@ -6,6 +6,7 @@ import { PrismaClient } from '@prisma/client';
 import multer from 'multer';
 import path from 'path';
 import crypto from 'crypto';
+import { spawn } from 'child_process';
 
 const prisma = new PrismaClient();
 
@@ -10742,6 +10743,13 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
       icon: '🧪',
       href: '/admin/test-pilots',
       badge: null
+    },
+    {
+      title: 'Controller Pack',
+      desc: 'Generate EuroScope controller pack files for WorldFlight airports.',
+      icon: '🎮',
+      href: '/admin/controller-pack',
+      badge: null
     }
   ];
 
@@ -14772,6 +14780,263 @@ app.post('/admin/api/test-pilots/toggle', requireAdmin, express.json(), async (r
   }
 
   res.json({ ok: true });
+});
+
+/* ===== ADMIN: CONTROLLER PACK ===== */
+app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+
+  // Get unique airports from active event schedule
+  const scheduleAirports = new Set();
+  for (const row of adminSheetCache) {
+    if (row.from) scheduleAirports.add(row.from);
+    if (row.to) scheduleAirports.add(row.to);
+  }
+  const airports = [...scheduleAirports].sort();
+
+  const content = `
+    <section class="card card-full">
+      <h2>Controller Pack Generator</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">
+        Generate EuroScope controller pack files (SCT, ESE, ASR, PRF) with ground layouts, navdata, SID/STARs, and vSMR profiles for WorldFlight airports.
+      </p>
+
+      <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px;">
+        <input type="text" id="addIcao" placeholder="Add ICAO..." style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);text-transform:uppercase;" maxlength="4" />
+        <button onclick="addAirport()" class="action-btn" style="padding:6px 16px;">Add</button>
+        <div style="flex:1;"></div>
+        <button onclick="toggleAll(true)" class="action-btn" style="padding:6px 12px;font-size:12px;">Select All</button>
+        <button onclick="toggleAll(false)" class="action-btn" style="padding:6px 12px;font-size:12px;">Deselect All</button>
+      </div>
+
+      <div id="airportList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:24px;">
+        ${airports.map(icao => `
+          <div class="cp-airport-row" data-icao="${icao}">
+            <label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;">
+              <input type="checkbox" checked class="cp-toggle" data-icao="${icao}" />
+              <span style="font-weight:600;font-family:monospace;font-size:14px;">${icao}</span>
+            </label>
+            <div class="cp-progress" style="flex:2;display:none;">
+              <div class="cp-progress-bar"><div class="cp-progress-fill"></div></div>
+              <span class="cp-progress-text" style="font-size:12px;color:var(--muted);min-width:80px;text-align:right;"></span>
+            </div>
+            <span class="cp-status" style="font-size:12px;min-width:60px;text-align:right;"></span>
+          </div>
+        `).join('')}
+      </div>
+
+      <button id="generateBtn" onclick="startGenerate()" class="action-btn primary" style="padding:10px 32px;font-size:14px;">
+        Generate Controller Pack
+      </button>
+
+      <script>
+        function addAirport() {
+          const input = document.getElementById('addIcao');
+          const icao = input.value.trim().toUpperCase();
+          if (!icao || icao.length < 3 || icao.length > 4) return;
+          if (document.querySelector('[data-icao="' + icao + '"]')) { input.value = ''; return; }
+          const row = document.createElement('div');
+          row.className = 'cp-airport-row';
+          row.dataset.icao = icao;
+          row.innerHTML = '<label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;">' +
+            '<input type="checkbox" checked class="cp-toggle" data-icao="' + icao + '" />' +
+            '<span style="font-weight:600;font-family:monospace;font-size:14px;">' + icao + '</span>' +
+            '</label>' +
+            '<div class="cp-progress" style="flex:2;display:none;">' +
+            '<div class="cp-progress-bar"><div class="cp-progress-fill"></div></div>' +
+            '<span class="cp-progress-text" style="font-size:12px;color:var(--muted);min-width:80px;text-align:right;"></span>' +
+            '</div>' +
+            '<span class="cp-status" style="font-size:12px;min-width:60px;text-align:right;"></span>';
+          document.getElementById('airportList').appendChild(row);
+          input.value = '';
+        }
+        document.getElementById('addIcao').addEventListener('keydown', e => { if (e.key === 'Enter') addAirport(); });
+
+        function toggleAll(state) {
+          document.querySelectorAll('.cp-toggle').forEach(cb => cb.checked = state);
+        }
+
+        async function startGenerate() {
+          const btn = document.getElementById('generateBtn');
+          btn.disabled = true;
+          btn.textContent = 'Generating...';
+          const selected = [...document.querySelectorAll('.cp-toggle:checked')].map(cb => cb.dataset.icao);
+          if (!selected.length) { btn.disabled = false; btn.textContent = 'Generate Controller Pack'; return; }
+
+          // Reset all statuses
+          document.querySelectorAll('.cp-airport-row').forEach(row => {
+            row.querySelector('.cp-status').textContent = '';
+            row.querySelector('.cp-status').style.color = '';
+            row.querySelector('.cp-progress').style.display = 'none';
+            row.querySelector('.cp-progress-fill').style.width = '0%';
+            row.querySelector('.cp-progress-text').textContent = '';
+          });
+
+          // Start generation
+          const res = await fetch('/admin/api/controller-pack/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ airports: selected })
+          });
+          const { jobId } = await res.json();
+
+          // Poll for progress
+          const poll = setInterval(async () => {
+            const pr = await fetch('/admin/api/controller-pack/progress/' + jobId);
+            const data = await pr.json();
+
+            for (const [icao, info] of Object.entries(data.airports || {})) {
+              const row = document.querySelector('[data-icao="' + icao + '"]');
+              if (!row) continue;
+              const progress = row.querySelector('.cp-progress');
+              const fill = row.querySelector('.cp-progress-fill');
+              const text = row.querySelector('.cp-progress-text');
+              const status = row.querySelector('.cp-status');
+
+              if (info.status === 'running') {
+                progress.style.display = 'flex';
+                fill.style.width = info.progress + '%';
+                text.textContent = info.step || '';
+                status.textContent = '';
+              } else if (info.status === 'done') {
+                progress.style.display = 'flex';
+                fill.style.width = '100%';
+                fill.style.background = '#2ecc71';
+                text.textContent = '';
+                status.textContent = 'Done';
+                status.style.color = '#2ecc71';
+              } else if (info.status === 'error') {
+                progress.style.display = 'flex';
+                fill.style.width = '100%';
+                fill.style.background = '#e74c3c';
+                text.textContent = '';
+                status.textContent = info.error || 'Error';
+                status.style.color = '#e74c3c';
+              } else if (info.status === 'queued') {
+                status.textContent = 'Queued';
+                status.style.color = 'var(--muted)';
+              }
+            }
+
+            if (data.complete) {
+              clearInterval(poll);
+              btn.disabled = false;
+              btn.textContent = 'Generate Controller Pack';
+            }
+          }, 500);
+        }
+      </script>
+
+      <style>
+        .cp-airport-row {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 8px 12px;
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: 6px;
+        }
+        .cp-progress {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .cp-progress-bar {
+          flex: 1;
+          height: 6px;
+          background: var(--border);
+          border-radius: 3px;
+          overflow: hidden;
+          min-width: 200px;
+        }
+        .cp-progress-fill {
+          height: 100%;
+          background: var(--accent);
+          border-radius: 3px;
+          transition: width 0.3s ease;
+          width: 0%;
+        }
+      </style>
+    </section>
+  `;
+
+  res.send(renderLayout({ title: 'Controller Pack', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+// Controller pack generation jobs
+const cpJobs = {};
+
+app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), async (req, res) => {
+  const airports = req.body.airports || [];
+  if (!airports.length) return res.json({ error: 'No airports' });
+  const jobId = crypto.randomUUID();
+  const job = { airports: {}, complete: false };
+  for (const icao of airports) job.airports[icao] = { status: 'queued', progress: 0, step: '' };
+  cpJobs[jobId] = job;
+  res.json({ jobId });
+
+  // Process airports sequentially
+  const scriptsDir = path.resolve('scripts');
+  for (const icao of airports) {
+    try {
+      job.airports[icao] = { status: 'running', progress: 5, step: 'Fetching ground...' };
+      // Step 1: Fetch ground layout
+      const groundResult = await new Promise((resolve) => {
+        const proc = spawn('node', [path.join(scriptsDir, 'fetch-airport-ground.js'), icao], { cwd: path.resolve('.') });
+        let output = '';
+        proc.stdout.on('data', d => {
+          output += d.toString();
+          const lines = output.split('\n');
+          const last = lines.filter(l => l.trim()).pop() || '';
+          if (last.includes('attempt')) {
+            const match = last.match(/attempt (\\d+)/);
+            if (match) job.airports[icao] = { status: 'running', progress: 5 + parseInt(match[1]) * 4, step: `Ground (attempt ${match[1]})...` };
+          }
+        });
+        proc.stderr.on('data', d => { output += d.toString(); });
+        proc.on('close', code => resolve({ code, output }));
+      });
+      if (groundResult.code === 2) {
+        job.airports[icao] = { status: 'running', progress: 50, step: 'No OSM data (skipped)' };
+      } else if (groundResult.code !== 0) {
+        throw new Error('Ground fetch failed: ' + groundResult.output.split('\n').filter(l => l.trim()).pop());
+      }
+      job.airports[icao] = { status: 'running', progress: 50, step: 'Generating sector...' };
+
+      // Step 2: Generate sector files
+      await new Promise((resolve, reject) => {
+        const proc = spawn('node', [path.join(scriptsDir, 'generate-airport-sct.js'), icao], { cwd: path.resolve('.') });
+        let output = '';
+        proc.stdout.on('data', d => {
+          output += d.toString();
+          // Parse progress from output
+          if (output.includes('fixes')) job.airports[icao] = { status: 'running', progress: 60, step: 'Navdata...' };
+          if (output.includes('navaids')) job.airports[icao] = { status: 'running', progress: 70, step: 'Navaids...' };
+          if (output.includes('airways')) job.airports[icao] = { status: 'running', progress: 80, step: 'Airways...' };
+          if (output.includes('SIDs')) job.airports[icao] = { status: 'running', progress: 90, step: 'SID/STARs...' };
+        });
+        proc.stderr.on('data', d => { output += d.toString(); });
+        proc.on('close', code => {
+          if (code === 0) resolve(output);
+          else reject(new Error(output.slice(-200)));
+        });
+      });
+
+      job.airports[icao] = { status: 'done', progress: 100, step: '' };
+    } catch (err) {
+      job.airports[icao] = { status: 'error', progress: 100, step: '', error: err.message.slice(0, 100) };
+    }
+  }
+  job.complete = true;
+  setTimeout(() => delete cpJobs[jobId], 60000); // Clean up after 1 min
+});
+
+app.get('/admin/api/controller-pack/progress/:jobId', requireAdmin, (req, res) => {
+  const job = cpJobs[req.params.jobId];
+  if (!job) return res.json({ complete: true, airports: {} });
+  res.json(job);
 });
 
 /* ===== ADMIN: MAILING LIST ===== */

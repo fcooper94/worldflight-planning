@@ -1,0 +1,25 @@
+DisplayTypeName:Standard ES radar screen
+DisplayTypeNeedRadarContent:1
+DisplayTypeGeoReferenced:1
+Airports:ZBAD:symbol
+Airports:ZBAD:name
+Runways:ZBAD:01L:centerline
+Runways:ZBAD:19R:centerline
+Sids:ZBAD-01L
+Sids:ZBAD-19R
+Runways:ZBAD:11L:centerline
+Runways:ZBAD:29R:centerline
+Sids:ZBAD-11L
+Sids:ZBAD-29R
+Runways:ZBAD:17L:centerline
+Runways:ZBAD:35R:centerline
+Sids:ZBAD-17L
+Sids:ZBAD-35R
+Runways:ZBAD:17R:centerline
+Runways:ZBAD:35L:centerline
+Sids:ZBAD-17R
+Sids:ZBAD-35L
+SHOWC:ZBAD_TWR:1
+m_Latitude:39.509945
+m_Longitude:116.41092
+m_Zoom:7
