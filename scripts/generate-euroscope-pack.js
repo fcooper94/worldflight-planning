@@ -17,7 +17,7 @@ const WF_AIRPORTS = [
 ];
 
 const NAVDATA_DIR = path.join(__dirname, '..', 'data', 'navdata');
-const OUTPUT_DIR = path.join(__dirname, '..', 'data', 'euroscope');
+const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
 async function main() {
   console.log('=== WorldFlight EuroScope Pack Generator ===\n');

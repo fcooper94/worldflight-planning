@@ -45,7 +45,7 @@ async function main() {
   console.log(`=== Fetching ground layout for ${ICAO} ===\n`);
 
   // Check for cached OSM data
-  const cacheDir = path.join(__dirname, '..', 'data', 'euroscope', 'cache');
+  const cacheDir = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight', 'cache');
   const cachePath = path.join(cacheDir, `${ICAO}_osm.json`);
   fs.mkdirSync(cacheDir, { recursive: true });
 
@@ -380,7 +380,7 @@ out body geom;
   }
 
   // Write output
-  const outPath = path.join(__dirname, '..', 'data', 'euroscope', `${ICAO}_ground.txt`);
+  const outPath = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight', `${ICAO}_ground.txt`);
   fs.writeFileSync(outPath, lines.join('\r\n'), 'utf-8');
   console.log(`\n  Written ${lines.length} lines to ${outPath}`);
   console.log('  Copy the sections into your .sct file [REGIONS], [GEO], and [LABELS] sections');

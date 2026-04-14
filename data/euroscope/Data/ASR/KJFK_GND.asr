@@ -1,8 +1,0 @@
-DisplayTypeName:Standard ES radar screen
-DisplayTypeNeedRadarContent:1
-DisplayTypeGeoReferenced:1
-Geo:KJFK Ground:line
-Regions:KJFK:polygon
-m_Latitude:40.6394
-m_Longitude:-73.7793
-m_Zoom:3

@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { coordPair, bearing, projectPoint } from './lib/geo.js';
+import { decimalToDMS, coordPair, bearing, projectPoint } from './lib/geo.js';
 import { parseFixes, parseNavaids, parseAirways } from './lib/parsers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -11,7 +11,7 @@ const prisma = new PrismaClient();
 const ICAO = process.argv[2] || 'EGLL';
 const RADIUS = 50; // 50nm radius for a single airport
 const NAVDATA_DIR = path.join(__dirname, '..', 'data', 'navdata');
-const OUTPUT_DIR = path.join(__dirname, '..', 'data', 'euroscope');
+const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
 async function main() {
   console.log(`=== Generating ${ICAO} sector file ===\n`);
@@ -88,7 +88,7 @@ async function main() {
     if (!rwy.ident1 || !rwy.lat1) continue;
     const hdg1 = Math.round(bearing(rwy.lat1, rwy.lon1, rwy.lat2, rwy.lon2));
     const hdg2 = (hdg1 + 180) % 360;
-    L.push(`${rwy.ident1.padEnd(4)} ${(rwy.ident2 || '').padEnd(4)} ${String(hdg1).padStart(3, '0')} ${String(hdg2).padStart(3, '0')} ${coordPair(rwy.lat1, rwy.lon1)} ${coordPair(rwy.lat2, rwy.lon2)}`);
+    L.push(`${rwy.ident1.padEnd(4)} ${(rwy.ident2 || '').padEnd(4)} ${String(hdg1).padStart(3, '0')} ${String(hdg2).padStart(3, '0')} ${coordPair(rwy.lat1, rwy.lon1)} ${coordPair(rwy.lat2, rwy.lon2)} ${ICAO} ${airport.name}`);
   }
   L.push('');
 
@@ -217,23 +217,85 @@ async function main() {
   const esePath = path.join(sctDir, `${ICAO}.ese`);
   fs.writeFileSync(esePath, E.join('\r\n'), 'utf-8');
 
-  // Generate PRF
+  // Generate PRF in ICAO subfolder - uses \..\Data\... to reach shared Data (matches UK pack pattern)
+  const prfDir = path.join(OUTPUT_DIR, ICAO);
+  fs.mkdirSync(prfDir, { recursive: true });
   const prf = [
-    `Settings\tSettingsfileSYMBOLOGY\tData\\Settings\\Symbology.txt`,
-    `Settings\tSettingsfileTAGS\tData\\Settings\\Tags.txt`,
-    `Settings\tSettingsfileSCREEN\tData\\Settings\\Screen.txt`,
-    `Settings\tSettingsfile\tData\\Settings\\General.txt`,
-    `Settings\tsector\tData\\Sector_Files\\${ICAO}.sct`,
-    `ASRFastKeys\t1\tData\\ASR\\${ICAO}.asr`,
-    `RecentFiles\tRecent1\tData\\ASR\\${ICAO}.asr`,
+    `Settings\tSettingsfileSYMBOLOGY\t\\..\\Data\\Settings\\Symbology.txt`,
+    `Settings\tSettingsfileTAGS\t\\..\\Data\\Settings\\Tags.txt`,
+    `Settings\tSettingsfileSCREEN\t\\..\\Data\\Settings\\Screen.txt`,
+    `Settings\tSettingsfile\t\\..\\Data\\Settings\\General.txt`,
+    `Settings\tsector\t\\..\\Data\\Sector_Files\\${ICAO}.sct`,
+    `Settings\tairlines\t\\..\\Data\\Datafiles\\ICAO_Airlines.txt`,
+    `Settings\tairports\t\\..\\Data\\Datafiles\\ICAO_Airports.txt`,
+    `Settings\taircraft\t\\..\\Data\\Datafiles\\ICAO_Aircraft.txt`,
+    `Settings\tairportcoords\t\\..\\Data\\Datafiles\\icao.txt`,
+    `ASRFastKeys\t1\t\\..\\Data\\ASR\\${ICAO}_SMR.asr`,
+    `ASRFastKeys\t2\t\\..\\Data\\ASR\\${ICAO}_APP.asr`,
+    `RecentFiles\tRecent1\t\\..\\Data\\ASR\\${ICAO}_SMR.asr`,
+    `RecentFiles\tRecent2\t\\..\\Data\\ASR\\${ICAO}_APP.asr`,
+    `Plugins\tPlugin0\t\\..\\Data\\Plugin\\vSMR\\vSMR.dll`,
+    `Plugins\tPlugin0Display0\tSMR radar display`,
     `LastSession\tserver\tAUTOMATIC`,
   ];
-  fs.writeFileSync(path.join(OUTPUT_DIR, `${ICAO}.prf`), prf.join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(prfDir, `${ICAO}.prf`), prf.join('\r\n'), 'utf-8');
 
-  // Generate ASR
+  // Generate ASR files
   const asrDir = path.join(OUTPUT_DIR, 'Data', 'ASR');
   fs.mkdirSync(asrDir, { recursive: true });
-  const asr = [
+
+  // SMR ASR (vSMR ground radar view) - F1
+  // Calculate bounding box ~0.04 degrees around airport center
+  const boxSize = 0.04;
+  const smr = [
+    'DisplayTypeName:SMR radar display',
+    'DisplayTypeNeedRadarContent:0',
+    'DisplayTypeGeoReferenced:1',
+    `Geo:${ICAO} Ground:`,
+    `Regions:${ICAO}:polygon`,
+  ];
+  for (const rwy of airport.runways) {
+    if (rwy.ident1) smr.push(`Runways:${ICAO}:${rwy.ident1}:centerline`);
+    if (rwy.ident2) smr.push(`Runways:${ICAO}:${rwy.ident2}:centerline`);
+  }
+  smr.push(`SHOWC:${ICAO}_TWR:1`);
+  smr.push('SHOWSB:0');
+  smr.push('BELOW:0');
+  smr.push('ABOVE:0');
+  smr.push('LEADER:5');
+  smr.push('SHOWLEADER:1');
+  smr.push('HISTORY_DOTS:5');
+  smr.push('SIMULATION_MODE:1');
+  smr.push('DISABLEPANNING:0');
+  smr.push('DISABLEZOOMING:0');
+  smr.push('DisplayRotation:0.00000');
+  smr.push('TAGFAMILY:Matias (built in)');
+  smr.push(`m_Latitude:${airport.lat}`);
+  smr.push(`m_Longitude:${airport.lon}`);
+  smr.push(`WINDOWAREA:${(airport.lat - boxSize).toFixed(6)}:${(airport.lon - boxSize * 1.3).toFixed(6)}:${(airport.lat + boxSize).toFixed(6)}:${(airport.lon + boxSize * 1.3).toFixed(6)}`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:ActiveProfile:WorldFlight`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:Afterglow:1`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:Airport:${ICAO}`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:AppTrailsDots:4`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:FontSize:1`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:ShowAircraftType:1`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:ShowSID:1`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:ShowWakeTurb:1`);
+  // SRW1 - Sub Radar Window showing airport overview
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1Display:1`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1Filter:5500`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1OffsetX:0`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1OffsetY:0`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1Rotation:0`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1Scale:30`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1TopLeftX:1545`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1TopLeftY:629`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1BottomRightX:1920`);
+  smr.push(`PLUGIN:vSMR Vatsim UK:SRW1BottomRightY:928`);
+  fs.writeFileSync(path.join(asrDir, `${ICAO}_SMR.asr`), smr.join('\r\n'), 'utf-8');
+
+  // APP ASR (standard approach radar) - F2
+  const app = [
     'DisplayTypeName:Standard ES radar screen',
     'DisplayTypeNeedRadarContent:1',
     'DisplayTypeGeoReferenced:1',
@@ -241,18 +303,115 @@ async function main() {
     `Airports:${ICAO}:name`,
   ];
   for (const rwy of airport.runways) {
-    if (rwy.ident1) asr.push(`Runways:${ICAO}:${rwy.ident1}:centerline`);
-    if (rwy.ident2) asr.push(`Runways:${ICAO}:${rwy.ident2}:centerline`);
-    if (rwy.ident1) asr.push(`Sids:${ICAO}-${rwy.ident1}`);
-    if (rwy.ident2) asr.push(`Sids:${ICAO}-${rwy.ident2}`);
+    if (rwy.ident1) app.push(`Runways:${ICAO}:${rwy.ident1}:centerline`);
+    if (rwy.ident2) app.push(`Runways:${ICAO}:${rwy.ident2}:centerline`);
+    if (rwy.ident1) app.push(`Sids:${ICAO}-${rwy.ident1}`);
+    if (rwy.ident2) app.push(`Sids:${ICAO}-${rwy.ident2}`);
   }
-  asr.push(`SHOWC:${ICAO}_TWR:1`);
-  asr.push(`m_Latitude:${airport.lat}`);
-  asr.push(`m_Longitude:${airport.lon}`);
-  asr.push('m_Zoom:7');
-  fs.writeFileSync(path.join(asrDir, `${ICAO}.asr`), asr.join('\r\n'), 'utf-8');
+  app.push(`SHOWC:${ICAO}_TWR:1`);
+  app.push(`m_Latitude:${airport.lat}`);
+  app.push(`m_Longitude:${airport.lon}`);
+  app.push('m_Zoom:7');
+  fs.writeFileSync(path.join(asrDir, `${ICAO}_APP.asr`), app.join('\r\n'), 'utf-8');
 
-  console.log(`Generated ${ICAO}.prf, ${ICAO}.asr, ${ICAO}.sct, ${ICAO}.ese`);
+  // Generate vSMR_Profiles.json with runway polygons (4-corner rectangles from threshold data)
+  const dmsPt = (lat, lon) => [decimalToDMS(lat, true), decimalToDMS(lon, false)];
+  const halfWidth = 0.032; // ~60m in nm, gives ~120m total (wide enough for SRW visibility)
+  const vsmrRunways = [];
+  for (const rwy of airport.runways) {
+    if (!rwy.lat1 || !rwy.lon1 || !rwy.lat2 || !rwy.lon2) continue;
+    const hdg = bearing(rwy.lat1, rwy.lon1, rwy.lat2, rwy.lon2);
+    const perpL = (hdg + 90) % 360;
+    const perpR = (hdg + 270) % 360;
+    // 4 corners: threshold1-left, threshold2-left, threshold2-right, threshold1-right
+    const c1 = projectPoint(rwy.lat1, rwy.lon1, perpL, halfWidth);
+    const c2 = projectPoint(rwy.lat2, rwy.lon2, perpL, halfWidth);
+    const c3 = projectPoint(rwy.lat2, rwy.lon2, perpR, halfWidth);
+    const c4 = projectPoint(rwy.lat1, rwy.lon1, perpR, halfWidth);
+    vsmrRunways.push({
+      runway_name: `${rwy.ident1}/${rwy.ident2}`,
+      path: [dmsPt(c1.lat, c1.lon), dmsPt(c2.lat, c2.lon), dmsPt(c3.lat, c3.lon), dmsPt(c4.lat, c4.lon)],
+      path_lvp: [dmsPt(c1.lat, c1.lon), dmsPt(c2.lat, c2.lon), dmsPt(c3.lat, c3.lon), dmsPt(c4.lat, c4.lon)]
+    });
+  }
+
+  const pluginDir = path.join(OUTPUT_DIR, 'Data', 'Plugin', 'vSMR');
+  const profilesPath = path.join(pluginDir, 'vSMR_Profiles.json');
+  let profiles = [];
+  if (fs.existsSync(profilesPath)) {
+    profiles = JSON.parse(fs.readFileSync(profilesPath, 'utf-8'));
+  }
+  // Ensure a Default profile exists as first entry (vSMR requires it)
+  if (!profiles.find(p => p.name === 'Default')) {
+    profiles.unshift({
+      name: 'Default',
+      font: { font_name: 'EuroScope', weight: 'Regular', sizes: { one: 11, two: 12, three: 13, four: 14, five: 16 } },
+      filters: { hide_above_alt: 10000, hide_above_spd: 250, radar_range_nm: 50, night_alpha_setting: 110,
+        pro_mode: { enable: false, accept_pilot_squawk: true, do_not_autocorrelate_squawks: [] } },
+      labels: { auto_deconfliction: true, leader_line_length: 50, use_aspeed_for_gate: false,
+        squawk_error_color: { r: 255, g: 255, b: 0 },
+        departure: { definition: [['callsign'], ['actype', 'wake']],
+          background_color: { r: 40, g: 50, b: 200, a: 255 }, background_color_on_runway: { r: 40, g: 50, b: 200, a: 255 }, text_color: { r: 255, g: 255, b: 255 } },
+        arrival: { definition: [['callsign'], ['actype']],
+          background_color: { r: 170, g: 50, b: 50, a: 255 }, background_color_on_runway: { r: 170, g: 50, b: 50, a: 255 }, text_color: { r: 255, g: 255, b: 255 } },
+        airborne: { use_departure_arrival_coloring: false, definition: [['callsign'], ['flightlevel']],
+          text_color: { r: 255, g: 255, b: 255 }, background_color: { r: 0, g: 0, b: 0, a: 0 }, background_color_on_runway: { r: 0, g: 0, b: 0, a: 0 } },
+        uncorrelated: { definition: [['systemid']],
+          text_color: { r: 255, g: 255, b: 255 }, background_color: { r: 150, g: 22, b: 135, a: 255 }, background_color_on_runway: { r: 0, g: 0, b: 0, a: 0 } }
+      },
+      rimcas: { rimcas_label_only: true, use_red_symbol_for_emergencies: true,
+        timer: [60, 45, 30, 15, 0], timer_lvp: [120, 90, 60, 30, 0], rimcas_stage_two_speed_threshold: 25,
+        background_color_stage_one: { r: 160, g: 90, b: 30, a: 255 }, background_color_stage_two: { r: 150, g: 0, b: 0, a: 255 }, alert_text_color: { r: 255, g: 255, b: 255 } },
+      targets: { show_primary_target: true,
+        target_color: { r: 255, g: 242, b: 73, a: 255 }, history_one_color: { r: 0, g: 255, b: 255, a: 255 },
+        history_two_color: { r: 0, g: 219, b: 219, a: 255 }, history_three_color: { r: 0, g: 183, b: 183, a: 255 } },
+      approach_insets: { extended_lines_length: 15, extended_lines_ticks_spacing: 1,
+        extended_lines_color: { r: 255, g: 255, b: 255 }, runway_color: { r: 0, g: 0, b: 0 }, background_color: { r: 127, g: 122, b: 122 } }
+    });
+  }
+  // Update or create WorldFlight profile with this airport's maps
+  let wfProfile = profiles.find(p => p.name === 'WorldFlight');
+  if (!wfProfile) {
+    wfProfile = {
+      name: 'WorldFlight',
+      font: { font_name: 'EuroScope', weight: 'Regular', sizes: { one: 11, two: 12, three: 13, four: 14, five: 16 } },
+      filters: { hide_above_alt: 10000, hide_above_spd: 250, radar_range_nm: 50, night_alpha_setting: 110,
+        pro_mode: { enable: false, accept_pilot_squawk: true, do_not_autocorrelate_squawks: [] } },
+      labels: { auto_deconfliction: true, leader_line_length: 50, use_aspeed_for_gate: false,
+        squawk_error_color: { r: 255, g: 255, b: 0 },
+        departure: { definition: [['callsign'], ['actype', 'wake']],
+          background_color: { r: 40, g: 50, b: 200, a: 255 }, background_color_on_runway: { r: 40, g: 50, b: 200, a: 255 }, text_color: { r: 255, g: 255, b: 255 } },
+        arrival: { definition: [['callsign'], ['actype']],
+          background_color: { r: 170, g: 50, b: 50, a: 255 }, background_color_on_runway: { r: 170, g: 50, b: 50, a: 255 }, text_color: { r: 255, g: 255, b: 255 } },
+        airborne: { use_departure_arrival_coloring: false, definition: [['callsign'], ['flightlevel']],
+          text_color: { r: 255, g: 255, b: 255 }, background_color: { r: 0, g: 0, b: 0, a: 0 }, background_color_on_runway: { r: 0, g: 0, b: 0, a: 0 } },
+        uncorrelated: { definition: [['systemid']],
+          text_color: { r: 255, g: 255, b: 255 }, background_color: { r: 150, g: 22, b: 135, a: 255 }, background_color_on_runway: { r: 0, g: 0, b: 0, a: 0 } }
+      },
+      rimcas: { rimcas_label_only: true, use_red_symbol_for_emergencies: true,
+        timer: [60, 45, 30, 15, 0], timer_lvp: [120, 90, 60, 30, 0], rimcas_stage_two_speed_threshold: 25,
+        background_color_stage_one: { r: 160, g: 90, b: 30, a: 255 }, background_color_stage_two: { r: 150, g: 0, b: 0, a: 255 }, alert_text_color: { r: 255, g: 255, b: 255 } },
+      targets: { show_primary_target: true,
+        target_color: { r: 255, g: 242, b: 73, a: 255 }, history_one_color: { r: 0, g: 255, b: 255, a: 255 },
+        history_two_color: { r: 0, g: 219, b: 219, a: 255 }, history_three_color: { r: 0, g: 183, b: 183, a: 255 } },
+      maps: {},
+      approach_insets: {}
+    };
+    profiles.push(wfProfile);
+  }
+  if (!wfProfile.maps) wfProfile.maps = {};
+  wfProfile.maps[ICAO] = { runways: vsmrRunways };
+  wfProfile.approach_insets = {
+    extended_lines_length: 15,
+    extended_lines_ticks_spacing: 1,
+    extended_lines_color: { r: 150, g: 150, b: 150 },
+    runway_color: { r: 255, g: 255, b: 255 },
+    background_color: { r: 127, g: 122, b: 122 }
+  };
+  fs.writeFileSync(profilesPath, JSON.stringify(profiles, null, 2), 'utf-8');
+  console.log(`  Updated vSMR_Profiles.json with ${ICAO} runway maps (${vsmrRunways.length} runways)`);
+
+  console.log(`Generated ${ICAO}.prf, ${ICAO}_SMR.asr, ${ICAO}_APP.asr, ${ICAO}.sct, ${ICAO}.ese`);
   await prisma.$disconnect();
 }
 
