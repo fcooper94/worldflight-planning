@@ -1,40 +1,15 @@
 DisplayTypeName:Standard ES radar screen
 DisplayTypeNeedRadarContent:1
 DisplayTypeGeoReferenced:1
-SECTORFILE:D:\Documents\Euroscope\WorldFlight\WF2601\..\Data\Sector_Files\WF2601.sct
-SECTORTITLE:WF2601.sct
+Airports:EGLL:symbol
 Airports:EGLL:name
+Airports:EHAM:symbol
 Airports:EHAM:name
-ARTCC boundary:EGTL:
-ARTCC boundary:EGTL-N:
-ARTCC boundary:EGTL-S:
-ARTCC boundary:EGTT:
-ARTCC boundary:EGTT-C:
-ARTCC boundary:EGTT-D:
-ARTCC boundary:EGTT-E:
-ARTCC boundary:EGTT-H:
-ARTCC boundary:EGTT-M:
-ARTCC boundary:EGTT-N:
-ARTCC boundary:EGTT-NE:
-ARTCC boundary:EGTT-NW:
-ARTCC boundary:EGTT-S:
-ARTCC boundary:EGTT-SC:
-ARTCC boundary:EGTT-W:
-ARTCC boundary:EHAA:
-Fixes:REDFA:name
-Fixes:REDFA:symbol
-Geo:Coastline:
-Geo:EGLL Ground:
-Geo:EHAM Ground:
-Geo:GEO:
-Sids:WF2601:
-VORs:CLN:name
-VORs:CLN:symbol
-SHOWC:1
-SHOWSB:0
-BELOW:0
+SHOWC:EGLL_TWR:1
+SHOWC:EHAM_TWR:1
+SHOWSB:1
 ABOVE:0
-LEADER:-1
+LEADER:3
 SHOWLEADER:1
 TURNLEADER:0
 HISTORY_DOTS:0
@@ -42,46 +17,7 @@ SIMULATION_MODE:1
 DISABLEPANNING:0
 DISABLEZOOMING:0
 DisplayRotation:0.00000
-TAGFAMILY:AC-TopSky-Easy
-WINDOWAREA:50.790285:-1.392202:52.873619:4.854904
-PLUGIN:UK Controller Plugin:approachSequencerContentCollapsed:0
-PLUGIN:UK Controller Plugin:approachSequencerVisible:0
-PLUGIN:UK Controller Plugin:approachSequencerXPosition:200
-PLUGIN:UK Controller Plugin:approachSequencerYPosition:200
-PLUGIN:UK Controller Plugin:CountdownScreenPosX:83
-PLUGIN:UK Controller Plugin:CountdownScreenPosY:282
-PLUGIN:UK Controller Plugin:departureCoordinationListContentCollapsed:0
-PLUGIN:UK Controller Plugin:departureCoordinationListVisible:0
-PLUGIN:UK Controller Plugin:departureCoordinationListXPosition:100
-PLUGIN:UK Controller Plugin:departureCoordinationListYPosition:100
-PLUGIN:UK Controller Plugin:DisplayCountdown:0
-PLUGIN:UK Controller Plugin:DisplayMinStack:0
-PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0
-PLUGIN:UK Controller Plugin:HistoryTrailAntiAlias:1
-PLUGIN:UK Controller Plugin:HistoryTrailColour:255,130,20
-PLUGIN:UK Controller Plugin:HistoryTrailDegrade:1
-PLUGIN:UK Controller Plugin:HistoryTrailDisplay:1
-PLUGIN:UK Controller Plugin:HistoryTrailDotFill:0
-PLUGIN:UK Controller Plugin:HistoryTrailDotSize:4
-PLUGIN:UK Controller Plugin:HistoryTrailDotTotate:0
-PLUGIN:UK Controller Plugin:HistoryTrailFade:1
-PLUGIN:UK Controller Plugin:HistoryTrailLength:15
-PLUGIN:UK Controller Plugin:HistoryTrailMaxAltitudeFilter:99999
-PLUGIN:UK Controller Plugin:HistoryTrailMinAltitudeFilter:0
-PLUGIN:UK Controller Plugin:HistoryTrailType:0
-PLUGIN:UK Controller Plugin:holdDisplayVisibility:1
-PLUGIN:UK Controller Plugin:MinStackScreenPosX:100
-PLUGIN:UK Controller Plugin:MinStackScreenPosY:100
-PLUGIN:UK Controller Plugin:missedApproachButtonVisibility:0
-PLUGIN:UK Controller Plugin:missedApproachButtonXPosition:200
-PLUGIN:UK Controller Plugin:missedApproachButtonYPosition:200
-PLUGIN:UK Controller Plugin:missedApproachRenderDuration:5
-PLUGIN:UK Controller Plugin:missedApproachRenderMode:0
-PLUGIN:UK Controller Plugin:RegionalPressureScreenPosX:228
-PLUGIN:UK Controller Plugin:RegionalPressureScreenPosY:174
-PLUGIN:UK Controller Plugin:SelectedMinStack:tma.LTMA;tma.MTMA;tma.STMA
-PLUGIN:UK Controller Plugin:SelectedRegionalPressures:ASR_LONDON;ASR_SCOTTISH
-PLUGIN:UK Controller Plugin:wakeCalculatorCollapsed:0
-PLUGIN:UK Controller Plugin:wakeCalculatorVisibility:0
-PLUGIN:UK Controller Plugin:wakeCalculatorXPosition:200
-PLUGIN:UK Controller Plugin:wakeCalculatorYPosition:200
+TAGFAMILY:Matias (built in)
+m_Latitude:51.918536934526735
+m_Longitude:2.126596822198099
+m_Zoom:20

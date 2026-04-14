@@ -297,6 +297,7 @@ export function parseVATSpyForFIRs(vatspyPath, firBoundariesPath, transitFirIds)
   // Parse VATSpy.dat [FIRs] section for positions
   const positions = [];
   const seenCallsigns = new Set();
+  const firPositions = {}; // firId -> [{callsign, name, boundaryId}]
   const vatspyLines = fs.readFileSync(vatspyPath, 'utf-8').split('\n');
   let inFirs = false;
   for (const line of vatspyLines) {
@@ -314,7 +315,9 @@ export function parseVATSpyForFIRs(vatspyPath, firBoundariesPath, transitFirIds)
     if (!topLevelIds.has(firBase) && !topLevelIds.has(firId)) continue;
     if (callsignPrefix && !seenCallsigns.has(callsignPrefix)) {
       seenCallsigns.add(callsignPrefix);
-      positions.push({ callsign: callsignPrefix, name, firId });
+      positions.push({ callsign: callsignPrefix, name, firId, boundaryId });
+      if (!firPositions[firId]) firPositions[firId] = [];
+      firPositions[firId].push({ callsign: callsignPrefix, name, boundaryId });
     }
   }
 
@@ -357,5 +360,5 @@ export function parseVATSpyForFIRs(vatspyPath, firBoundariesPath, transitFirIds)
     }
   }
 
-  return { positions, radars, firBounds };
+  return { positions, radars, firBounds, firPositions };
 }

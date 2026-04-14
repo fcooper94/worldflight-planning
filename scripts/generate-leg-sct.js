@@ -605,6 +605,27 @@ async function main() {
   E.push(`BORDER:${LEG_NAME}_BOUNDARY`);
   E.push('');
 
+  // Sub-sector definitions from transited FIRs (auto-ownership from VATSpy)
+  for (const fir of routeFirs) {
+    const sectorName = fir.icao.replace(/-/g, '_');
+    // Find the primary owner from VATSpy firPositions
+    const firPosEntries = vatspy.firPositions[fir.icao] || vatspy.firPositions[fir.icao.split('-')[0]] || [];
+    const primaryOwner = firPosEntries.length > 0 ? firPosEntries[0].callsign : null;
+    // Build owner chain: primary owner first, then all position short IDs
+    const owners = primaryOwner ? [primaryOwner, ...positionShortIds.filter(id => id !== primaryOwner)] : positionShortIds;
+    if (owners.length === 0) continue;
+
+    E.push(`SECTORLINE:${sectorName}_LINE`);
+    for (const pt of fir.points) {
+      E.push(`COORD:${coordPair(pt.lat, pt.lon).replace(' ', ':')}`);
+    }
+    E.push('');
+    E.push(`SECTOR:${sectorName}:0:66000`);
+    E.push(`OWNER:${owners.join(':')}`);
+    E.push(`BORDER:${sectorName}_LINE`);
+    E.push('');
+  }
+
   // Per-airport sectors
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
     const pts = [];
