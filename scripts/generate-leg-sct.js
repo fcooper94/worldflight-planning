@@ -599,7 +599,7 @@ async function main() {
   const prfDir = path.join(OUTPUT_DIR, LEG_NAME);
   fs.mkdirSync(prfDir, { recursive: true });
   const prf = [
-    `Settings\tSettingsfileSYMBOLOGY\t\\..\\Data\\Settings\\Symbology.txt`,
+    `Settings\tSettingsfileSYMBOLOGY\t\\..\\Data\\Settings\\Symbology_Enroute.txt`,
     `Settings\tSettingsfileTAGS\t\\..\\Data\\Settings\\Tags.txt`,
     `Settings\tSettingsfileSCREEN\t\\..\\Data\\Settings\\Screen.txt`,
     `Settings\tSettingsfile\t\\..\\Data\\Settings\\General.txt`,
