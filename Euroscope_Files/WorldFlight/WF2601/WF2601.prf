@@ -1,6 +1,7 @@
-Settings	SettingsfileSYMBOLOGY	\..\Data\Settings\Symbology_Enroute.txt
-Settings	SettingsfileSCREEN	\..\Data\Settings\Screen.txt
 Settings	Settingsfile	\..\Data\Settings\General.txt
+Settings	SettingsfileSCREEN	\..\Data\Settings\Screen.txt
+Settings	SettingsfileSYMBOLOGY	\..\Data\Settings\Symbology_Enroute.txt
+Settings	SettingsfileTAGS	\..\Data\Settings\Tags.txt
 Settings	SettingsfilePROFILE	\..\Data\Settings\Profiles_WF2601.txt
 Settings	SettingsfileARR	\..\Data\Settings\Lists.txt
 Settings	SettingsfileDEP	\..\Data\Settings\Lists.txt
@@ -25,5 +26,8 @@ RecentFiles	Recent4	\..\Data\ASR\WF2601_EHAM_SMR.asr
 RecentFiles	Recent5	\..\Data\ASR\WF2601_EHAM_APP.asr
 Plugins	Plugin0	\..\Data\Plugin\vSMR\vSMR.dll
 Plugins	Plugin0Display0	SMR radar display
+Plugins	Plugin1	\..\Data\Plugin\TopSky\TopSky.dll
+Plugins	Plugin1Display0	Standard ES radar screen
+Plugins	Plugin1Display1	SMR radar display
 LastSession	server	AUTOMATIC
 LastSession	callsign	EGLL_OBS

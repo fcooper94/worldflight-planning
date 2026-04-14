@@ -552,14 +552,15 @@ async function main() {
   }
   // Real VATSIM FIR/sector positions from VATSpy (CTR, APP, etc.)
   const addedPrefixes = new Set();
+  const positionShortIds = []; // collect short IDs for OWNER line
   for (const vp of vatspy.positions) {
     if (addedPrefixes.has(vp.callsign)) continue;
     addedPrefixes.add(vp.callsign);
-    // Determine facility type from callsign suffix
-    const suffix = vp.callsign.split('_').pop() || 'CTR';
-    const facilityChar = suffix.startsWith('C') ? 'C' : suffix.startsWith('A') ? 'A' : suffix.startsWith('T') ? 'T' : 'C';
-    // Use midpoint as position coords
-    E.push(`${vp.callsign}_CTR:${vp.name}:199.998:${vp.callsign}:${facilityChar}:${vp.callsign}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
+    const facilityChar = 'C';
+    // Short ID: use callsign prefix as-is (matches UK pattern)
+    const shortId = vp.callsign;
+    positionShortIds.push(shortId);
+    E.push(`${vp.callsign}_CTR:${vp.name}:199.998:${shortId}:${facilityChar}:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
   }
   E.push('');
   E.push('[SIDSSTARS]');
@@ -595,8 +596,12 @@ async function main() {
   E.push(`COORD:${coordPair(sMinLat, sMinLon)}`);
   E.push('');
   E.push(`SECTOR:${LEG_NAME}:0:66000`);
-  E.push(`OWNER:${FROM}_APP:${TO}_APP:${FROM}_TWR:${TO}_TWR:${FROM}_OBS:${TO}_OBS`);
-  E.push(`ALTOWNER:Observer:${FROM}_OBS:${TO}_OBS:${FROM}_APP:${TO}_APP:${FROM}_TWR:${TO}_TWR`);
+  // Owner list: airport short IDs + VATSpy position short IDs
+  const allOwners = [
+    FROM, TO, // airport prefixes match APP/TWR/GND/DEL/OBS
+    ...positionShortIds // VATSpy FIR position short IDs
+  ];
+  E.push(`OWNER:${allOwners.join(':')}`);
   E.push(`BORDER:${LEG_NAME}_BOUNDARY`);
   E.push('');
 
