@@ -48,7 +48,7 @@ const COPY_FILES = [
   },
   {
     dest: 'Data/Settings/General.txt',
-    src: 'Data/Settings/General_SMR.txt',
+    src: 'Data/Settings/AC/AC_General.txt',
   },
   {
     dest: 'Data/Datafiles/ICAO_Airlines.txt',

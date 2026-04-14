@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { decimalToDMS, coordPair, bearing, projectPoint, haversineNm, midpoint } from './lib/geo.js';
-import { parseFixes, parseNavaids, parseAirways, parseCIFP, parseRouteFIRs } from './lib/parsers.js';
+import { parseFixes, parseNavaids, parseAirways, parseCIFP, parseRouteFIRs, parseVATSpyForFIRs } from './lib/parsers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const prisma = new PrismaClient();
@@ -19,6 +19,8 @@ const COASTLINE_PATH = path.join(__dirname, '..', 'data', 'world_coastline.sct')
 const NAVDATA_DIR = path.join(__dirname, '..', 'data', 'navdata');
 const CIFP_DIR = path.join(__dirname, '..', 'data', 'XP12', 'CIFP');
 const FIR_GEOJSON = path.join(__dirname, '..', 'public', 'fir-boundaries.geojson');
+const VATSPY_DAT = path.join(__dirname, '..', 'data', 'VATSPY', 'VATSpy.dat');
+const FIR_BOUNDS = path.join(__dirname, '..', 'data', 'VATSPY', 'FIRBoundaries.dat');
 const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
 function loadGround(icao) {
@@ -196,6 +198,11 @@ async function main() {
   // Parse FIR boundaries along route
   const routeFirs = parseRouteFIRs(FIR_GEOJSON, depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon);
   console.log(`  ${routeFirs.length} FIRs along route`);
+
+  // Parse VATSpy for real VATSIM positions and radar coverage grid
+  const transitFirIds = routeFirs.map(f => f.icao);
+  const vatspy = parseVATSpyForFIRs(VATSPY_DAT, FIR_BOUNDS, transitFirIds);
+  console.log(`  ${vatspy.positions.length} VATSIM positions, ${vatspy.radars.length} radar sites for ${vatspy.firBounds.length} FIRs`);
 
   // Load ground layouts
   console.log('Loading ground layouts...');
@@ -537,10 +544,22 @@ async function main() {
   E.push(`; ${LEG_NAME} Extended Sector File (${FROM} -> ${TO})`);
   E.push('');
   E.push('[POSITIONS]');
+  // Airport-specific positions (DEL/GND/TWR/APP)
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
     for (const pos of [{s:'OBS',n:'Observer',f:'199.998'},{s:'DEL',n:'Delivery',f:'121.700'},{s:'GND',n:'Ground',f:'121.800'},{s:'TWR',n:'Tower',f:'118.500'},{s:'APP',n:'Approach',f:'119.000'}]) {
       E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.s.charAt(0)}:${icao}:${pos.s}:-:-:0100:0177:${coordPair(apt.lat, apt.lon).replace(' ', ':')}`);
     }
+  }
+  // Real VATSIM FIR/sector positions from VATSpy (CTR, APP, etc.)
+  const addedPrefixes = new Set();
+  for (const vp of vatspy.positions) {
+    if (addedPrefixes.has(vp.callsign)) continue;
+    addedPrefixes.add(vp.callsign);
+    // Determine facility type from callsign suffix
+    const suffix = vp.callsign.split('_').pop() || 'CTR';
+    const facilityChar = suffix.startsWith('C') ? 'C' : suffix.startsWith('A') ? 'A' : suffix.startsWith('T') ? 'T' : 'C';
+    // Use midpoint as position coords
+    E.push(`${vp.callsign}_CTR:${vp.name}:199.998:${vp.callsign}:${facilityChar}:${vp.callsign}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
   }
   E.push('');
   E.push('[SIDSSTARS]');
@@ -601,7 +620,7 @@ async function main() {
   fs.mkdirSync(prfDir, { recursive: true });
   const prf = [
     `Settings\tSettingsfileSYMBOLOGY\t\\..\\Data\\Settings\\Symbology_Enroute.txt`,
-    // Tags.txt removed - use EuroScope built-in tags (UK Tags.txt requires TopSky/UKCP plugins)
+    `Settings\tSettingsfileTAGS\t\\..\\Data\\Settings\\Tags.txt`,
     `Settings\tSettingsfileSCREEN\t\\..\\Data\\Settings\\Screen.txt`,
     `Settings\tSettingsfile\t\\..\\Data\\Settings\\General.txt`,
     `Settings\tSettingsfilePROFILE\t\\..\\Data\\Settings\\Profiles_${LEG_NAME}.txt`,
@@ -628,10 +647,9 @@ async function main() {
     `RecentFiles\tRecent5\t\\..\\Data\\ASR\\${LEG_NAME}_${TO}_APP.asr`,
     `Plugins\tPlugin0\t\\..\\Data\\Plugin\\vSMR\\vSMR.dll`,
     `Plugins\tPlugin0Display0\tSMR radar display`,
-    // TopSky disabled - causes crash on connect
-    // `Plugins\tPlugin1\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
-    // `Plugins\tPlugin1Display0\tStandard ES radar screen`,
-    // `Plugins\tPlugin1Display1\tSMR radar display`,
+    `Plugins\tPlugin1\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
+    `Plugins\tPlugin1Display0\tStandard ES radar screen`,
+    `Plugins\tPlugin1Display1\tSMR radar display`,
     `LastSession\tserver\tAUTOMATIC`,
     `LastSession\tcallsign\t${FROM}_OBS`,
   ];
@@ -733,6 +751,30 @@ async function main() {
   wfProfile.approach_insets = { extended_lines_length: 15, extended_lines_ticks_spacing: 1,
     extended_lines_color: { r: 150, g: 150, b: 150 }, runway_color: { r: 255, g: 255, b: 255 }, background_color: { r: 127, g: 122, b: 122 } };
   fs.writeFileSync(profilesPath, JSON.stringify(profiles, null, 2), 'utf-8');
+
+  // ===== TOPSKY RADARS =====
+  // Generate radar grid covering all transited FIRs
+  const topskyDir = path.join(OUTPUT_DIR, 'Data', 'Plugin', 'TopSky');
+  if (fs.existsSync(topskyDir)) {
+    // Build position prefix list for POSITIONS field
+    const posPrefixes = [FROM, TO, ...vatspy.positions.map(p => p.callsign)];
+    const uniquePrefixes = [...new Set(posPrefixes)].join(':');
+
+    const radarLines = [];
+    for (const radar of vatspy.radars) {
+      radarLines.push(`RADAR:${radar.name}`);
+      radarLines.push(`POSITIONS:${uniquePrefixes}`);
+      radarLines.push(`LOCATION:${coordPair(radar.lat, radar.lon).replace(' ', ':')}`);
+      radarLines.push('ALTITUDE:500');
+      radarLines.push('BEAMWIDTH:1.4');
+      radarLines.push('PULSEWIDTH:1');
+      radarLines.push('MAXANGLE:87');
+      radarLines.push('RANGE:0:300');
+      radarLines.push('');
+    }
+    fs.writeFileSync(path.join(topskyDir, 'TopSkyRadars.txt'), radarLines.join('\r\n'), 'utf-8');
+    console.log(`  ${vatspy.radars.length} TopSky radars generated`);
+  }
 
   console.log(`\nGenerated ${LEG_NAME}:`);
   console.log(`  SCT: ${LEG_NAME}.sct (${FROM} + ${TO})`);

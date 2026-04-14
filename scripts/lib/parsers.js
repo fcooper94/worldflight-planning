@@ -281,3 +281,81 @@ export async function parseAirways(filePath, centers, radiusNm = 200) {
 
   return { high, low };
 }
+
+/**
+ * Parse VATSpy data to get VATSIM positions and FIR bounding boxes for transited FIRs.
+ * Returns { positions: [{callsign, name, firId}], radars: [{name, lat, lon}] }
+ */
+export function parseVATSpyForFIRs(vatspyPath, firBoundariesPath, transitFirIds) {
+  // Get top-level FIR IDs (strip sub-sector suffix for matching)
+  const topLevelIds = new Set();
+  for (const id of transitFirIds) {
+    topLevelIds.add(id.split('-')[0]);
+    topLevelIds.add(id); // also keep full id like EGTT-E
+  }
+
+  // Parse VATSpy.dat [FIRs] section for positions
+  const positions = [];
+  const seenCallsigns = new Set();
+  const vatspyLines = fs.readFileSync(vatspyPath, 'utf-8').split('\n');
+  let inFirs = false;
+  for (const line of vatspyLines) {
+    if (line.startsWith('[FIRs]')) { inFirs = true; continue; }
+    if (line.startsWith('[') && inFirs) break;
+    if (!inFirs || line.startsWith(';') || !line.trim()) continue;
+    const parts = line.split('|');
+    if (parts.length < 4) continue;
+    const firId = parts[0].trim();
+    const name = parts[1].trim();
+    const callsignPrefix = parts[2].trim();
+    const boundaryId = parts[3].trim();
+    // Check if this FIR is one we transit
+    const firBase = firId.split('-')[0].replace(/_/g, '-');
+    if (!topLevelIds.has(firBase) && !topLevelIds.has(firId)) continue;
+    if (callsignPrefix && !seenCallsigns.has(callsignPrefix)) {
+      seenCallsigns.add(callsignPrefix);
+      positions.push({ callsign: callsignPrefix, name, firId });
+    }
+  }
+
+  // Parse FIRBoundaries.dat to get bounding boxes for radar placement
+  const firBounds = [];
+  const seenFirs = new Set();
+  const boundLines = fs.readFileSync(firBoundariesPath, 'utf-8').split('\n');
+  for (const line of boundLines) {
+    if (!line.includes('|')) continue;
+    const parts = line.split('|');
+    const icao = parts[0];
+    // Only top-level FIRs (no sub-sectors) for radar coverage
+    if (icao.includes('-')) continue;
+    if (!topLevelIds.has(icao)) continue;
+    if (seenFirs.has(icao)) continue;
+    seenFirs.add(icao);
+    const minLat = parseFloat(parts[4]);
+    const minLon = parseFloat(parts[5]);
+    const maxLat = parseFloat(parts[6]);
+    const maxLon = parseFloat(parts[7]);
+    const centerLat = parseFloat(parts[8]);
+    const centerLon = parseFloat(parts[9]);
+    if (!isNaN(minLat)) firBounds.push({ icao, minLat, minLon, maxLat, maxLon, centerLat, centerLon });
+  }
+
+  // Generate radar grid to cover each FIR
+  // Place radars every ~4 degrees (approx 240nm) in a grid
+  const GRID_STEP = 4;
+  const RADAR_RANGE = 300;
+  const radars = [];
+  let radarIdx = 0;
+  for (const fir of firBounds) {
+    for (let lat = fir.minLat; lat <= fir.maxLat; lat += GRID_STEP) {
+      for (let lon = fir.minLon; lon <= fir.maxLon; lon += GRID_STEP) {
+        radars.push({
+          name: `WF_R${radarIdx++}`,
+          lat, lon
+        });
+      }
+    }
+  }
+
+  return { positions, radars, firBounds };
+}
