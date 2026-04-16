@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -24,6 +25,18 @@ const FIR_BOUNDS = path.join(__dirname, '..', 'data', 'VATSPY', 'FIRBoundaries.d
 const XP12_ATC = path.join(__dirname, '..', 'data', 'XP12', '1200 atc data', 'Earth nav data', 'atc.dat');
 const AFV_STATIONS = path.join(__dirname, '..', 'data', 'afv_stations.csv');
 const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
+
+function collectLabelItems(labelStr) {
+  if (!labelStr) return { lines: labelStr, items: [] };
+  const items = [];
+  const lines = labelStr.split(/\r?\n/).map(line => {
+    const clean = line.replace(/\r/g, '');
+    const m = clean.match(/^"([^"]+)"\s+(.+)$/);
+    if (m) items.push(m[1]);
+    return clean;
+  }).join('\r\n');
+  return { lines, items };
+}
 
 function loadGround(icao) {
   const groundPath = path.join(OUTPUT_DIR, `${icao}_ground.txt`);
@@ -109,15 +122,18 @@ function buildVsmrRunways(airport) {
   return runways;
 }
 
-function buildSmrAsr(legName, icao, airport, suffix) {
+function buildSmrAsr(legName, icao, airport, suffix, freeTextItems) {
   const boxSize = 0.04;
   const lines = [
     'DisplayTypeName:SMR radar display',
     'DisplayTypeNeedRadarContent:0',
     'DisplayTypeGeoReferenced:1',
-    `Geo:${icao} Ground:`,
-    `Regions:${icao}:polygon`,
   ];
+  for (const item of (freeTextItems || [])) {
+    lines.push(`Free Text:${item}:freetext`);
+  }
+  lines.push(`Geo:${icao} Ground:`);
+  lines.push(`Regions:${icao}:polygon`);
   for (const rwy of airport.runways) {
     if (rwy.ident1) lines.push(`Runways:${icao}:${rwy.ident1}:centerline`);
     if (rwy.ident2) lines.push(`Runways:${icao}:${rwy.ident2}:centerline`);
@@ -147,13 +163,16 @@ function buildSmrAsr(legName, icao, airport, suffix) {
   return lines;
 }
 
-function buildAppAsr(icao, airport) {
+function buildAppAsr(icao, airport, freeTextItems) {
   const lines = [
     'DisplayTypeName:Standard ES radar screen',
     'DisplayTypeNeedRadarContent:1',
     'DisplayTypeGeoReferenced:1',
-    `Airports:${icao}:symbol`, `Airports:${icao}:name`,
   ];
+  for (const item of (freeTextItems || [])) {
+    lines.push(`Free Text:${item}:freetext`);
+  }
+  lines.push(`Airports:${icao}:symbol`, `Airports:${icao}:name`);
   for (const rwy of airport.runways) {
     if (rwy.ident1) lines.push(`Runways:${icao}:${rwy.ident1}:centerline`);
     if (rwy.ident2) lines.push(`Runways:${icao}:${rwy.ident2}:centerline`);
@@ -212,8 +231,25 @@ async function main() {
   // VATSpy parsing deferred until after route expansion (to use actual route FIRs)
   let vatspy = null;
 
-  // Load ground layouts
+  // Load ground layouts — fetch from Overpass if missing
   console.log('Loading ground layouts...');
+  const fetchScript = path.join(__dirname, 'fetch-airport-ground.js');
+  for (const icao of [FROM, TO]) {
+    const groundPath = path.join(OUTPUT_DIR, `${icao}_ground.txt`);
+    if (!fs.existsSync(groundPath)) {
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        console.log(`  Fetching ${icao} ground layout (attempt ${attempt}/5)...`);
+        try {
+          execFileSync(process.execPath, [fetchScript, icao], { cwd: path.join(__dirname, '..'), stdio: 'inherit', timeout: 120000 });
+          if (fs.existsSync(groundPath)) { console.log(`  ${icao} ground layout fetched.`); break; }
+        } catch (err) {
+          console.log(`  Attempt ${attempt} failed: ${err.message}`);
+          if (attempt < 5) await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+      if (!fs.existsSync(groundPath)) console.log(`  Warning: ${icao} ground layout unavailable after 5 attempts.`);
+    }
+  }
   const depGround = loadGround(FROM);
   const arrGround = loadGround(TO);
 
@@ -564,13 +600,20 @@ async function main() {
   }
   L.push('');
 
-  // Labels for both
+  // Labels for both — prefix with ICAO group so ASR can enable them
+  const depLabels = collectLabelItems(depGround.labels);
+  const arrLabels = collectLabelItems(arrGround.labels);
   L.push('[LABELS]');
   L.push(`"${FROM}" ${coordPair(depAirport.lat, depAirport.lon)} 16777215`);
-  if (depGround.labels) L.push(depGround.labels);
+  if (depLabels.lines) L.push(depLabels.lines);
   L.push(`"${TO}" ${coordPair(arrAirport.lat, arrAirport.lon)} 16777215`);
-  if (arrGround.labels) L.push(arrGround.labels);
+  if (arrLabels.lines) L.push(arrLabels.lines);
   L.push('');
+
+  // Combine all free text items (both airports + airport names) for ASR references
+  const allFreeTextItems = [FROM, TO, ...depLabels.items, ...arrLabels.items]
+    .map(t => `SCT2\\${t}`)
+    .sort((a, b) => a.localeCompare(b));
 
   // Regions for both
   L.push('[REGIONS]');
@@ -1013,10 +1056,10 @@ async function main() {
   fs.mkdirSync(asrDir, { recursive: true });
 
   // F1: Departure SMR
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_SMR.asr`), buildSmrAsr(LEG_NAME, FROM, depAirport, 'DEP').join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_SMR.asr`), buildSmrAsr(LEG_NAME, FROM, depAirport, 'DEP', allFreeTextItems).join('\r\n'), 'utf-8');
 
   // F2: Departure APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport, allFreeTextItems).join('\r\n'), 'utf-8');
 
   // F3: Enroute
   const enrZoom = dist < 500 ? 20 : dist < 2000 ? 10 : 5;
@@ -1062,10 +1105,10 @@ async function main() {
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_Enroute.asr`), enroute.join('\r\n'), 'utf-8');
 
   // F4: Arrival SMR
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_SMR.asr`), buildSmrAsr(LEG_NAME, TO, arrAirport, 'ARR').join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_SMR.asr`), buildSmrAsr(LEG_NAME, TO, arrAirport, 'ARR', allFreeTextItems).join('\r\n'), 'utf-8');
 
   // F5: Arrival APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport, allFreeTextItems).join('\r\n'), 'utf-8');
 
   // ===== vSMR PROFILES =====
   const pluginDir = path.join(OUTPUT_DIR, 'Data', 'Plugin', 'vSMR');

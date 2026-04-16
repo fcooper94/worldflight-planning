@@ -1,42 +1,42 @@
 PROFILE
-PROFILE:FACT_OBS:100:0
-ATIS2:FACT Observer
+PROFILE:FACT_TWR:30:4
+ATIS2:Cape Town International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FACT_APP:100:5
-ATIS2:FACT Approach
+ATIS2:Cape Town International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
-PROFILE:FACT_TWR:30:4
-ATIS2:FACT Tower
+PROFILE:FACT_F_APP:100:5
+ATIS2:Cape Town International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
-PROFILE:FACT_GND:20:3
-ATIS2:WorldFlight Temporary Position
+PROFILE:FACT_E_GND:20:3
+ATIS2:Cape Town International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FACT_DEL:20:2
-ATIS2:WorldFlight Temporary Position
+ATIS2:Cape Town International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
-PROFILE:FKKD_OBS:100:0
-ATIS2:FKKD Observer
+PROFILE:FACT_P_DEL:20:2
+ATIS2:Cape Town International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
-PROFILE:FKKD_APP:100:5
-ATIS2:FKKD Approach
+PROFILE:FACT_GND:20:3
+ATIS2:Cape Town International Airport
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FACT_ATIS:20:6
+ATIS2:Cape Town International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FKKD_TWR:30:4
-ATIS2:FKKD Tower
+ATIS2:Douala International Airport
 ATIS3:
 ATIS4:WorldFlight 2026
-PROFILE:FKKD_GND:20:3
-ATIS2:WorldFlight Temporary Position
-ATIS3:
-ATIS4:WorldFlight 2026
-PROFILE:FKKD_DEL:20:2
-ATIS2:WorldFlight Temporary Position
+PROFILE:FACA_W_CTR:300:6
+ATIS2:Cape Town (Bandbox) - Cape Town
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FACA_CTR:300:6
@@ -44,51 +44,35 @@ ATIS2:Cape Town (Bandbox) - Cape Town
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FACA_E_CTR:300:6
-ATIS2:Cape Town ACC (East) - Cape Town
+ATIS2:Cape Town (Bandbox) - Cape Town
 ATIS3:
 ATIS4:WorldFlight 2026
-PROFILE:FACA_W_CTR:300:6
-ATIS2:Cape Town ACC (West) - Cape Town
+PROFILE:FAJA_NW_CTR:300:6
+ATIS2:Johannesburg ACC (Bandbox) - Johannesburg
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FAJA_CTR:300:6
 ATIS2:Johannesburg ACC (Bandbox) - Johannesburg
 ATIS3:
 ATIS4:WorldFlight 2026
+PROFILE:FAJA_W_CTR:300:6
+ATIS2:Johannesburg ACC (Bandbox) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
 PROFILE:FAJA_C_CTR:300:6
-ATIS2:Johannesburg ACC (Central) - Johannesburg
-ATIS3:
-ATIS4:WorldFlight 2026
-PROFILE:FAJA_E_CTR:300:6
-ATIS2:Johannesburg ACC (East) - Johannesburg
-ATIS3:
-ATIS4:WorldFlight 2026
-PROFILE:FAJA_N_CTR:300:6
-ATIS2:Johannesburg ACC (North) - Johannesburg
-ATIS3:
-ATIS4:WorldFlight 2026
-PROFILE:FAJA_NE_CTR:300:6
-ATIS2:Johannesburg ACC (Sector 1) - Johannesburg
-ATIS3:
-ATIS4:WorldFlight 2026
-PROFILE:FAJA_NW_CTR:300:6
-ATIS2:Johannesburg ACC (Sector 2) - Johannesburg
-ATIS3:
-ATIS4:WorldFlight 2026
-PROFILE:FAJA_S_CTR:300:6
-ATIS2:Johannesburg ACC (South) - Johannesburg
-ATIS3:
-ATIS4:WorldFlight 2026
-PROFILE:FAJA_SE_CTR:300:6
-ATIS2:Johannesburg ACC (Sector 3) - Johannesburg
+ATIS2:Johannesburg ACC (Bandbox) - Johannesburg
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FAJA_SW_CTR:300:6
-ATIS2:Johannesburg ACC (Sector 4) - Johannesburg
+ATIS2:Johannesburg ACC (Bandbox) - Johannesburg
 ATIS3:
 ATIS4:WorldFlight 2026
-PROFILE:FAJA_W_CTR:300:6
-ATIS2:Johannesburg ACC (West) - Johannesburg
+PROFILE:FAJA_E_CTR:300:6
+ATIS2:Johannesburg ACC (Bandbox) - Johannesburg
+ATIS3:
+ATIS4:WorldFlight 2026
+PROFILE:FAJA_SE_CTR:300:6
+ATIS2:Johannesburg ACC (Bandbox) - Johannesburg
 ATIS3:
 ATIS4:WorldFlight 2026
 PROFILE:FCCC_CTR:300:6
