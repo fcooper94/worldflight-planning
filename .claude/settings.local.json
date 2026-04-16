@@ -95,7 +95,26 @@
       "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"c:/dev/WorldFlight-Planning/scripts/generate-leg-sct.js\" 17 KLAX EGPN \"GMN7 EHF J5 FMG J7 REO J537 MLP J540 YQL Q896 MEETO Q959 YVC J540 YZS DCT 66N071W 67N057W 66N043W 65N030W 63N018W DCT AKIVO DCT AKIVO DCT STN DCT IBOLU DCT\")",
       "Bash(cmd.exe /c \"dir /s /b \\\\\"C:\\\\Users\\\\fcoop\\\\AppData\\\\Roaming\\\\EuroScope\\\\UK\\\\\" 2>&1 | findstr /i \\\\\"lists\\\\|settings\\\\|general\\\\|.txt\\\\|.asr\\\\|.prf\\\\\"\")",
       "Bash(cmd.exe /c \"dir /s /b \\\\\"C:\\\\Users\\\\fcoop\\\\AppData\\\\Roaming\\\\EuroScope\\\\UK\\\\\"\")",
-      "Bash(cmd.exe /c \"forfiles /P \\\\\"C:\\\\Users\\\\fcoop\\\\AppData\\\\Roaming\\\\EuroScope\\\\WorldFlight\\\\\" /S /D +0 /C \\\\\"cmd /c echo @path @fdate @ftime\\\\\"\")"
+      "Bash(cmd.exe /c \"forfiles /P \\\\\"C:\\\\Users\\\\fcoop\\\\AppData\\\\Roaming\\\\EuroScope\\\\WorldFlight\\\\\" /S /D +0 /C \\\\\"cmd /c echo @path @fdate @ftime\\\\\"\")",
+      "Bash('C:\\\\Program Files\\\\nodejs\\\\node.exe' -e ' *)",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" -e \"const s = String.raw\\\\`\\\\\"SIA1\\\\\" N033 W118 16777215\\\\r\\\\`; const clean = s.replace\\(/\\\\r/g, ''\\); const m = clean.match\\(/^\\\\\"\\([^\\\\\"]+\\)\\\\\"\\\\s+\\(.+\\)$/\\); console.log\\('match:', !!m, m ? m[1] : 'null'\\);\")",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"c:\\\\dev\\\\WorldFlight-Planning\\\\scripts\\\\_get-leg.mjs\" WF2620)",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"c:/dev/WorldFlight-Planning/scripts/generate-leg-sct.js\" 20 FACT FKKD \"KODE1A KODES UN186 ATUPI UM436 ANVAG R987 ARGOL UN187 VNA UR526 LIKAD UY339 MESIN UG861 ARASI UH455 ETNOM ETNO1D\")",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" scripts/_get-leg.mjs WF2610)",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"c:/dev/WorldFlight-Planning/scripts/generate-leg-sct.js\" 10 EKCH LEMD \"LANG2A LANGO DCT ALASA DCT ONTAZ DCT GISEB DCT CIV DCT KOVIN DCT DUCRA UM728 RESMI DCT DEKOD UN857 DISAK DCT ARKIP DCT ARNAV DCT LMG DCT UVELI DCT OSMOB DCT VAVIX DCT NETUK N857 ALEPO DCT VASUM N857 BANEV BANE4D\")",
+      "Bash(cp \"c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/ASR/WF2620_\"*.asr \"C:/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/Data/ASR/\")",
+      "Bash(cp \"c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/ASR/WF2610_\"*.asr \"C:/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/Data/ASR/\")",
+      "Bash(grep -l \"^\\\\[MSA\\\\|^MSA:\" /c/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Sector_Files/*.sct)",
+      "Bash(grep -i \"msa\\\\|mraw\\\\|minimum.*safe\\\\|minimum.*radar\" /c/dev/WorldFlight-Planning/scripts/*.js)",
+      "Bash(wc -l /c/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Sector_Files/*.sct)",
+      "Bash(grep -i \"msa\\\\|mraw\\\\|minimum\" /c/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Plugin/TopSky/*.txt)",
+      "Bash(file /c/dev/WorldFlight-Planning/data/navdata/*.dat)",
+      "Bash(grep -i \"msa\\\\|minimum.*safe\" /c/dev/WorldFlight-Planning/data/navdata/*.dat)",
+      "Bash(grep -i \"smaa\\\\|sector.*altitude\\\\|minimum.*radar\" /c/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Plugin/TopSky/*.txt)",
+      "Bash(xargs grep *)",
+      "Bash(git add *)",
+      "Bash(git push *)",
+      "Bash(cmd.exe /c \"type \\\\\"C:\\\\Users\\\\fcoop\\\\Downloads\\\\xplane12_native_2604\\\\earth_msa.dat\\\\\"\")"
     ]
   }
 }

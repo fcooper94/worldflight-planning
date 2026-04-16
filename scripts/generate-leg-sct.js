@@ -24,6 +24,7 @@ const VATSPY_DAT = path.join(__dirname, '..', 'data', 'VATSPY', 'VATSpy.dat');
 const FIR_BOUNDS = path.join(__dirname, '..', 'data', 'VATSPY', 'FIRBoundaries.dat');
 const XP12_ATC = path.join(__dirname, '..', 'data', 'XP12', '1200 atc data', 'Earth nav data', 'atc.dat');
 const AFV_STATIONS = path.join(__dirname, '..', 'data', 'afv_stations.csv');
+const MSA_FILE = path.join(NAVDATA_DIR, 'earth_msa.dat');
 const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
 function collectLabelItems(labelStr) {
@@ -36,6 +37,91 @@ function collectLabelItems(labelStr) {
     return clean;
   }).join('\r\n');
   return { lines, items };
+}
+
+// Parse earth_msa.dat for a given airport ICAO — returns best MSA entry (prefer multi-sector navaid-based)
+function parseMSA(icao) {
+  if (!fs.existsSync(MSA_FILE)) return null;
+  const lines = fs.readFileSync(MSA_FILE, 'utf-8').split('\n');
+  const entries = [];
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    if (!trimmed || trimmed.startsWith('I') || trimmed.startsWith('1150')) continue;
+    // Format: TYPE  FIX REGION AIRPORT M sectors... 000 000  0
+    const m = trimmed.match(/^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+M\s+(.+)$/);
+    if (!m || m[4] !== icao) continue;
+    const type = parseInt(m[1]);
+    const fix = m[2];
+    const rest = m[5].trim();
+    // Parse sector triplets: bearing altitude radius, terminated by 000 000
+    const nums = rest.split(/\s+/).map(Number);
+    const sectors = [];
+    for (let i = 0; i + 2 < nums.length; i += 3) {
+      const brg = nums[i], alt = nums[i + 1], rad = nums[i + 2];
+      if (brg === 0 && alt === 0 && rad === 0) break;
+      sectors.push({ bearing: brg, altitude: alt * 100, radius: rad });
+    }
+    if (sectors.length > 0) entries.push({ type, fix, sectors });
+  }
+  if (entries.length === 0) return null;
+  // Prefer type 3 (navaid) with most sectors, then type 1 (airport) with most sectors
+  entries.sort((a, b) => {
+    if (b.sectors.length !== a.sectors.length) return b.sectors.length - a.sectors.length;
+    return (a.type === 3 ? 0 : 1) - (b.type === 3 ? 0 : 1);
+  });
+  return entries[0];
+}
+
+// Render MSA ring into GEO lines and LABELS for an airport
+function renderMSA(icao, airport, vorLookup) {
+  const msa = parseMSA(icao);
+  if (!msa) return { geo: [], labels: [] };
+  // Find center point: use VOR position if available, otherwise airport
+  let centerLat = airport.lat, centerLon = airport.lon;
+  if (msa.fix !== icao && vorLookup) {
+    const vor = vorLookup.get(msa.fix);
+    if (vor) { centerLat = vor.lat; centerLon = vor.lon; }
+  }
+  const radius = msa.sectors[0].radius; // all sectors typically same radius
+  const geo = [];
+  const labels = [];
+  const geoName = `${icao} MSA`;
+  // Draw the full 25nm ring as line segments
+  const segments = 72; // 5-degree segments
+  for (let i = 0; i < segments; i++) {
+    const a1 = (360 / segments) * i;
+    const a2 = (360 / segments) * (i + 1);
+    const p1 = projectPoint(centerLat, centerLon, a1, radius);
+    const p2 = projectPoint(centerLat, centerLon, a2, radius);
+    geo.push(`${coordPair(p1.lat, p1.lon)} ${coordPair(p2.lat, p2.lon)} rangering`);
+  }
+  if (msa.sectors.length === 1) {
+    // Single sector — just label with altitude at center of ring (offset slightly)
+    const labelPos = projectPoint(centerLat, centerLon, 0, radius * 0.5);
+    labels.push({ text: `${msa.sectors[0].altitude}`, lat: labelPos.lat, lon: labelPos.lon });
+    // Label the MSA name below the ring
+    const namePos = projectPoint(centerLat, centerLon, 180, radius + 2);
+    labels.push({ text: `MSA ${msa.fix}`, lat: namePos.lat, lon: namePos.lon });
+  } else {
+    // Multi-sector — draw radial lines and label each sector
+    for (let i = 0; i < msa.sectors.length; i++) {
+      const s = msa.sectors[i];
+      // Draw radial line from center to ring edge at this bearing
+      const edgePt = projectPoint(centerLat, centerLon, s.bearing, radius);
+      geo.push(`${coordPair(centerLat, centerLon)} ${coordPair(edgePt.lat, edgePt.lon)} rangering`);
+      // Label: place altitude text at midpoint of the sector arc
+      const nextBrg = msa.sectors[(i + 1) % msa.sectors.length].bearing;
+      let midBrg = s.bearing + ((nextBrg - s.bearing + 360) % 360) / 2;
+      if (((nextBrg - s.bearing + 360) % 360) > 180) midBrg += 180;
+      midBrg = midBrg % 360;
+      const labelPos = projectPoint(centerLat, centerLon, midBrg, radius * 0.6);
+      labels.push({ text: `${s.altitude}`, lat: labelPos.lat, lon: labelPos.lon });
+    }
+    // MSA name label below ring
+    const namePos = projectPoint(centerLat, centerLon, 180, radius + 2);
+    labels.push({ text: `MSA ${msa.fix}`, lat: namePos.lat, lon: namePos.lon });
+  }
+  return { geo, labels };
 }
 
 function loadGround(icao) {
@@ -66,15 +152,6 @@ function addRunwaysCenterlines(L, airport, icao) {
 
 function addGeoForAirport(L, airport, icao, groundData) {
   L.push(`${icao} Ground              S999.00.00.000 E999.00.00.000 S999.00.00.000 E999.00.00.000`);
-  for (const radius of [5, 10]) {
-    for (let i = 0; i < 36; i++) {
-      const a1 = (360 / 36) * i;
-      const a2 = (360 / 36) * (i + 1);
-      const p1 = projectPoint(airport.lat, airport.lon, a1, radius);
-      const p2 = projectPoint(airport.lat, airport.lon, a2, radius);
-      L.push(`${coordPair(p1.lat, p1.lon)} ${coordPair(p2.lat, p2.lon)} rangering`);
-    }
-  }
   if (groundData.geo) L.push(groundData.geo);
 }
 
@@ -163,7 +240,7 @@ function buildSmrAsr(legName, icao, airport, suffix, freeTextItems) {
   return lines;
 }
 
-function buildAppAsr(icao, airport, freeTextItems) {
+function buildAppAsr(icao, airport, freeTextItems, sidStarNames, legName) {
   const lines = [
     'DisplayTypeName:Standard ES radar screen',
     'DisplayTypeNeedRadarContent:1',
@@ -172,6 +249,9 @@ function buildAppAsr(icao, airport, freeTextItems) {
   for (const item of (freeTextItems || [])) {
     lines.push(`Free Text:${item}:freetext`);
   }
+  // Enable MSA rings and coastline (but not airport ground — too cluttered for APP)
+  lines.push(`Geo:${icao} MSA:`);
+  lines.push('Geo:Coastline:');
   lines.push(`Airports:${icao}:symbol`, `Airports:${icao}:name`);
   for (const rwy of airport.runways) {
     if (rwy.ident1) lines.push(`Runways:${icao}:${rwy.ident1}:centerline`);
@@ -179,11 +259,24 @@ function buildAppAsr(icao, airport, freeTextItems) {
     if (rwy.ident1) lines.push(`Sids:${icao}-${rwy.ident1}`);
     if (rwy.ident2) lines.push(`Sids:${icao}-${rwy.ident2}`);
   }
+  // Enable WF route, all SIDs and STARs for this airport
+  if (legName) lines.push(`Sids:${legName}:`);
+  for (const name of (sidStarNames || [])) {
+    if (name.startsWith(`${icao}-`)) {
+      // SIDs go in [SID], STARs go in [STAR] — enable in both sections
+      lines.push(`Sids:${name}`);
+      lines.push(`Stars:${name}`);
+    }
+  }
   lines.push(`SHOWC:${icao}_TWR:1`);
   lines.push('SHOWC:1', 'SHOWSB:0');
   lines.push('TAGFAMILY:AC-TopSky');
   lines.push(`m_Latitude:${airport.lat}`, `m_Longitude:${airport.lon}`);
-  lines.push('m_Zoom:7');
+  lines.push('m_Zoom:30');
+  lines.push('LEADER:3', 'SHOWLEADER:1', 'TURNLEADER:0');
+  lines.push('HISTORY_DOTS:5', 'SIMULATION_MODE:1');
+  lines.push('DISABLEPANNING:0', 'DISABLEZOOMING:0');
+  lines.push('DisplayRotation:0.00000');
   // UKCP display defaults
   lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
   lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
@@ -382,12 +475,14 @@ async function main() {
   }
 
   // Draw SID routes
+  const allProcNames = new Set();
   L.push('[SID]');
   addRunwaysCenterlines(L, depAirport, FROM);
   addRunwaysCenterlines(L, arrAirport, TO);
   for (const entry of allSidStars.filter(e => e.startsWith('SID:'))) {
     const parts = entry.split(':');
     const procName = `${parts[1]}-${parts[3]}`; // EGLL-BPK5K
+    allProcNames.add(procName);
     const fixNames = (parts[4] || '').split(' ').filter(f => f);
     for (let i = 0; i < fixNames.length - 1; i++) {
       const p1 = wpLookup.get(fixNames[i]);
@@ -497,7 +592,7 @@ async function main() {
 
     L.push(`; ATC Route: ${ATC_ROUTE}`);
     L.push(`; Expanded: ${deduped.map(p => p.name).join(' ')}`);
-    for (let i = 0; i < deduped.length - 1; i++) {
+    for (let i = 1; i < deduped.length - 2; i++) {
       L.push(`${LEG_NAME.padEnd(14)} ${coordPair(deduped[i].lat, deduped[i].lon)} ${coordPair(deduped[i + 1].lat, deduped[i + 1].lon)}`);
     }
     console.log(`  Route: ${deduped.length} waypoints (expanded from "${ATC_ROUTE}")`);
@@ -516,6 +611,7 @@ async function main() {
   for (const entry of allSidStars.filter(e => e.startsWith('STAR:'))) {
     const parts = entry.split(':');
     const procName = `${parts[1]}-${parts[3]}`; // EHAM-SUGOL1A
+    allProcNames.add(procName);
     const fixNames = (parts[4] || '').split(' ').filter(f => f);
     for (let i = 0; i < fixNames.length - 1; i++) {
       const p1 = wpLookup.get(fixNames[i]);
@@ -598,6 +694,17 @@ async function main() {
       console.log(`  ${coastCount} coastline segments`);
     }
   }
+  // MSA rings for both airports
+  const depMSA = renderMSA(FROM, depAirport, wpLookup);
+  const arrMSA = renderMSA(TO, arrAirport, wpLookup);
+  if (depMSA.geo.length) {
+    L.push(`${FROM} MSA               S999.00.00.000 E999.00.00.000 S999.00.00.000 E999.00.00.000`);
+    for (const g of depMSA.geo) L.push(g);
+  }
+  if (arrMSA.geo.length) {
+    L.push(`${TO} MSA               S999.00.00.000 E999.00.00.000 S999.00.00.000 E999.00.00.000`);
+    for (const g of arrMSA.geo) L.push(g);
+  }
   L.push('');
 
   // Labels for both — prefix with ICAO group so ASR can enable them
@@ -608,10 +715,18 @@ async function main() {
   if (depLabels.lines) L.push(depLabels.lines);
   L.push(`"${TO}" ${coordPair(arrAirport.lat, arrAirport.lon)} 16777215`);
   if (arrLabels.lines) L.push(arrLabels.lines);
+  // MSA altitude labels
+  const msaLabelItems = [];
+  for (const { labels: msaLabels } of [depMSA, arrMSA]) {
+    for (const lbl of msaLabels) {
+      L.push(`"${lbl.text}" ${coordPair(lbl.lat, lbl.lon)} 16777215`);
+      msaLabelItems.push(lbl.text);
+    }
+  }
   L.push('');
 
-  // Combine all free text items (both airports + airport names) for ASR references
-  const allFreeTextItems = [FROM, TO, ...depLabels.items, ...arrLabels.items]
+  // Combine all free text items (both airports + airport names + MSA labels) for ASR references
+  const allFreeTextItems = [FROM, TO, ...depLabels.items, ...arrLabels.items, ...msaLabelItems]
     .map(t => `SCT2\\${t}`)
     .sort((a, b) => a.localeCompare(b));
 
@@ -1059,7 +1174,7 @@ async function main() {
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_SMR.asr`), buildSmrAsr(LEG_NAME, FROM, depAirport, 'DEP', allFreeTextItems).join('\r\n'), 'utf-8');
 
   // F2: Departure APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport, allFreeTextItems).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport, allFreeTextItems, [...allProcNames], LEG_NAME).join('\r\n'), 'utf-8');
 
   // F3: Enroute
   const enrZoom = dist < 500 ? 20 : dist < 2000 ? 10 : 5;
@@ -1108,7 +1223,7 @@ async function main() {
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_SMR.asr`), buildSmrAsr(LEG_NAME, TO, arrAirport, 'ARR', allFreeTextItems).join('\r\n'), 'utf-8');
 
   // F5: Arrival APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport, allFreeTextItems).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport, allFreeTextItems, [...allProcNames], LEG_NAME).join('\r\n'), 'utf-8');
 
   // ===== vSMR PROFILES =====
   const pluginDir = path.join(OUTPUT_DIR, 'Data', 'Plugin', 'vSMR');

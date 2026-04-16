@@ -24,6 +24,8 @@ Free Text:SCT2\18B:freetext
 Free Text:SCT2\2:freetext
 Free Text:SCT2\2:freetext
 Free Text:SCT2\209B:freetext
+Free Text:SCT2\2600:freetext
+Free Text:SCT2\2700:freetext
 Free Text:SCT2\3:freetext
 Free Text:SCT2\3:freetext
 Free Text:SCT2\31A:freetext
@@ -32,7 +34,11 @@ Free Text:SCT2\33:freetext
 Free Text:SCT2\4:freetext
 Free Text:SCT2\4:freetext
 Free Text:SCT2\401C:freetext
+Free Text:SCT2\4200:freetext
+Free Text:SCT2\4200:freetext
 Free Text:SCT2\42A:freetext
+Free Text:SCT2\4400:freetext
+Free Text:SCT2\4800:freetext
 Free Text:SCT2\5:freetext
 Free Text:SCT2\5:freetext
 Free Text:SCT2\6:freetext
@@ -48,6 +54,7 @@ Free Text:SCT2\74:freetext
 Free Text:SCT2\75A:freetext
 Free Text:SCT2\75B:freetext
 Free Text:SCT2\77:freetext
+Free Text:SCT2\7700:freetext
 Free Text:SCT2\8:freetext
 Free Text:SCT2\80:freetext
 Free Text:SCT2\81:freetext
@@ -203,6 +210,8 @@ Free Text:SCT2\L:freetext
 Free Text:SCT2\L:freetext
 Free Text:SCT2\L:freetext
 Free Text:SCT2\M:freetext
+Free Text:SCT2\MSA DND:freetext
+Free Text:SCT2\MSA LAX:freetext
 Free Text:SCT2\N:freetext
 Free Text:SCT2\N2:freetext
 Free Text:SCT2\P:freetext
