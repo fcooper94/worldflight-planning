@@ -38,3 +38,5 @@ PLUGIN:vSMR Vatsim UK:SRW1TopLeftX:1545
 PLUGIN:vSMR Vatsim UK:SRW1TopLeftY:629
 PLUGIN:vSMR Vatsim UK:SRW1BottomRightX:1920
 PLUGIN:vSMR Vatsim UK:SRW1BottomRightY:928
+PLUGIN:UK Controller Plugin:DisplayMinStack:0
+PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0

@@ -142,6 +142,8 @@ function buildSmrAsr(legName, icao, airport, suffix) {
   lines.push(`PLUGIN:vSMR Vatsim UK:SRW1Rotation:0`, `PLUGIN:vSMR Vatsim UK:SRW1Scale:30`);
   lines.push(`PLUGIN:vSMR Vatsim UK:SRW1TopLeftX:1545`, `PLUGIN:vSMR Vatsim UK:SRW1TopLeftY:629`);
   lines.push(`PLUGIN:vSMR Vatsim UK:SRW1BottomRightX:1920`, `PLUGIN:vSMR Vatsim UK:SRW1BottomRightY:928`);
+  lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
+  lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
   return lines;
 }
 
@@ -672,32 +674,95 @@ async function main() {
     if (icaoPart.length === 4 && afvFreqs[icaoPart.substring(2) + suffix]) return true;
     return false;
   };
+  // Return the EuroScope middle letter for a position suffix
+  const sfxToMiddle = (sfx) => {
+    if (sfx === 'CTR') return 'C';
+    if (sfx === 'FSS') return 'F';
+    if (sfx === 'APP' || sfx === 'TRACON') return 'A';
+    if (sfx === 'TWR') return 'T';
+    if (sfx === 'GND') return 'G';
+    if (sfx === 'DEL') return 'D';
+    if (sfx === 'ATIS') return 'I';
+    return 'C';
+  };
+  // Return the EuroScope facility level for a position suffix
+  const sfxToFacility = (sfx) => {
+    if (sfx === 'DEL') return 2;
+    if (sfx === 'GND') return 3;
+    if (sfx === 'TWR') return 4;
+    if (sfx === 'APP') return 5;
+    if (sfx === 'CTR') return 6;
+    if (sfx === 'FSS') return 7;
+    return 6;
+  };
+  // All AFV CTR/FSS callsigns for a VATSpy position prefix (e.g. EGGX -> EGGX_CTR, EGGX_A_CTR, ...)
+  // Only CTR and FSS suffixes — GND/TWR/DEL/APP belong to airport sections, not transit FIRs
+  const afvCallsignsForPrefix = (prefix) =>
+    Object.keys(afvFreqs).filter(cs => {
+      if (!cs.startsWith(prefix + '_')) return false;
+      const lastSfx = cs.substring(cs.lastIndexOf('_') + 1);
+      return lastSfx === 'CTR' || lastSfx === 'FSS';
+    });
+  // All AFV CTR/FSS callsigns for a VATSpy position, trying both the callsign prefix AND the base FIR ID.
+  // Needed because e.g. CZEG FIR has VATSpy prefix "ZEG" but AFV also has entries under "CZEG_".
+  const afvCallsignsForPosition = (vp) => {
+    const firBase = vp.firId.split('-')[0];
+    const prefixes = [...new Set([vp.callsign, firBase])];
+    return [...new Set(prefixes.flatMap(p => afvCallsignsForPrefix(p)))];
+  };
 
-  // Airport-specific positions with real freqs (AFV first, XP12 fallback)
-  const airportPositions = {}; // icao -> [{callsign, freq, role}]
+  // Find the AFV prefix an airport actually uses (e.g. KLAX -> LAX, EGPN -> EGPN)
+  const afvAirportPrefix = (icao) => {
+    const has = (pfx) => Object.keys(afvFreqs).some(cs => cs.startsWith(pfx + '_'));
+    if (has(icao)) return icao;
+    if (icao.startsWith('K') && icao.length === 4 && has(icao.substring(1))) return icao.substring(1);
+    if (icao.startsWith('C') && icao.length === 4 && has(icao.substring(1))) return icao.substring(1);
+    if (icao.startsWith('Y') && icao.length === 4 && has(icao.substring(2))) return icao.substring(2);
+    if (icao.length === 4 && has(icao.substring(1))) return icao.substring(1);
+    return icao;
+  };
+  // Return the radius (nm) for a connection profile given a position suffix
+  const sfxToRadius = (sfx) => {
+    if (sfx === 'APP' || sfx === 'DEP' || sfx === 'TRACON') return 100;
+    if (sfx === 'TWR') return 30;
+    return 20;
+  };
+
+  // Airport positions: scan AFV directly for all positions at each airport
+  const airportAfvPrefixes = {}; // icao -> afv prefix (e.g. KLAX -> LAX)
   for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
-    const twrFreq = getFreq(`${icao}_TWR`, 'twr', icao) || '118.500';
-    const appFreq = getFreq(`${icao}_APP`, 'tracon', icao) || '119.000';
-    const gndFreq = getFreq(`${icao}_GND`, 'gnd', icao) || '121.900';
-    const delFreq = getFreq(`${icao}_DEL`, null, null) || '121.750';
-    const atisFreq = getFreq(`${icao}_ATIS`, null, null) || '127.850';
+    const afvPfx = afvAirportPrefix(icao);
+    airportAfvPrefixes[icao] = afvPfx;
     const coord = coordPair(apt.lat, apt.lon).replace(' ', ':');
-    airportPositions[icao] = [];
-    for (const pos of [
-      {s:'OBS',n:'Observer',f:'199.998',c:'O'},
-      {s:'ATIS',n:'ATIS',f:atisFreq,c:'I'},
-      {s:'DEL',n:'Delivery',f:delFreq,c:'D'},
-      {s:'GND',n:'Ground',f:gndFreq,c:'G'},
-      {s:'TWR',n:'Tower',f:twrFreq,c:'T'},
-      {s:'APP',n:'Approach',f:appFreq,c:'A'}
-    ]) {
-      E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:${pos.f}:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coord}`);
-      if (pos.f !== '199.998') {
-        E.push(`${icao}_${pos.s}:${apt.name} ${pos.n}:199.998:${icao}:${pos.c}:${icao}:${pos.s}:-:-:0100:0177:${coord}`);
-        airportPositions[icao].push({ callsign: `${icao}_${pos.s}`, freq: pos.f, role: pos.s });
+    const aptCs = Object.keys(afvFreqs).filter(cs => {
+      if (!cs.startsWith(afvPfx + '_')) return false;
+      const lastSfx = cs.substring(cs.lastIndexOf('_') + 1);
+      return lastSfx !== 'CTR' && lastSfx !== 'FSS';
+    });
+    if (aptCs.length === 0) {
+      // No AFV data — emit a basic set with placeholder freqs
+      for (const [sfx, mid] of [['TWR','T'],['GND','G'],['DEL','D'],['APP','A']]) {
+        E.push(`${icao}_${sfx}:${apt.name}:199.998:${icao}:${mid}:${icao}:${sfx}:-:-:0100:0177:${coord}`);
+      }
+    } else {
+      for (const cs of aptCs) {
+        const lastUs = cs.lastIndexOf('_');
+        const csPfx = cs.substring(0, lastUs);
+        const csSfx = cs.substring(lastUs + 1);
+        const csMid = sfxToMiddle(csSfx);
+        const freq = afvFreqs[cs];
+        E.push(`${cs}:${apt.name}:${freq}:${afvPfx}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coord}`);
+        E.push(`${cs}:${apt.name}:199.998:${afvPfx}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coord}`);
       }
     }
   }
+  // Overlay FIRs that don't have their own GeoJSON boundary but appear when constituent FIRs are transited
+  const OVERLAY_POSITIONS = [
+    { callsign: 'NAT_FSS', name: 'Shanwick & Gander', triggerFirs: new Set(['EGGX', 'CZQO', 'CZQX', 'BIRD', 'LPPO', 'ENOB']) },
+  ];
+  const routeFirSet = new Set(routeFirs.map(f => f.icao.split('-')[0]));
+  const activeOverlays = OVERLAY_POSITIONS.filter(o => [...o.triggerFirs].some(id => routeFirSet.has(id)));
+
   // Real VATSIM FIR/sector positions from VATSpy with XP12 frequencies
   const addedPrefixes = new Set();
   const positionShortIds = []; // collect short IDs for OWNER line
@@ -706,14 +771,37 @@ async function main() {
     addedPrefixes.add(vp.callsign);
     const shortId = vp.callsign;
     positionShortIds.push(shortId);
-    // Look up real frequency from AFV, fallback to XP12
-    const firBase = vp.firId.split('-')[0];
-    const primaryFreq = getFreq(`${vp.callsign}_CTR`, 'ctr', firBase) || '199.998';
-    E.push(`${vp.callsign}_CTR:${vp.name}:${primaryFreq}:${shortId}:C:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
-    // Add wildcard freq for any-frequency matching
-    if (primaryFreq !== '199.998') {
-      E.push(`${vp.callsign}_CTR:${vp.name}:199.998:${shortId}:C:${shortId}:CTR:-:-:0100:0177:${coordPair(mid.lat, mid.lon).replace(' ', ':')}`);
+    const coordStr = coordPair(mid.lat, mid.lon).replace(' ', ':');
+    // Emit all AFV callsigns for this prefix (primary + all subsectors)
+    const afvCs = afvCallsignsForPosition(vp);
+    if (afvCs.length === 0) {
+      // No AFV data — emit a placeholder CTR so the sector file is still valid
+      E.push(`${vp.callsign}_CTR:${vp.name}:199.998:${shortId}:C:${shortId}:CTR:-:-:0100:0177:${coordStr}`);
+    } else {
+      for (const cs of afvCs) {
+        const lastUs = cs.lastIndexOf('_');
+        const csPfx = cs.substring(0, lastUs);
+        const csSfx = cs.substring(lastUs + 1);
+        const csMid = sfxToMiddle(csSfx);
+        const freq = afvFreqs[cs];
+        E.push(`${cs}:${vp.name}:${freq}:${shortId}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coordStr}`);
+        E.push(`${cs}:${vp.name}:199.998:${shortId}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coordStr}`);
+      }
     }
+  }
+  // Overlay positions (e.g. NAT_FSS) — not in GeoJSON so not auto-detected
+  const overlayCoordStr = coordPair(mid.lat, mid.lon).replace(' ', ':');
+  for (const ov of activeOverlays) {
+    const lastUs = ov.callsign.lastIndexOf('_');
+    const ovPrefix = ov.callsign.substring(0, lastUs);
+    const ovSfx = ov.callsign.substring(lastUs + 1);
+    const ovMid = sfxToMiddle(ovSfx);
+    const ovFreq = afvFreqs[ov.callsign] || '199.998';
+    E.push(`${ov.callsign}:${ov.name}:${ovFreq}:${ovPrefix}:${ovMid}:${ovPrefix}:${ovSfx}:-:-:0100:0177:${overlayCoordStr}`);
+    if (ovFreq !== '199.998') {
+      E.push(`${ov.callsign}:${ov.name}:199.998:${ovPrefix}:${ovMid}:${ovPrefix}:${ovSfx}:-:-:0100:0177:${overlayCoordStr}`);
+    }
+    positionShortIds.push(ovPrefix);
   }
   E.push('');
   E.push('[SIDSSTARS]');
@@ -749,10 +837,11 @@ async function main() {
   E.push(`COORD:${coordPair(sMinLat, sMinLon)}`);
   E.push('');
   E.push(`SECTOR:${LEG_NAME}:0:66000`);
-  // Owner list: airport short IDs + VATSpy position short IDs
+  // Owner list: airport AFV prefixes + VATSpy position short IDs
   const allOwners = [
-    FROM, TO, // airport prefixes match APP/TWR/GND/DEL/OBS
-    ...positionShortIds // VATSpy FIR position short IDs
+    airportAfvPrefixes[FROM] || FROM,
+    airportAfvPrefixes[TO] || TO,
+    ...positionShortIds
   ];
   E.push(`OWNER:${allOwners.join(':')}`);
   E.push(`BORDER:${LEG_NAME}_BOUNDARY`);
@@ -787,7 +876,7 @@ async function main() {
     for (const pt of pts) E.push(`COORD:${pt}`);
     E.push('');
     E.push(`SECTOR:${icao}_TWR:0:24500`);
-    E.push(`OWNER:${icao}_TWR:${icao}_APP`);
+    E.push(`OWNER:${airportAfvPrefixes[icao] || icao}`);
     E.push(`BORDER:${icao}_BOUNDARY`);
     E.push('');
   }
@@ -834,7 +923,7 @@ async function main() {
     `Plugins\tPlugin2Display0\tStandard ES radar screen`,
     `Plugins\tPlugin2Display1\tSMR radar display`,
     `LastSession\tserver\tAUTOMATIC`,
-    `LastSession\tcallsign\t${FROM}_OBS`,
+    `LastSession\tcallsign\t- Select profile---->`,
   ];
   fs.writeFileSync(path.join(prfDir, `${LEG_NAME}.prf`), prf.join('\r\n'), 'utf-8');
 
@@ -842,32 +931,43 @@ async function main() {
   const profilesDir = path.join(OUTPUT_DIR, 'Data', 'Settings');
   fs.mkdirSync(profilesDir, { recursive: true });
   const profLines = ['PROFILE'];
-  // Airport positions (DEL/GND/TWR/APP/OBS)
-  for (const [icao] of [[FROM], [TO]]) {
-    const aptFreqs = xp12Freqs[icao] || [];
-    const hasTwr = !!aptFreqs.find(f => f.role === 'twr');
-    const hasApp = !!aptFreqs.find(f => f.role === 'tracon');
-    const hasGnd = !!aptFreqs.find(f => f.role === 'gnd');
-    for (const { s, n, r, f } of [{s:'APP',n:'Approach',r:100,f:5},{s:'TWR',n:'Tower',r:30,f:4},{s:'GND',n:'Ground',r:20,f:3},{s:'DEL',n:'Delivery',r:20,f:2}]) {
-      const icaoCallsign = `${icao}_${s}`;
-      if (!inAFV(icaoCallsign)) continue;
-      const afvCallsign = toAFVCallsign(icaoCallsign);
-      profLines.push(`PROFILE:${afvCallsign}:${r}:${f}`);
-      profLines.push(`ATIS2:${afvCallsign.split('_')[0]} ${n}`);
+  const emittedProfiles = new Set();
+  // Airport positions — from AFV directly
+  for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
+    const afvPfx = airportAfvPrefixes[icao];
+    const aptCs = Object.keys(afvFreqs).filter(cs => {
+      if (!cs.startsWith(afvPfx + '_')) return false;
+      const lastSfx = cs.substring(cs.lastIndexOf('_') + 1);
+      return lastSfx !== 'CTR' && lastSfx !== 'FSS';
+    });
+    for (const cs of aptCs) {
+      const csSfx = cs.substring(cs.lastIndexOf('_') + 1);
+      emittedProfiles.add(cs);
+      profLines.push(`PROFILE:${cs}:${sfxToRadius(csSfx)}:${sfxToFacility(csSfx)}`);
+      profLines.push(`ATIS2:${apt.name}`);
       profLines.push(`ATIS3:`);
       profLines.push(`ATIS4:WorldFlight 2026`);
     }
   }
-  // Enroute CTR positions — only those in AFV
+  // Enroute CTR/FSS positions — only those in AFV; emit both if both exist
   for (const vp of vatspy.positions) {
     if (addedPrefixes.has('PROF_' + vp.callsign)) continue;
     addedPrefixes.add('PROF_' + vp.callsign);
-    const callsign = `${vp.callsign}_CTR`;
-    if (!inAFV(callsign)) continue; // Skip if not in AFV
-    const firBase = vp.firId.split('-')[0];
-    const firFreqs = xp12Freqs[firBase]?.find(f => f.role === 'ctr')?.freqs || [];
-    profLines.push(`PROFILE:${vp.callsign}_CTR:300:6`);
-    profLines.push(`ATIS2:${vp.name}`);
+    for (const cs of afvCallsignsForPosition(vp)) {
+      if (emittedProfiles.has(cs)) continue; // already emitted by airport section
+      emittedProfiles.add(cs);
+      const csSfx = cs.substring(cs.lastIndexOf('_') + 1);
+      profLines.push(`PROFILE:${cs}:300:${sfxToFacility(csSfx)}`);
+      profLines.push(`ATIS2:${vp.name}`);
+      profLines.push(`ATIS3:`);
+      profLines.push(`ATIS4:WorldFlight 2026`);
+    }
+  }
+  // Overlay positions
+  for (const ov of activeOverlays) {
+    const csSfx = ov.callsign.substring(ov.callsign.lastIndexOf('_') + 1);
+    profLines.push(`PROFILE:${ov.callsign}:300:${sfxToFacility(csSfx)}`);
+    profLines.push(`ATIS2:${ov.name}`);
     profLines.push(`ATIS3:`);
     profLines.push(`ATIS4:WorldFlight 2026`);
   }
@@ -876,27 +976,34 @@ async function main() {
 
   // ===== VOICE SETUP =====
   const voiceLines = ['VOICE'];
-  // Airport frequencies — only AFV-listed positions
+  const emittedVoice = new Set();
+  // Airport frequencies — from AFV directly
   for (const [icao] of [[FROM], [TO]]) {
-    for (const pos of (airportPositions[icao] || [])) {
-      if (!inAFV(pos.callsign)) continue;
-      const afvCs = toAFVCallsign(pos.callsign);
-      const freq = afvFreqs[afvCs];
-      if (freq) {
-        voiceLines.push(`AG:${afvCs}:${freq}`);
-      }
+    const afvPfx = airportAfvPrefixes[icao];
+    for (const cs of Object.keys(afvFreqs).filter(cs => {
+      if (!cs.startsWith(afvPfx + '_')) return false;
+      const lastSfx = cs.substring(cs.lastIndexOf('_') + 1);
+      return lastSfx !== 'CTR' && lastSfx !== 'FSS';
+    })) {
+      emittedVoice.add(cs);
+      voiceLines.push(`AG:${cs}:${afvFreqs[cs]}`);
     }
   }
-  // Enroute CTR positions — only AFV-listed
+  // Enroute CTR/FSS positions — only AFV-listed; emit both if both exist
   const addedVoice = new Set();
   for (const vp of vatspy.positions) {
     if (addedVoice.has(vp.callsign)) continue;
     addedVoice.add(vp.callsign);
-    const callsign = `${vp.callsign}_CTR`;
-    const freq = afvFreqs[callsign];
-    if (freq) {
-      voiceLines.push(`AG:${callsign}:${freq}`);
+    for (const cs of afvCallsignsForPosition(vp)) {
+      if (emittedVoice.has(cs)) continue; // already emitted by airport section
+      emittedVoice.add(cs);
+      voiceLines.push(`AG:${cs}:${afvFreqs[cs]}`);
     }
+  }
+  // Overlay positions
+  for (const ov of activeOverlays) {
+    const freq = afvFreqs[ov.callsign];
+    if (freq) voiceLines.push(`AG:${ov.callsign}:${freq}`);
   }
   voiceLines.push('END');
   fs.writeFileSync(path.join(profilesDir, `Voice_${LEG_NAME}.txt`), voiceLines.join('\r\n'), 'utf-8');

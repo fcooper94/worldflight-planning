@@ -34,4 +34,4 @@ Plugins	Plugin2	\..\Data\Plugin\TopSky\TopSky.dll
 Plugins	Plugin2Display0	Standard ES radar screen
 Plugins	Plugin2Display1	SMR radar display
 LastSession	server	AUTOMATIC
-LastSession	callsign	KLAX_OBS
+LastSession	callsign	- Select profile---->
