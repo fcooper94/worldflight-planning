@@ -266,65 +266,66 @@ function buildSmrAsr(legName, icao, airport, suffix, freeTextItems) {
   return lines;
 }
 
-function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSet, ndbSet, routeFixNames, msaFixNames) {
+function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSet, ndbSet, routeFixNames, msaFixNames, sctRelPath) {
+  const boxSize = 0.5; // degrees for APP view
   const lines = [
     'DisplayTypeName:Standard ES radar screen',
     'DisplayTypeNeedRadarContent:1',
     'DisplayTypeGeoReferenced:1',
   ];
-  // ARTCC boundary entries first (MSA ring + route) — must be before SHOWC
-  lines.push(`ARTCC boundary:${icao}-MSA:`);
-  if (legName) lines.push(`ARTCC boundary:${icao}-${legName}:`);
-  // Free text (MSA labels)
+  // Collect display items, then sort alphabetically (EuroScope format)
+  const items = [];
+  items.push(`Airports:${icao}:symbol`);
+  items.push(`ARTCC boundary:${icao}-MSA:`);
+  if (legName) items.push(`ARTCC boundary:${icao}-${legName}:`);
   for (const item of (freeTextItems || [])) {
-    lines.push(`Free Text:${item}:freetext`);
+    items.push(`Free Text:${item}:freetext`);
   }
-  lines.push('Geo:Coastline:');
-  lines.push(`Airports:${icao}:symbol`, `Airports:${icao}:name`);
-  for (const rwy of airport.runways) {
-    if (rwy.ident1) lines.push(`Runways:${icao}:${rwy.ident1}:centerline`);
-    if (rwy.ident2) lines.push(`Runways:${icao}:${rwy.ident2}:centerline`);
-    if (rwy.ident1) lines.push(`Sids:${icao}-${rwy.ident1}:`);
-    if (rwy.ident2) lines.push(`Sids:${icao}-${rwy.ident2}:`);
-  }
-  const enabledFixes = new Set();
-  for (const proc of (relevantProcs || [])) {
-    lines.push(`Sids:${proc.name}:`);
-    lines.push(`Stars:${proc.name}:`);
-    for (const f of proc.fixes) enabledFixes.add(f);
-  }
-  // Add route waypoints and MSA altitude labels
-  for (const f of (routeFixNames || [])) enabledFixes.add(f);
-  for (const f of (msaFixNames || [])) enabledFixes.add(f);
-  // Enable fixes/VORs/NDBs on relevant SID/STAR routes
-  for (const fix of enabledFixes) {
-    if (vorSet && vorSet.has(fix)) {
-      lines.push(`VORs:${fix}:symbol`);
-      lines.push(`VORs:${fix}:name`);
-    } else if (ndbSet && ndbSet.has(fix)) {
-      lines.push(`NDBs:${fix}:symbol`);
-      lines.push(`NDBs:${fix}:name`);
+  // Route waypoint fixes
+  for (const f of (routeFixNames || [])) {
+    if (vorSet && vorSet.has(f)) {
+      items.push(`VORs:${f}:name`);
+      items.push(`VORs:${f}:symbol`);
+    } else if (ndbSet && ndbSet.has(f)) {
+      items.push(`NDBs:${f}:name`);
+      items.push(`NDBs:${f}:symbol`);
     } else {
-      lines.push(`Fixes:${fix}:symbol`);
-      lines.push(`Fixes:${fix}:name`);
+      items.push(`Fixes:${f}:name`);
+      items.push(`Fixes:${f}:symbol`);
     }
   }
-  lines.push(`SHOWC:${icao}_TWR:1`);
-  lines.push('SHOWC:1', 'SHOWSB:0');
-  lines.push('TAGFAMILY:AC-TopSky');
-  lines.push(`m_Latitude:${airport.lat}`, `m_Longitude:${airport.lon}`);
-  lines.push('m_Zoom:30');
+  // MSA labels — name only
+  for (const f of (msaFixNames || [])) {
+    items.push(`Fixes:${f}:name`);
+  }
+  items.push('Geo:Coastline:');
+  // Runways and SIDs/STARs
+  for (const rwy of airport.runways) {
+    if (rwy.ident1) items.push(`Runways:${icao}:${rwy.ident1}:centerline`);
+    if (rwy.ident2) items.push(`Runways:${icao}:${rwy.ident2}:centerline`);
+    if (rwy.ident1) items.push(`Sids:${icao}-${rwy.ident1}:`);
+    if (rwy.ident2) items.push(`Sids:${icao}-${rwy.ident2}:`);
+  }
+  for (const proc of (relevantProcs || [])) {
+    items.push(`Sids:${proc.name}:`);
+    items.push(`Stars:${proc.name}:`);
+  }
+  items.sort();
+  lines.push(...items);
+  // Display settings
+  lines.push('SHOWC:1', 'SHOWSB:0', 'BELOW:0', 'ABOVE:0');
   lines.push('LEADER:3', 'SHOWLEADER:1', 'TURNLEADER:0');
   lines.push('HISTORY_DOTS:5', 'SIMULATION_MODE:1');
   lines.push('DISABLEPANNING:0', 'DISABLEZOOMING:0');
   lines.push('DisplayRotation:0.00000');
-  // UKCP display defaults
-  lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
-  lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
-  lines.push('PLUGIN:UK Controller Plugin:DisplayCountdown:1');
-  // TopSky plugin
+  lines.push('TAGFAMILY:AC-TopSky');
+  lines.push(`WINDOWAREA:${(airport.lat - boxSize).toFixed(6)}:${(airport.lon - boxSize * 1.5).toFixed(6)}:${(airport.lat + boxSize).toFixed(6)}:${(airport.lon + boxSize * 1.5).toFixed(6)}`);
+  // Plugin settings
   lines.push('PLUGIN:TopSky plugin:HideMapData:AirspaceBases,Fixes,FixLabels');
   lines.push('PLUGIN:TopSky plugin:ShowMapData:Centrelines');
+  lines.push('PLUGIN:UK Controller Plugin:DisplayCountdown:1');
+  lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
+  lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
   return lines;
 }
 
@@ -438,8 +439,42 @@ async function main() {
   const NAVDATA_PLACEHOLDER = '{{NAVDATA_SECTIONS}}';
   L.push(NAVDATA_PLACEHOLDER);
 
-  // wpLookup initially empty — route expansion builds its own from full airway file
+  // Pre-scan route tokens to resolve VORs/NDBs/fixes not on airways
   const wpLookup = new Map();
+  if (ATC_ROUTE) {
+    const routeTokens = new Set(ATC_ROUTE.split(/\s+/).filter(t => t !== 'DCT' && /^[A-Z]/.test(t) && !/\d/.test(t.charAt(0))));
+    // Quick scan of earth_nav.dat for VOR/NDB positions
+    const navFile = fs.readFileSync(path.join(NAVDATA_DIR, 'earth_nav.dat'), 'utf-8');
+    for (const line of navFile.split('\n')) {
+      const p = line.trim().split(/\s+/);
+      if (p.length < 8) continue;
+      const type = parseInt(p[0]);
+      if (type !== 2 && type !== 3 && type !== 12 && type !== 13) continue; // VOR/DME/NDB
+      const ident = p[7];
+      if (routeTokens.has(ident) && !wpLookup.has(ident)) {
+        const lat = parseFloat(p[1]), lon = parseFloat(p[2]);
+        if (!isNaN(lat) && !isNaN(lon)) {
+          const d = haversineNm(mid.lat, mid.lon, lat, lon);
+          if (d < dist + 500) wpLookup.set(ident, { ident, lat, lon });
+        }
+      }
+    }
+    // Quick scan of earth_fix.dat for fix positions
+    const fixFile = fs.readFileSync(path.join(NAVDATA_DIR, 'earth_fix.dat'), 'utf-8');
+    for (const line of fixFile.split('\n')) {
+      const p = line.trim().split(/\s+/);
+      if (p.length < 3) continue;
+      const ident = p[2];
+      if (routeTokens.has(ident) && !wpLookup.has(ident)) {
+        const lat = parseFloat(p[0]), lon = parseFloat(p[1]);
+        if (!isNaN(lat) && !isNaN(lon)) {
+          const d = haversineNm(mid.lat, mid.lon, lat, lon);
+          if (d < dist + 500) wpLookup.set(ident, { ident, lat, lon });
+        }
+      }
+    }
+    console.log(`  Pre-resolved ${wpLookup.size} route waypoints from navdata`);
+  }
 
   // Parse CIFP for both airports to get SID/STAR fix sequences
   const allSidStars = [];
@@ -1313,62 +1348,73 @@ async function main() {
   const routeWaypointNames = deduped ? deduped.slice(1, -1).map(p => p.name).filter(n => !n.match(/^\d+[NS]\d+[EW]$/)) : [];
 
   // F1: Departure SMR
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_SMR.asr`), buildSmrAsr(LEG_NAME, FROM, depAirport, 'DEP', smrFreeTextItems).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_SMR.asr`), buildSmrAsr(LEG_NAME, FROM, depAirport, 'DEP', smrFreeTextItems).join('\n'), 'utf-8');
 
   // F2: Departure APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport, appFreeTextItems, depRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport, appFreeTextItems, depRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames).join('\n'), 'utf-8');
 
   // F3: Enroute
-  const enrZoom = dist < 500 ? 20 : dist < 2000 ? 10 : 5;
+  const enrPad = dist < 500 ? 2 : dist < 2000 ? 5 : 10; // degrees padding
   const enroute = [
     'DisplayTypeName:Standard ES radar screen',
     'DisplayTypeNeedRadarContent:1',
     'DisplayTypeGeoReferenced:1',
-    `Airports:${FROM}:symbol`, `Airports:${FROM}:name`,
-    `Airports:${TO}:symbol`, `Airports:${TO}:name`,
   ];
-  // Enable all FIR ARTCC boundaries
-  for (const fir of routeFirs) enroute.push(`ARTCC boundary:${fir.icao}:`);
-  // Enable coastline and route line
-  enroute.push('Geo:Coastline:');
-  if (ATC_ROUTE) enroute.push(`ARTCC high boundary:${FROM}-${LEG_NAME}:`);
+  const enrItems = [];
+  enrItems.push(`Airports:${FROM}:symbol`, `Airports:${TO}:symbol`);
+  // FIR ARTCC boundaries
+  for (const fir of routeFirs) enrItems.push(`ARTCC boundary:${fir.icao}:`);
+  // MSA rings
+  enrItems.push(`ARTCC boundary:${FROM}-MSA:`, `ARTCC boundary:${TO}-MSA:`);
+  // Route line
+  if (ATC_ROUTE) enrItems.push(`ARTCC high boundary:${FROM}-${LEG_NAME}:`);
+  // MSA labels — name only
+  for (const f of msaFixNames) enrItems.push(`Fixes:${f}:name`);
+  // Route waypoint fixes
+  for (const wp of routeWaypointNames) {
+    if (vorIdents.has(wp)) {
+      enrItems.push(`VORs:${wp}:name`, `VORs:${wp}:symbol`);
+    } else if (ndbIdents.has(wp)) {
+      enrItems.push(`NDBs:${wp}:name`, `NDBs:${wp}:symbol`);
+    } else {
+      enrItems.push(`Fixes:${wp}:name`, `Fixes:${wp}:symbol`);
+    }
+  }
+  enrItems.push('Geo:Coastline:');
+  enrItems.sort();
+  enroute.push(...enrItems);
+  // Calculate WINDOWAREA from dep/arr with padding
+  const minLat = Math.min(depAirport.lat, arrAirport.lat) - enrPad;
+  const maxLat = Math.max(depAirport.lat, arrAirport.lat) + enrPad;
+  const minLon = Math.min(depAirport.lon, arrAirport.lon) - enrPad * 1.5;
+  const maxLon = Math.max(depAirport.lon, arrAirport.lon) + enrPad * 1.5;
   enroute.push(
-    `SHOWC:${FROM}_TWR:1`, `SHOWC:${TO}_TWR:1`,
-    'SHOWC:1',
-    'SHOWSB:0',
-    'ABOVE:0',
-    'LEADER:3',
-    'SHOWLEADER:1',
-    'TURNLEADER:0',
-    'HISTORY_DOTS:0',
-    'SIMULATION_MODE:1',
-    'DISABLEPANNING:0',
-    'DISABLEZOOMING:0',
+    'SHOWC:1', 'SHOWSB:0', 'BELOW:0', 'ABOVE:0',
+    'LEADER:3', 'SHOWLEADER:1', 'TURNLEADER:0',
+    'HISTORY_DOTS:0', 'SIMULATION_MODE:1',
+    'DISABLEPANNING:0', 'DISABLEZOOMING:0',
     'DisplayRotation:0.00000',
     'TAGFAMILY:AC-TopSky',
-    `m_Latitude:${mid.lat}`, `m_Longitude:${mid.lon}`,
-    `m_Zoom:${enrZoom}`,
-    // UKCP display defaults
-    'PLUGIN:UK Controller Plugin:DisplayMinStack:0',
-    'PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0',
-    'PLUGIN:UK Controller Plugin:DisplayCountdown:1',
-    'PLUGIN:UK Controller Plugin:HistoryTrailDisplay:1',
-    'PLUGIN:UK Controller Plugin:HistoryTrailLength:15',
-    'PLUGIN:UK Controller Plugin:HistoryTrailDotSize:4',
-    'PLUGIN:UK Controller Plugin:HistoryTrailColour:255,130,20',
-    'PLUGIN:UK Controller Plugin:HistoryTrailDegrade:1',
-    'PLUGIN:UK Controller Plugin:HistoryTrailFade:1',
-    // TopSky plugin
+    `WINDOWAREA:${minLat.toFixed(6)}:${minLon.toFixed(6)}:${maxLat.toFixed(6)}:${maxLon.toFixed(6)}`,
     'PLUGIN:TopSky plugin:HideMapData:AirspaceBases,Fixes,FixLabels',
     'PLUGIN:TopSky plugin:ShowMapData:NERC,Centrelines',
+    'PLUGIN:UK Controller Plugin:DisplayCountdown:1',
+    'PLUGIN:UK Controller Plugin:DisplayMinStack:0',
+    'PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0',
+    'PLUGIN:UK Controller Plugin:HistoryTrailColour:255,130,20',
+    'PLUGIN:UK Controller Plugin:HistoryTrailDegrade:1',
+    'PLUGIN:UK Controller Plugin:HistoryTrailDisplay:1',
+    'PLUGIN:UK Controller Plugin:HistoryTrailDotSize:4',
+    'PLUGIN:UK Controller Plugin:HistoryTrailFade:1',
+    'PLUGIN:UK Controller Plugin:HistoryTrailLength:15',
   );
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_Enroute.asr`), enroute.join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_Enroute.asr`), enroute.join('\n'), 'utf-8');
 
   // F4: Arrival SMR
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_SMR.asr`), buildSmrAsr(LEG_NAME, TO, arrAirport, 'ARR', smrFreeTextItems).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_SMR.asr`), buildSmrAsr(LEG_NAME, TO, arrAirport, 'ARR', smrFreeTextItems).join('\n'), 'utf-8');
 
   // F5: Arrival APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport, appFreeTextItems, arrRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames).join('\r\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport, appFreeTextItems, arrRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames).join('\n'), 'utf-8');
 
   // ===== vSMR PROFILES =====
   const pluginDir = path.join(OUTPUT_DIR, 'Data', 'Plugin', 'vSMR');
