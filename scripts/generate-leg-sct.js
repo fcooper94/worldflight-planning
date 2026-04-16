@@ -86,38 +86,56 @@ function renderMSA(icao, airport, vorLookup) {
   const geo = [];
   const labels = [];
   const geoName = `${icao} MSA`;
-  // Draw the full 25nm ring as line segments
+  // Draw MSA ring in screen-space (lat/lon) so it appears circular on EuroScope's projection
+  // At this latitude, 1° lon = cos(lat) * 1° lat in real distance
+  const radiusDegLat = radius / 60; // 1nm = 1/60 degree latitude
+  const cosLat = Math.cos(centerLat * Math.PI / 180);
+  const radiusDegLon = radiusDegLat / cosLat; // compensate for longitude compression
   const segments = 72; // 5-degree segments
+  const toRad = d => d * Math.PI / 180;
   for (let i = 0; i < segments; i++) {
-    const a1 = (360 / segments) * i;
-    const a2 = (360 / segments) * (i + 1);
-    const p1 = projectPoint(centerLat, centerLon, a1, radius);
-    const p2 = projectPoint(centerLat, centerLon, a2, radius);
-    geo.push(`${coordPair(p1.lat, p1.lon)} ${coordPair(p2.lat, p2.lon)} rangering`);
+    const a1 = toRad((360 / segments) * i);
+    const a2 = toRad((360 / segments) * (i + 1));
+    const lat1 = centerLat + radiusDegLat * Math.cos(a1);
+    const lon1 = centerLon + radiusDegLon * Math.sin(a1);
+    const lat2 = centerLat + radiusDegLat * Math.cos(a2);
+    const lon2 = centerLon + radiusDegLon * Math.sin(a2);
+    geo.push(`${coordPair(lat1, lon1)} ${coordPair(lat2, lon2)} rangering`);
   }
+  // Helper: point on screen-space ring at given bearing
+  function ringPt(brg, frac = 1.0) {
+    const a = toRad(brg);
+    return { lat: centerLat + radiusDegLat * frac * Math.cos(a), lon: centerLon + radiusDegLon * frac * Math.sin(a) };
+  }
+  // Note: bearing 0 = north (cos gives lat offset, sin gives lon offset) — but standard math angle
+  // has 0=east. Convert: screen bearing 0°=N means angle = 90°-bearing for cos/sin.
+  // Actually the above code uses cos(a) for lat and sin(a) for lon, which makes 0° = north. Correct.
+  // But wait: bearing 0°=N means lat increases (north), so cos(0)=1 for lat is correct.
+  // And bearing 90°=E means lon increases (east), so sin(90°)=1 for lon is correct. ✓
+
   if (msa.sectors.length === 1) {
     // Single sector — label with altitude
-    const labelPos = projectPoint(centerLat, centerLon, 0, radius * 0.5);
-    labels.push({ text: `M${msa.sectors[0].altitude}`, lat: labelPos.lat, lon: labelPos.lon });
+    const lp = ringPt(0, 0.5);
+    labels.push({ text: `M${msa.sectors[0].altitude}`, lat: lp.lat, lon: lp.lon });
     // MSA name below the ring
-    const namePos = projectPoint(centerLat, centerLon, 180, radius + 2);
-    labels.push({ text: `MSA${msa.fix}`, lat: namePos.lat, lon: namePos.lon });
+    const np = ringPt(180, 1.15);
+    labels.push({ text: `MSA${msa.fix}`, lat: np.lat, lon: np.lon });
   } else {
     // Multi-sector — draw radial lines and label each sector
     for (let i = 0; i < msa.sectors.length; i++) {
       const s = msa.sectors[i];
-      const edgePt = projectPoint(centerLat, centerLon, s.bearing, radius);
+      const edgePt = ringPt(s.bearing);
       geo.push(`${coordPair(centerLat, centerLon)} ${coordPair(edgePt.lat, edgePt.lon)} rangering`);
       const nextBrg = msa.sectors[(i + 1) % msa.sectors.length].bearing;
       let midBrg = s.bearing + ((nextBrg - s.bearing + 360) % 360) / 2;
       if (((nextBrg - s.bearing + 360) % 360) > 180) midBrg += 180;
       midBrg = midBrg % 360;
-      const labelPos = projectPoint(centerLat, centerLon, midBrg, radius * 0.6);
-      labels.push({ text: `M${s.altitude}`, lat: labelPos.lat, lon: labelPos.lon });
+      const lp = ringPt(midBrg, 0.6);
+      labels.push({ text: `M${s.altitude}`, lat: lp.lat, lon: lp.lon });
     }
     // MSA name below ring
-    const namePos = projectPoint(centerLat, centerLon, 180, radius + 2);
-    labels.push({ text: `MSA${msa.fix}`, lat: namePos.lat, lon: namePos.lon });
+    const np = ringPt(180, 1.15);
+    labels.push({ text: `MSA${msa.fix}`, lat: np.lat, lon: np.lon });
   }
   return { geo, labels, fix: msa.fix };
 }
@@ -299,16 +317,10 @@ function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSe
     items.push(`Fixes:${f}:name`);
   }
   items.push('Geo:Coastline:');
-  // Runways and SIDs/STARs
+  // Runways (SIDs/STARs available but not enabled by default)
   for (const rwy of airport.runways) {
     if (rwy.ident1) items.push(`Runways:${icao}:${rwy.ident1}:centerline`);
     if (rwy.ident2) items.push(`Runways:${icao}:${rwy.ident2}:centerline`);
-    if (rwy.ident1) items.push(`Sids:${icao}-${rwy.ident1}:`);
-    if (rwy.ident2) items.push(`Sids:${icao}-${rwy.ident2}:`);
-  }
-  for (const proc of (relevantProcs || [])) {
-    items.push(`Sids:${proc.name}:`);
-    items.push(`Stars:${proc.name}:`);
   }
   items.sort();
   lines.push(...items);
@@ -322,7 +334,7 @@ function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSe
   lines.push(`WINDOWAREA:${(airport.lat - boxSize).toFixed(6)}:${(airport.lon - boxSize * 1.5).toFixed(6)}:${(airport.lat + boxSize).toFixed(6)}:${(airport.lon + boxSize * 1.5).toFixed(6)}`);
   // Plugin settings
   lines.push('PLUGIN:TopSky plugin:HideMapData:AirspaceBases,Fixes,FixLabels');
-  lines.push('PLUGIN:TopSky plugin:ShowMapData:Centrelines');
+  lines.push('PLUGIN:TopSky plugin:ShowMapData:Centrelines,Ticks');
   lines.push('PLUGIN:UK Controller Plugin:DisplayCountdown:1');
   lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
   lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
@@ -443,19 +455,23 @@ async function main() {
   const wpLookup = new Map();
   if (ATC_ROUTE) {
     const routeTokens = new Set(ATC_ROUTE.split(/\s+/).filter(t => t !== 'DCT' && /^[A-Z]/.test(t) && !/\d/.test(t.charAt(0))));
-    // Quick scan of earth_nav.dat for VOR/NDB positions
+    // Quick scan of earth_nav.dat for VOR/NDB positions — pick closest to midpoint
+    const wpCandidates = {}; // ident -> [{ident, lat, lon, dist}]
     const navFile = fs.readFileSync(path.join(NAVDATA_DIR, 'earth_nav.dat'), 'utf-8');
     for (const line of navFile.split('\n')) {
       const p = line.trim().split(/\s+/);
       if (p.length < 8) continue;
       const type = parseInt(p[0]);
-      if (type !== 2 && type !== 3 && type !== 12 && type !== 13) continue; // VOR/DME/NDB
+      if (type !== 2 && type !== 3 && type !== 12 && type !== 13) continue;
       const ident = p[7];
-      if (routeTokens.has(ident) && !wpLookup.has(ident)) {
+      if (routeTokens.has(ident)) {
         const lat = parseFloat(p[1]), lon = parseFloat(p[2]);
         if (!isNaN(lat) && !isNaN(lon)) {
           const d = haversineNm(mid.lat, mid.lon, lat, lon);
-          if (d < dist + 500) wpLookup.set(ident, { ident, lat, lon });
+          if (d < dist + 500) {
+            if (!wpCandidates[ident]) wpCandidates[ident] = [];
+            wpCandidates[ident].push({ ident, lat, lon, dist: d });
+          }
         }
       }
     }
@@ -465,13 +481,21 @@ async function main() {
       const p = line.trim().split(/\s+/);
       if (p.length < 3) continue;
       const ident = p[2];
-      if (routeTokens.has(ident) && !wpLookup.has(ident)) {
+      if (routeTokens.has(ident) && !wpCandidates[ident]) {
         const lat = parseFloat(p[0]), lon = parseFloat(p[1]);
         if (!isNaN(lat) && !isNaN(lon)) {
           const d = haversineNm(mid.lat, mid.lon, lat, lon);
-          if (d < dist + 500) wpLookup.set(ident, { ident, lat, lon });
+          if (d < dist + 500) {
+            if (!wpCandidates[ident]) wpCandidates[ident] = [];
+            wpCandidates[ident].push({ ident, lat, lon, dist: d });
+          }
         }
       }
+    }
+    // Pick closest candidate for each token
+    for (const [ident, candidates] of Object.entries(wpCandidates)) {
+      candidates.sort((a, b) => a.dist - b.dist);
+      wpLookup.set(ident, candidates[0]);
     }
     console.log(`  Pre-resolved ${wpLookup.size} route waypoints from navdata`);
   }
@@ -809,11 +833,14 @@ async function main() {
   L.push('[ARTCC LOW]');
   L.push('');
 
-  // GEO for both airports + coastline
+  // GEO for both airports + coastline + extended centrelines
   L.push('[GEO]');
   addGeoForAirport(L, depAirport, FROM, depGround);
   L.push('');
   addGeoForAirport(L, arrAirport, TO, arrGround);
+  L.push('');
+  // Extended centrelines generated via TopSky MAP entries (not GEO)
+  const extDist = 20; // nm
   L.push('');
 
   // Add world coastline clipped to route corridor
@@ -1156,25 +1183,47 @@ async function main() {
   E.push(`COORD:${coordPair(sMinLat, sMaxLon)}`);
   E.push(`COORD:${coordPair(sMinLat, sMinLon)}`);
   E.push('');
+  // Build a map: FIR ICAO -> [short IDs that belong to this FIR]
+  const firOwnerMap = {};
+  for (const fir of routeFirs) {
+    const firKey = fir.icao;
+    const firPosEntries = vatspy.firPositions[firKey] || vatspy.firPositions[firKey.split('-')[0]] || [];
+    firOwnerMap[firKey] = [...new Set(firPosEntries.map(p => p.callsign))];
+  }
+
+  // Find which FIR each airport belongs to (for ownership chain)
+  function findAirportFir(icao, lat, lon) {
+    for (const fir of routeFirs) {
+      if (firOwnerMap[fir.icao] && firOwnerMap[fir.icao].length > 0) {
+        // Check if airport is within ~200nm of the FIR center
+        const firCenter = fir.points.length > 0 ? {
+          lat: fir.points.reduce((s, p) => s + p.lat, 0) / fir.points.length,
+          lon: fir.points.reduce((s, p) => s + p.lon, 0) / fir.points.length
+        } : null;
+        if (firCenter && haversineNm(lat, lon, firCenter.lat, firCenter.lon) < 500) {
+          return fir.icao;
+        }
+      }
+    }
+    return null;
+  }
+
+  const depFir = findAirportFir(FROM, depAirport.lat, depAirport.lon);
+  const arrFir = findAirportFir(TO, arrAirport.lat, arrAirport.lon);
+
   E.push(`SECTOR:${LEG_NAME}:0:66000`);
-  // Owner list: airport AFV prefixes + VATSpy position short IDs
-  const allOwners = [
-    airportAfvPrefixes[FROM] || FROM,
-    airportAfvPrefixes[TO] || TO,
-    ...positionShortIds
-  ];
-  E.push(`OWNER:${allOwners.join(':')}`);
+  // Owner list: only dep + arr airport prefixes and their FIR owners
+  const globalOwners = [airportAfvPrefixes[FROM] || FROM, airportAfvPrefixes[TO] || TO];
+  if (depFir && firOwnerMap[depFir]) globalOwners.push(...firOwnerMap[depFir]);
+  if (arrFir && firOwnerMap[arrFir]) globalOwners.push(...firOwnerMap[arrFir]);
+  E.push(`OWNER:${[...new Set(globalOwners)].join(':')}`);
   E.push(`BORDER:${LEG_NAME}_BOUNDARY`);
   E.push('');
 
-  // Sub-sector definitions from transited FIRs (auto-ownership from VATSpy)
+  // Sub-sector definitions from transited FIRs — each FIR only owned by its own positions
   for (const fir of routeFirs) {
     const sectorName = fir.icao.replace(/-/g, '_');
-    // Find the primary owner from VATSpy firPositions
-    const firPosEntries = vatspy.firPositions[fir.icao] || vatspy.firPositions[fir.icao.split('-')[0]] || [];
-    const primaryOwner = firPosEntries.length > 0 ? firPosEntries[0].callsign : null;
-    // Build owner chain: primary owner first, then all position short IDs
-    const owners = primaryOwner ? [primaryOwner, ...positionShortIds.filter(id => id !== primaryOwner)] : positionShortIds;
+    const owners = firOwnerMap[fir.icao] || [];
     if (owners.length === 0) continue;
 
     E.push(`SECTORLINE:${sectorName}_LINE`);
@@ -1188,18 +1237,34 @@ async function main() {
     E.push('');
   }
 
-  // Per-airport sectors
-  for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
+  // Per-airport sectors — owned by airport prefix + its FIR's enroute positions only
+  for (const [icao, apt, fir] of [[FROM, depAirport, depFir], [TO, arrAirport, arrFir]]) {
     const pts = [];
     for (let i = 0; i <= 36; i++) { const p = projectPoint(apt.lat, apt.lon, (360/36)*i, 30); pts.push(coordPair(p.lat, p.lon)); }
     E.push(`SECTORLINE:${icao}_BOUNDARY`);
     for (const pt of pts) E.push(`COORD:${pt}`);
     E.push('');
     E.push(`SECTOR:${icao}_TWR:0:24500`);
-    E.push(`OWNER:${airportAfvPrefixes[icao] || icao}`);
+    const aptPrefix = airportAfvPrefixes[icao] || icao;
+    const aptOwners = [aptPrefix];
+    if (fir && firOwnerMap[fir]) aptOwners.push(...firOwnerMap[fir]);
+    E.push(`OWNER:${[...new Set(aptOwners)].join(':')}`);
     E.push(`BORDER:${icao}_BOUNDARY`);
     E.push('');
   }
+
+  // ALTOWNER entries for observing — one per FIR, puts that FIR's owner first
+  for (const fir of routeFirs) {
+    const firKey = fir.icao;
+    const owners = firOwnerMap[firKey] || [];
+    if (owners.length === 0) continue;
+    // "Observing KZAU" — puts CHI first so you see KZAU traffic as if you were CHI_CTR
+    const allIds = [...new Set([...owners, airportAfvPrefixes[FROM] || FROM, airportAfvPrefixes[TO] || TO])];
+    E.push(`ALTOWNER:Observing ${firKey}:${allIds.join(':')}`);
+  }
+  // "Observing" with no ownership (pure observer)
+  E.push(`ALTOWNER:Observing:--`);
+  E.push('');
 
   fs.writeFileSync(path.join(sctDir, `${LEG_NAME}.ese`), E.join('\r\n'), 'utf-8');
 
@@ -1479,6 +1544,88 @@ async function main() {
     }
     fs.writeFileSync(path.join(topskyDir, 'TopSkyRadars.txt'), radarLines.join('\r\n'), 'utf-8');
     console.log(`  ${vatspy.radars.length} TopSky radars generated`);
+
+    // Write extended centreline tick marks to TopSkyMaps.txt
+    const mapsPath = path.join(topskyDir, 'TopSkyMaps.txt');
+    if (fs.existsSync(mapsPath)) {
+      // Remove any previous generated sections
+      let mapsContent = fs.readFileSync(mapsPath, 'utf-8');
+      const genMarker = '\n; === GENERATED CENTRELINES ===';
+      const markerIdx = mapsContent.indexOf(genMarker);
+      if (markerIdx >= 0) mapsContent = mapsContent.substring(0, markerIdx);
+
+      const mapLines = [genMarker];
+      const tickSpacing = 1; // nm between ticks
+      const shortTick = 0.3; // nm half-length for regular ticks
+      const longTick = 0.6; // nm half-length for 5nm ticks
+      for (const [icao, airport] of [[FROM, depAirport], [TO, arrAirport]]) {
+        for (const rwy of airport.runways) {
+          if (!rwy.lat1 || !rwy.lon1 || !rwy.lat2 || !rwy.lon2 || !rwy.ident1) continue;
+          const hdg = bearing(rwy.lat1, rwy.lon1, rwy.lat2, rwy.lon2);
+          const recip = (hdg + 180) % 360;
+
+          // Centreline for rwy ident1 approach (from rwy1 end along recip)
+          const ext1 = projectPoint(rwy.lat1, rwy.lon1, recip, extDist);
+          mapLines.push('');
+          mapLines.push(`MAP:${icao} ${rwy.ident1}`);
+          mapLines.push('FOLDER:Extended Centrelines');
+          mapLines.push('COLOR:Active_Map_Type_5');
+          mapLines.push('ZOOM:5');
+          mapLines.push('STYLE:Solid:1');
+          mapLines.push('ASRDATA:Centrelines');
+          mapLines.push(`LINE:${coordPair(rwy.lat1, rwy.lon1).replace(' ', ':')}:${coordPair(ext1.lat, ext1.lon).replace(' ', ':')}`);
+
+          // Ticks for rwy ident1
+          const perpL = (recip + 90) % 360;
+          const perpR = (recip + 270) % 360;
+          mapLines.push('');
+          mapLines.push(`MAP:${icao} ${rwy.ident1} Ticks`);
+          mapLines.push('FOLDER:Extended Centrelines');
+          mapLines.push('COLOR:Active_Map_Type_5');
+          mapLines.push('ZOOM:5');
+          mapLines.push('STYLE:Solid:1');
+          mapLines.push('ASRDATA:Ticks');
+          for (let d = tickSpacing; d <= extDist; d += tickSpacing) {
+            const pt = projectPoint(rwy.lat1, rwy.lon1, recip, d);
+            const halfLen = (d % 5 === 0) ? longTick : shortTick;
+            const left = projectPoint(pt.lat, pt.lon, perpL, halfLen);
+            const right = projectPoint(pt.lat, pt.lon, perpR, halfLen);
+            mapLines.push(`LINE:${coordPair(left.lat, left.lon).replace(' ', ':')}:${coordPair(right.lat, right.lon).replace(' ', ':')}`);
+          }
+
+          // Centreline + ticks for rwy ident2
+          if (rwy.ident2) {
+            const ext2 = projectPoint(rwy.lat2, rwy.lon2, hdg, extDist);
+            mapLines.push('');
+            mapLines.push(`MAP:${icao} ${rwy.ident2}`);
+            mapLines.push('FOLDER:Extended Centrelines');
+            mapLines.push('COLOR:Active_Map_Type_5');
+            mapLines.push('ZOOM:5');
+            mapLines.push('STYLE:Solid:1');
+            mapLines.push('ASRDATA:Centrelines');
+            mapLines.push(`LINE:${coordPair(rwy.lat2, rwy.lon2).replace(' ', ':')}:${coordPair(ext2.lat, ext2.lon).replace(' ', ':')}`);
+
+            const perpL2 = (hdg + 90) % 360;
+            const perpR2 = (hdg + 270) % 360;
+            mapLines.push('');
+            mapLines.push(`MAP:${icao} ${rwy.ident2} Ticks`);
+            mapLines.push('FOLDER:Extended Centrelines');
+            mapLines.push('COLOR:Active_Map_Type_5');
+            mapLines.push('ZOOM:5');
+            mapLines.push('STYLE:Solid:1');
+            mapLines.push('ASRDATA:Ticks');
+            for (let d = tickSpacing; d <= extDist; d += tickSpacing) {
+              const pt = projectPoint(rwy.lat2, rwy.lon2, hdg, d);
+              const halfLen = (d % 5 === 0) ? longTick : shortTick;
+              const left = projectPoint(pt.lat, pt.lon, perpL2, halfLen);
+              const right = projectPoint(pt.lat, pt.lon, perpR2, halfLen);
+              mapLines.push(`LINE:${coordPair(left.lat, left.lon).replace(' ', ':')}:${coordPair(right.lat, right.lon).replace(' ', ':')}`);
+            }
+          }
+        }
+      }
+      fs.writeFileSync(mapsPath, mapsContent + mapLines.join('\n'), 'utf-8');
+    }
   }
 
   console.log(`\nGenerated ${LEG_NAME}:`);

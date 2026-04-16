@@ -43,15 +43,15 @@ export async function parseNavaids(filePath, centers, radiusNm = 200) {
     const name = parts.slice(8).join(' ');
 
     if (isNaN(lat) || isNaN(lon)) continue;
-    if (type !== 2 && type !== 3) continue; // 2=NDB, 3=VOR
+    if (type !== 2 && type !== 3 && type !== 12 && type !== 13) continue; // 2=NDB, 3=VOR, 12=DME, 13=DME(VORTAC)
 
     const near = centers.some(c => haversineNm(c.lat, c.lon, lat, lon) <= radiusNm);
     if (!near) continue;
 
     if (type === 2) {
       ndbs.push({ ident, lat, lon, freq: freq.toFixed(3).padStart(7, ' '), name });
-    } else if (type === 3) {
-      // VOR freq is stored as integer * 100, e.g. 11480 = 114.800
+    } else if (type === 3 || type === 12 || type === 13) {
+      // VOR/DME freq is stored as integer * 100, e.g. 11480 = 114.800
       const fmtFreq = (freq / 1000).toFixed(3);
       vors.push({ ident, lat, lon, freq: fmtFreq, name });
     }
