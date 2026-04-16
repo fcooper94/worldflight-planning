@@ -27,7 +27,7 @@ ARTCC boundary:KZLC:
 ARTCC boundary:KZOA:
 ARTCC boundary:KZSE:
 Geo:Coastline:
-Sids:WF2617:
+ARTCC high boundary:KLAX-WF2617:
 SHOWC:KLAX_TWR:1
 SHOWC:EGPN_TWR:1
 SHOWC:1

@@ -114,7 +114,13 @@
       "Bash(xargs grep *)",
       "Bash(git add *)",
       "Bash(git push *)",
-      "Bash(cmd.exe /c \"type \\\\\"C:\\\\Users\\\\fcoop\\\\Downloads\\\\xplane12_native_2604\\\\earth_msa.dat\\\\\"\")"
+      "Bash(cmd.exe /c \"type \\\\\"C:\\\\Users\\\\fcoop\\\\Downloads\\\\xplane12_native_2604\\\\earth_msa.dat\\\\\"\")",
+      "Bash(cp \"c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/ASR/WF2617_\"*.asr \"C:/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/Data/ASR/\")",
+      "Bash(cp \"c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Sector_Files/WF2617.\"* \"C:/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/Data/Sector_Files/\")",
+      "Bash(cp \"c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Settings/Profiles_WF2617.txt\" \"c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Settings/Voice_WF2617.txt\" \"C:/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/Data/Settings/\")",
+      "Bash(mkdir -p \"C:/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/WF2617\")",
+      "Bash(cp \"c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/WF2617/WF2617.prf\" \"C:/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/WF2617/\")",
+      "Read(//c/Users/fcoop/AppData/Roaming/EuroScope/WorldFlight/Data/Sector_Files/**)"
     ]
   }
 }
