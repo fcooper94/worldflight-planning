@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { decimalToDMS, coordPair, bearing, projectPoint, haversineNm, midpoint } from './lib/geo.js';
+import { decimalToDMS, coordPair, bearing, projectPoint, haversineNm, midpoint, interpolateGC } from './lib/geo.js';
 import { parseFixes, parseNavaids, parseAirways, parseCIFP, parseRouteFIRs, parseVATSpyForFIRs, parseXP12Frequencies, parseAFVStations } from './lib/parsers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,7 +15,7 @@ const TO = process.argv[4] || 'EHAM';
 const ATC_ROUTE = process.argv[5] || '';
 const LEG_NAME = `WF26${LEG_NUM.padStart(2, '0')}`;
 
-const RADIUS = 100; // 100nm radius around airports and along route corridor
+const RADIUS = 200; // 200nm radius around departure/arrival airports
 const COASTLINE_PATH = path.join(__dirname, '..', 'data', 'world_coastline.sct');
 const NAVDATA_DIR = path.join(__dirname, '..', 'data', 'navdata');
 const CIFP_DIR = path.join(__dirname, '..', 'data', 'XP12', 'CIFP');
@@ -122,6 +122,33 @@ function renderMSA(icao, airport, vorLookup) {
   return { geo, labels, fix: msa.fix };
 }
 
+function parseDMS(dms) {
+  const m = dms.match(/^([NSEW])(\d+)\.(\d+)\.(\d+\.\d+)$/);
+  if (!m) return NaN;
+  const deg = parseInt(m[2]) + parseInt(m[3]) / 60 + parseFloat(m[4]) / 3600;
+  return (m[1] === 'S' || m[1] === 'W') ? -deg : deg;
+}
+
+function deduplicateLabels(labelsStr) {
+  const lines = labelsStr.split(/\r?\n/);
+  const kept = [];
+  const byText = {}; // text -> [{lat, lon}]
+  const DEDUP_NM = 0.054; // ~100m
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r/g, '');
+    const m = line.match(/^"([^"]+)"\s+([NSEW]\d+\.\d+\.\d+\.\d+)\s+([NSEW]\d+\.\d+\.\d+\.\d+)\s+(.+)$/);
+    if (!m) { kept.push(line); continue; }
+    const text = m[1], lat = parseDMS(m[2]), lon = parseDMS(m[3]);
+    if (isNaN(lat) || isNaN(lon)) { kept.push(line); continue; }
+    if (!byText[text]) byText[text] = [];
+    const tooClose = byText[text].some(p => haversineNm(lat, lon, p.lat, p.lon) < DEDUP_NM);
+    if (tooClose) continue;
+    byText[text].push({ lat, lon });
+    kept.push(line);
+  }
+  return kept.join('\r\n');
+}
+
 function loadGround(icao) {
   const groundPath = path.join(OUTPUT_DIR, `${icao}_ground.txt`);
   if (!fs.existsSync(groundPath)) return { regions: '', geo: '', labels: '' };
@@ -129,10 +156,11 @@ function loadGround(icao) {
   const regionsStart = ground.indexOf('; === REGIONS');
   const geoStart = ground.indexOf('; === GEO');
   const labelsStart = ground.indexOf('; === LABELS');
+  const rawLabels = ground.substring(labelsStart).split('\n').filter(l => !l.startsWith(';') && l.trim()).join('\r\n');
   return {
     regions: ground.substring(regionsStart, geoStart).split('\n').filter(l => !l.startsWith(';') && l.trim()).join('\r\n'),
     geo: ground.substring(geoStart, labelsStart).split('\n').filter(l => !l.startsWith(';') && l.trim()).join('\r\n'),
-    labels: ground.substring(labelsStart).split('\n').filter(l => !l.startsWith(';') && l.trim()).join('\r\n')
+    labels: deduplicateLabels(rawLabels)
   };
 }
 
@@ -294,6 +322,9 @@ function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSe
   lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
   lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
   lines.push('PLUGIN:UK Controller Plugin:DisplayCountdown:1');
+  // TopSky plugin
+  lines.push('PLUGIN:TopSky plugin:HideMapData:AirspaceBases,Fixes,FixLabels');
+  lines.push('PLUGIN:TopSky plugin:ShowMapData:Centrelines');
   return lines;
 }
 
@@ -313,28 +344,17 @@ async function main() {
   const mid = midpoint(depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon);
   console.log(`  Distance: ${dist.toFixed(0)}nm | Midpoint: ${mid.lat.toFixed(2)}, ${mid.lon.toFixed(2)}`);
 
-  // Add route corridor points as additional centers for navdata search
-  // Sample every ~150nm along route so 100nm radius gives continuous corridor coverage
-  const routeCenters = [...centers];
-  const corridorSamples = Math.max(5, Math.ceil(dist / 150));
-  for (let i = 1; i < corridorSamples; i++) {
-    const frac = i / corridorSamples;
-    const lat = depAirport.lat + (arrAirport.lat - depAirport.lat) * frac;
-    const lon = depAirport.lon + (arrAirport.lon - depAirport.lon) * frac;
-    routeCenters.push({ icao: 'RTE', lat, lon });
-  }
-
-  console.log('Parsing navdata...');
-  const fixes = await parseFixes(path.join(NAVDATA_DIR, 'earth_fix.dat'), routeCenters, RADIUS);
-  const { vors, ndbs } = await parseNavaids(path.join(NAVDATA_DIR, 'earth_nav.dat'), routeCenters, RADIUS);
-  const airways = await parseAirways(path.join(NAVDATA_DIR, 'earth_awy.dat'), routeCenters, RADIUS);
-  console.log(`  ${fixes.length} fixes, ${vors.length} VORs, ${ndbs.length} NDBs, ${airways.high.length} high/${airways.low.length} low airways`);
-  const vorIdents = new Set(vors.map(v => v.ident));
-  const ndbIdents = new Set(ndbs.map(n => n.ident));
-
-  // FIR boundaries — initially use straight line, will re-parse with actual route later
+  // FIR boundaries — initially use great circle, will re-parse with actual route later
   let routeFirs = parseRouteFIRs(FIR_GEOJSON, depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon);
   console.log(`  ${routeFirs.length} FIRs along route (initial)`);
+
+  // Navdata loading deferred until after route expansion so corridor follows actual route
+  let routeCenters = [...centers];
+  let fixes = [], vors = [], ndbs = [];
+  let airways = { high: [], low: [] };
+  let vorIdents = new Set();
+  let ndbIdents = new Set();
+  let vorLookup = new Map();
 
   // VATSpy parsing deferred until after route expansion (to use actual route FIRs)
   let vatspy = null;
@@ -414,44 +434,12 @@ async function main() {
   }
   L.push('');
 
-  // Parse MSA data — build a quick VOR lookup for center point resolution
-  const vorLookup = new Map(vors.map(v => [v.ident, v]));
-  const depMSA = renderMSA(FROM, depAirport, vorLookup);
-  const arrMSA = renderMSA(TO, arrAirport, vorLookup);
+  // MSA + Navdata sections deferred — placeholder inserted here, filled after route expansion
+  const NAVDATA_PLACEHOLDER = '{{NAVDATA_SECTIONS}}';
+  L.push(NAVDATA_PLACEHOLDER);
 
-  // Navdata
-  L.push('[VOR]');
-  for (const v of vors) L.push(`${v.ident.padEnd(5)} ${v.freq} ${coordPair(v.lat, v.lon)}`);
-  L.push('');
-  L.push('[NDB]');
-  for (const n of ndbs) L.push(`${n.ident.padEnd(5)} ${n.freq} ${coordPair(n.lat, n.lon)}`);
-  L.push('');
-  L.push('[FIXES]');
-  const fixMap = new Map();
-  for (const f of fixes) { const k = `${f.ident}_${f.lat.toFixed(4)}`; if (!fixMap.has(k)) fixMap.set(k, f); }
-  for (const f of [...fixMap.values()]) L.push(`${f.ident.padEnd(6)} ${coordPair(f.lat, f.lon)}`);
-  // MSA altitude labels as fixes (so they can be toggled via Fixes: in ASR)
-  const msaFixNames = [];
-  for (const { labels: msaLabels } of [depMSA, arrMSA]) {
-    for (const lbl of msaLabels) {
-      L.push(`${lbl.text.padEnd(6)} ${coordPair(lbl.lat, lbl.lon)}`);
-      msaFixNames.push(lbl.text);
-    }
-  }
-  L.push('');
-  L.push('[HIGH AIRWAY]');
-  const awyDedup = new Set();
-  for (const s of airways.high) { const k = `${s.name}${s.lat1.toFixed(4)}${s.lon1.toFixed(4)}`; if (!awyDedup.has(k)) { awyDedup.add(k); L.push(`${s.name.padEnd(6)} ${coordPair(s.lat1, s.lon1)} ${coordPair(s.lat2, s.lon2)}`); } }
-  L.push('');
-  L.push('[LOW AIRWAY]');
-  for (const s of airways.low) { const k = `${s.name}${s.lat1.toFixed(4)}${s.lon1.toFixed(4)}`; if (!awyDedup.has(k)) { awyDedup.add(k); L.push(`${s.name.padEnd(6)} ${coordPair(s.lat1, s.lon1)} ${coordPair(s.lat2, s.lon2)}`); } }
-  L.push('');
-
-  // Build waypoint lookup for SID/STAR/route drawing
+  // wpLookup initially empty — route expansion builds its own from full airway file
   const wpLookup = new Map();
-  for (const f of fixes) { if (!wpLookup.has(f.ident)) wpLookup.set(f.ident, f); }
-  for (const v of vors) { if (!wpLookup.has(v.ident)) wpLookup.set(v.ident, v); }
-  for (const n of ndbs) { if (!wpLookup.has(n.ident)) wpLookup.set(n.ident, n); }
 
   // Parse CIFP for both airports to get SID/STAR fix sequences
   const allSidStars = [];
@@ -502,7 +490,7 @@ async function main() {
     }
   }
 
-  // depMSA/arrMSA already parsed above
+  // depMSA/arrMSA parsed after navdata load (in navdata section builder)
 
   // Draw SID routes
   const allProcs = []; // { name, airport, fixes[] }
@@ -626,13 +614,113 @@ async function main() {
     L.push(`; Expanded: ${deduped.map(p => p.name).join(' ')}`);
     // Route line moved to [ARTCC HIGH] section
     console.log(`  Route: ${deduped.length} waypoints (expanded from "${ATC_ROUTE}")`);
-    // Re-parse FIRs using actual route waypoints instead of straight line
+    // Rebuild corridor from actual route waypoints using great circle interpolation
+    routeCenters = [...centers];
+    for (let i = 0; i < deduped.length; i++) {
+      routeCenters.push({ icao: 'RTE', lat: deduped[i].lat, lon: deduped[i].lon });
+      // Add GC-interpolated points between consecutive waypoints for continuous coverage
+      if (i < deduped.length - 1) {
+        const segDist = haversineNm(deduped[i].lat, deduped[i].lon, deduped[i+1].lat, deduped[i+1].lon);
+        const subSamples = Math.max(1, Math.ceil(segDist / 80)); // every ~80nm
+        for (let s = 1; s < subSamples; s++) {
+          const frac = s / subSamples;
+          const pt = interpolateGC(deduped[i].lat, deduped[i].lon, deduped[i+1].lat, deduped[i+1].lon, frac);
+          routeCenters.push({ icao: 'RTE', lat: pt.lat, lon: pt.lon });
+        }
+      }
+    }
+    console.log(`  ${routeCenters.length} corridor centers from actual route`);
+
+    // Load navdata using actual route corridor (not GC between airports)
+    console.log('  Loading navdata along actual route corridor...');
+    fixes = await parseFixes(path.join(NAVDATA_DIR, 'earth_fix.dat'), routeCenters, RADIUS);
+    const navResult = await parseNavaids(path.join(NAVDATA_DIR, 'earth_nav.dat'), routeCenters, RADIUS);
+    vors = navResult.vors; ndbs = navResult.ndbs;
+    airways = await parseAirways(path.join(NAVDATA_DIR, 'earth_awy.dat'), routeCenters, RADIUS);
+    console.log(`  ${fixes.length} fixes, ${vors.length} VORs, ${ndbs.length} NDBs, ${airways.high.length} high/${airways.low.length} low airways`);
+    vorIdents = new Set(vors.map(v => v.ident));
+    ndbIdents = new Set(ndbs.map(n => n.ident));
+    // Add to wpLookup
+    for (const f of fixes) { if (!wpLookup.has(f.ident)) wpLookup.set(f.ident, f); }
+    for (const v of vors) { if (!wpLookup.has(v.ident)) wpLookup.set(v.ident, v); }
+    for (const n of ndbs) { if (!wpLookup.has(n.ident)) wpLookup.set(n.ident, n); }
+
+    // Re-parse FIRs using actual route waypoints
     routeFirs = parseRouteFIRs(FIR_GEOJSON, depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon, deduped);
     console.log(`  ${routeFirs.length} FIRs along actual route`);
     // Now parse VATSpy with correct FIR IDs from actual route
     const transitFirIds = routeFirs.map(f => f.icao);
     vatspy = parseVATSpyForFIRs(VATSPY_DAT, FIR_BOUNDS, transitFirIds);
     console.log(`  ${vatspy.positions.length} VATSIM positions, ${vatspy.radars.length} radar sites for ${vatspy.firBounds.length} FIRs`);
+  }
+
+  // If no ATC route, load navdata with GC corridor (fallback)
+  if (fixes.length === 0) {
+    function addGCPoints(lat1, lon1, lat2, lon2, depth) {
+      if (depth <= 0) return;
+      const m = midpoint(lat1, lon1, lat2, lon2);
+      routeCenters.push({ icao: 'RTE', lat: m.lat, lon: m.lon });
+      addGCPoints(lat1, lon1, m.lat, m.lon, depth - 1);
+      addGCPoints(m.lat, m.lon, lat2, lon2, depth - 1);
+    }
+    const gcDepth = dist < 500 ? 3 : dist < 2000 ? 4 : 5;
+    addGCPoints(depAirport.lat, depAirport.lon, arrAirport.lat, arrAirport.lon, gcDepth);
+    console.log('Parsing navdata (GC fallback)...');
+    fixes = await parseFixes(path.join(NAVDATA_DIR, 'earth_fix.dat'), routeCenters, RADIUS);
+    const navResult = await parseNavaids(path.join(NAVDATA_DIR, 'earth_nav.dat'), routeCenters, RADIUS);
+    vors = navResult.vors; ndbs = navResult.ndbs;
+    airways = await parseAirways(path.join(NAVDATA_DIR, 'earth_awy.dat'), routeCenters, RADIUS);
+    console.log(`  ${fixes.length} fixes, ${vors.length} VORs, ${ndbs.length} NDBs`);
+    vorIdents = new Set(vors.map(v => v.ident));
+    ndbIdents = new Set(ndbs.map(n => n.ident));
+    for (const f of fixes) { if (!wpLookup.has(f.ident)) wpLookup.set(f.ident, f); }
+    for (const v of vors) { if (!wpLookup.has(v.ident)) wpLookup.set(v.ident, v); }
+    for (const n of ndbs) { if (!wpLookup.has(n.ident)) wpLookup.set(n.ident, n); }
+    // Parse VATSpy with initial FIRs
+    const transitFirIds = routeFirs.map(f => f.icao);
+    vatspy = parseVATSpyForFIRs(VATSPY_DAT, FIR_BOUNDS, transitFirIds);
+    console.log(`  ${vatspy.positions.length} VATSIM positions`);
+  }
+
+  // Now build navdata sections with final (post-route-expansion) data and splice into L
+  const msaFixNames = [];
+  let depMSA, arrMSA;
+  {
+    const navLines = [];
+    vorLookup = new Map(vors.map(v => [v.ident, v])); // refresh after merge
+    // Parse MSA now that VORs are loaded
+    depMSA = renderMSA(FROM, depAirport, vorLookup);
+    arrMSA = renderMSA(TO, arrAirport, vorLookup);
+    navLines.push('[VOR]');
+    for (const v of vors) navLines.push(`${v.ident.padEnd(5)} ${v.freq} ${coordPair(v.lat, v.lon)}`);
+    navLines.push('');
+    navLines.push('[NDB]');
+    for (const n of ndbs) navLines.push(`${n.ident.padEnd(5)} ${n.freq} ${coordPair(n.lat, n.lon)}`);
+    navLines.push('');
+    navLines.push('[FIXES]');
+    const fixMap = new Map();
+    for (const f of fixes) { const k = `${f.ident}_${f.lat.toFixed(4)}`; if (!fixMap.has(k)) fixMap.set(k, f); }
+    for (const f of [...fixMap.values()]) navLines.push(`${f.ident.padEnd(6)} ${coordPair(f.lat, f.lon)}`);
+    // MSA altitude labels as fixes
+    for (const { labels: msaLabels } of [depMSA, arrMSA]) {
+      for (const lbl of msaLabels) {
+        navLines.push(`${lbl.text.padEnd(6)} ${coordPair(lbl.lat, lbl.lon)}`);
+        msaFixNames.push(lbl.text);
+      }
+    }
+    navLines.push('');
+    navLines.push('[HIGH AIRWAY]');
+    const awyDedup = new Set();
+    for (const s of airways.high) { const k = `${s.name}${s.lat1.toFixed(4)}${s.lon1.toFixed(4)}`; if (!awyDedup.has(k)) { awyDedup.add(k); navLines.push(`${s.name.padEnd(6)} ${coordPair(s.lat1, s.lon1)} ${coordPair(s.lat2, s.lon2)}`); } }
+    navLines.push('');
+    navLines.push('[LOW AIRWAY]');
+    for (const s of airways.low) { const k = `${s.name}${s.lat1.toFixed(4)}${s.lon1.toFixed(4)}`; if (!awyDedup.has(k)) { awyDedup.add(k); navLines.push(`${s.name.padEnd(6)} ${coordPair(s.lat1, s.lon1)} ${coordPair(s.lat2, s.lon2)}`); } }
+    navLines.push('');
+    // Splice into L replacing placeholder
+    const placeholderIdx = L.indexOf(NAVDATA_PLACEHOLDER);
+    if (placeholderIdx >= 0) {
+      L.splice(placeholderIdx, 1, ...navLines);
+    }
   }
   L.push('');
 
@@ -1118,7 +1206,6 @@ async function main() {
     `Plugins\tPlugin1Display1\tSMR radar display`,
     `Plugins\tPlugin2\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
     `Plugins\tPlugin2Display0\tStandard ES radar screen`,
-    `Plugins\tPlugin2Display1\tSMR radar display`,
     `LastSession\tserver\tAUTOMATIC`,
     `LastSession\tcallsign\t- Select profile---->`,
   ];
@@ -1271,6 +1358,9 @@ async function main() {
     'PLUGIN:UK Controller Plugin:HistoryTrailColour:255,130,20',
     'PLUGIN:UK Controller Plugin:HistoryTrailDegrade:1',
     'PLUGIN:UK Controller Plugin:HistoryTrailFade:1',
+    // TopSky plugin
+    'PLUGIN:TopSky plugin:HideMapData:AirspaceBases,Fixes,FixLabels',
+    'PLUGIN:TopSky plugin:ShowMapData:NERC,Centrelines',
   );
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_Enroute.asr`), enroute.join('\r\n'), 'utf-8');
 

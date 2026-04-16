@@ -64,6 +64,24 @@ export function midpoint(lat1, lon1, lat2, lon2) {
   return { lat: toDeg(φm), lon: toDeg(λm) };
 }
 
+// Great circle interpolation - fraction 0..1 between two points
+export function interpolateGC(lat1, lon1, lat2, lon2, f) {
+  const toRad = d => d * Math.PI / 180;
+  const toDeg = r => r * 180 / Math.PI;
+  const φ1 = toRad(lat1), λ1 = toRad(lon1);
+  const φ2 = toRad(lat2), λ2 = toRad(lon2);
+  const d = 2 * Math.asin(Math.sqrt(
+    Math.sin((φ2 - φ1) / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin((λ2 - λ1) / 2) ** 2
+  ));
+  if (d < 1e-10) return { lat: lat1, lon: lon1 };
+  const A = Math.sin((1 - f) * d) / Math.sin(d);
+  const B = Math.sin(f * d) / Math.sin(d);
+  const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+  const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+  const z = A * Math.sin(φ1) + B * Math.sin(φ2);
+  return { lat: toDeg(Math.atan2(z, Math.sqrt(x * x + y * y))), lon: toDeg(Math.atan2(y, x)) };
+}
+
 export function runwayLengthFt(lat1, lon1, lat2, lon2) {
   return haversineNm(lat1, lon1, lat2, lon2) * 6076.12;
 }

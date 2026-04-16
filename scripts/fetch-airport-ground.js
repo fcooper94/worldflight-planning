@@ -395,12 +395,7 @@ out body geom;
   lines.push('; === LABELS (paste into [LABELS] section) ===');
   lines.push('');
 
-  // Stand labels
-  for (const s of stands) {
-    if (s.name) {
-      lines.push(`"${s.name}" ${coordToES(s.lat, s.lon)} ${COLOURS.standlabel}`);
-    }
-  }
+  // Stand labels omitted — too cluttered for EuroScope SMR view
 
   // Taxiway name labels (at midpoint of each taxiway)
   for (const t of taxiwayLines) {
