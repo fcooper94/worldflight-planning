@@ -14253,6 +14253,49 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
         ${fileCard('Waypoints / Fixes (earth_fix.dat)', fixInfo, 'earth_fix')}
         ${fileCard('Navaids (earth_nav.dat)', parseAiracHeader(path.join(navDir, 'earth_nav.dat')), 'earth_nav')}
         ${fileCard('Airways (earth_awy.dat)', awyInfo, 'earth_awy')}
+        ${fileCard('MSA Data (earth_msa.dat)', parseAiracHeader(path.join(navDir, 'earth_msa.dat')), 'earth_msa')}
+        ${(() => {
+          const cifpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'XP12', 'CIFP');
+          let cifpInfo = null;
+          try {
+            if (fs.existsSync(cifpDir)) {
+              const files = fs.readdirSync(cifpDir).filter(f => f.endsWith('.dat'));
+              const stats = files.length > 0 ? fs.statSync(path.join(cifpDir, files[0])) : null;
+              // Try to read cycle from first CIFP file
+              let cifpCycle = 'Unknown';
+              if (files.length > 0) {
+                const head = fs.readFileSync(path.join(cifpDir, files[0]), 'utf-8').split('\\n').slice(0, 3).join(' ');
+                const cm = head.match(/cycle (\\d{4})/i) || head.match(/(\\d{4})/);
+                if (cm) cifpCycle = cm[1];
+              }
+              cifpInfo = {
+                exists: true,
+                cycle: cifpCycle,
+                buildDate: stats ? stats.mtime.toISOString().slice(0, 10) : 'Unknown',
+                expiryDate: null,
+                valid: true,
+                daysLeft: null,
+                fileSize: files.reduce((s, f) => s + fs.statSync(path.join(cifpDir, f)).size, 0) / 1024 / 1024,
+                lines: files.length,
+                noExpiry: true
+              };
+            }
+          } catch {}
+          const info = cifpInfo;
+          if (!info || !info.exists) {
+            return '<div class="leg-section"><div class="leg-section-title">CIFP SID/STAR Data</div>' +
+              '<p style="color:var(--muted);font-size:13px;">CIFP folder not found. Place CIFP .dat files in data/XP12/CIFP/</p></div>';
+          }
+          return '<div class="leg-section"><div class="leg-section-title">CIFP SID/STAR Data</div>' +
+            '<table style="width:100%;font-size:13px;color:var(--text);">' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Status</td><td style="font-weight:600;"><span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;">Loaded</span></td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Last Modified</td><td>' + info.buildDate + '</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Total Size</td><td>' + info.fileSize.toFixed(1) + ' MB</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Airport Files</td><td>' + info.lines.toLocaleString() + ' airports</td></tr>' +
+            '</table>' +
+            '<div style="margin-top:8px;font-size:12px;color:var(--muted2);">Place updated CIFP .dat files in <code>data/XP12/CIFP/</code></div>' +
+          '</div>';
+        })()}
         ${(() => {
           const firPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public', 'fir-boundaries.geojson');
           let firInfo = null;
@@ -14311,6 +14354,39 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
             '</div>' +
           '</div>';
         })()}
+        ${(() => {
+          const vatspyPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'VATSPY', 'VATSpy.dat');
+          const firBoundsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'VATSPY', 'FIRBoundaries.dat');
+          let vatspyLines = 0, firBoundsLines = 0, vatspyDate = 'Unknown';
+          try {
+            if (fs.existsSync(vatspyPath)) { vatspyLines = fs.readFileSync(vatspyPath, 'utf-8').split('\\n').length; vatspyDate = fs.statSync(vatspyPath).mtime.toISOString().slice(0, 10); }
+            if (fs.existsSync(firBoundsPath)) firBoundsLines = fs.readFileSync(firBoundsPath, 'utf-8').split('\\n').length;
+          } catch {}
+          return '<div class="leg-section"><div class="leg-section-title">VATSpy Data</div>' +
+            '<table style="width:100%;font-size:13px;color:var(--text);">' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Status</td><td style="font-weight:600;"><span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;">' + (vatspyLines > 0 ? 'Loaded' : 'Missing') + '</span></td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Last Modified</td><td>' + vatspyDate + '</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">VATSpy.dat</td><td>' + vatspyLines.toLocaleString() + ' lines</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">FIRBoundaries.dat</td><td>' + firBoundsLines.toLocaleString() + ' lines</td></tr>' +
+            '</table>' +
+            '<div style="margin-top:8px;font-size:12px;color:var(--muted2);">Used for FIR sector ownership and position mapping</div>' +
+          '</div>';
+        })()}
+        ${(() => {
+          const afvPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'afv_stations.csv');
+          let afvCount = 0, afvDate = 'Unknown';
+          try {
+            if (fs.existsSync(afvPath)) { afvCount = fs.readFileSync(afvPath, 'utf-8').split('\\n').filter(l => l.trim()).length - 1; afvDate = fs.statSync(afvPath).mtime.toISOString().slice(0, 10); }
+          } catch {}
+          return '<div class="leg-section"><div class="leg-section-title">AFV Station Database</div>' +
+            '<table style="width:100%;font-size:13px;color:var(--text);">' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Status</td><td style="font-weight:600;"><span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;">' + (afvCount > 0 ? 'Loaded' : 'Missing') + '</span></td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Last Modified</td><td>' + afvDate + '</td></tr>' +
+              '<tr><td style="color:var(--muted);padding:4px 0;">Stations</td><td>' + afvCount.toLocaleString() + ' positions</td></tr>' +
+            '</table>' +
+            '<div style="margin-top:8px;font-size:12px;color:var(--muted2);">Real VATSIM frequencies for controller positions. Scraped from AFV Station Editor.</div>' +
+          '</div>';
+        })()}
       </div>
     </section>
   `;
@@ -14323,7 +14399,7 @@ app.post('/admin/api/airac/upload', requireAdmin, multer({
 }).single('navfile'), async (req, res) => {
   const { fileType } = req.body;
   const isFir = fileType === 'fir_boundaries';
-  const allowed = { earth_fix: 'earth_fix.dat', earth_awy: 'earth_awy.dat', earth_nav: 'earth_nav.dat' };
+  const allowed = { earth_fix: 'earth_fix.dat', earth_awy: 'earth_awy.dat', earth_nav: 'earth_nav.dat', earth_msa: 'earth_msa.dat' };
   const targetName = isFir ? 'fir-boundaries.geojson' : allowed[fileType];
 
   if (!targetName || !req.file) {
