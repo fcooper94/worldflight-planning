@@ -27,6 +27,44 @@ const AFV_STATIONS = path.join(__dirname, '..', 'data', 'afv_stations.csv');
 const MSA_FILE = path.join(NAVDATA_DIR, 'earth_msa.dat');
 const OUTPUT_DIR = path.join(__dirname, '..', 'Euroscope_Files', 'WorldFlight');
 
+// US TRACON facilities mapped to the airports they serve
+const US_TRACON_MAP = {
+  N90: ['KJFK', 'KLGA', 'KEWR', 'KTEB', 'KHPN', 'KISP', 'KFRG', 'KSWF'],
+  SCT: ['KLAX', 'KSAN', 'KSNA', 'KONT', 'KBUR', 'KLGB', 'KVNY', 'KPSP'],
+  NCT: ['KSFO', 'KOAK', 'KSJC', 'KSMF', 'KRNO'],
+  PCT: ['KDCA', 'KIAD', 'KBWI', 'KADW'],
+  A80: ['KATL', 'KPDK', 'KFTY'],
+  C90: ['KORD', 'KMDW', 'KPWK'],
+  D10: ['KDFW', 'KDAL', 'KADS', 'KAFW'],
+  I90: ['KIAH', 'KHOU', 'KELP'],
+  S56: ['KSEA', 'KBFI', 'KPAE'],
+  A90: ['KBOS', 'KBDL', 'KPVD', 'KMHT'],
+  D01: ['KDEN'],
+  M98: ['KMSP'],
+  L30: ['KLAS'],
+  P50: ['KPHX', 'KSDL', 'KCHD', 'KGYR'],
+  MIA: ['KMIA', 'KFLL', 'KPBI'],
+  F11: ['KMCO', 'KTPA', 'KSFB', 'KMLB'],
+  Y90: ['KPHX'],
+  R90: ['KRDU'],
+  T75: ['KSTL'],
+  IND: ['KIND'],
+  CVG: ['KCVG', 'KLUK'],
+  CLT: ['KCLT'],
+  MSY: ['KMSY'],
+  PIT: ['KPIT'],
+  DTW: ['KDTW'],
+  CLE: ['KCLE'],
+  SDF: ['KSDF'],
+  MCI: ['KMCI'],
+  MKE: ['KMKE'],
+  CMH: ['KCMH'],
+  BNA: ['KBNA'],
+  JAX: ['KJAX'],
+  ANC: ['PANC'],
+  PDX: ['KPDX'],
+};
+
 function collectLabelItems(labelStr) {
   if (!labelStr) return { lines: labelStr, items: [] };
   const items = [];
@@ -86,11 +124,10 @@ function renderMSA(icao, airport, vorLookup) {
   const geo = [];
   const labels = [];
   const geoName = `${icao} MSA`;
-  // Draw MSA ring in screen-space (lat/lon) so it appears circular on EuroScope's projection
-  // At this latitude, 1° lon = cos(lat) * 1° lat in real distance
+  // Draw MSA ring in screen-space with full cos(lat) correction for equirectangular display
   const radiusDegLat = radius / 60; // 1nm = 1/60 degree latitude
   const cosLat = Math.cos(centerLat * Math.PI / 180);
-  const radiusDegLon = radiusDegLat / cosLat; // compensate for longitude compression
+  const radiusDegLon = radiusDegLat / cosLat;
   const segments = 72; // 5-degree segments
   const toRad = d => d * Math.PI / 180;
   for (let i = 0; i < segments; i++) {
@@ -114,14 +151,11 @@ function renderMSA(icao, airport, vorLookup) {
   // And bearing 90°=E means lon increases (east), so sin(90°)=1 for lon is correct. ✓
 
   if (msa.sectors.length === 1) {
-    // Single sector — label with altitude
     const lp = ringPt(0, 0.5);
-    labels.push({ text: `M${msa.sectors[0].altitude}`, lat: lp.lat, lon: lp.lon });
-    // MSA name below the ring
+    labels.push({ text: `MSA_${msa.sectors[0].altitude}`, lat: lp.lat, lon: lp.lon });
     const np = ringPt(180, 1.15);
-    labels.push({ text: `MSA${msa.fix}`, lat: np.lat, lon: np.lon });
+    labels.push({ text: `MSA_${radius}NM`, lat: np.lat, lon: np.lon });
   } else {
-    // Multi-sector — draw radial lines and label each sector
     for (let i = 0; i < msa.sectors.length; i++) {
       const s = msa.sectors[i];
       const edgePt = ringPt(s.bearing);
@@ -131,11 +165,10 @@ function renderMSA(icao, airport, vorLookup) {
       if (((nextBrg - s.bearing + 360) % 360) > 180) midBrg += 180;
       midBrg = midBrg % 360;
       const lp = ringPt(midBrg, 0.6);
-      labels.push({ text: `M${s.altitude}`, lat: lp.lat, lon: lp.lon });
+      labels.push({ text: `MSA_${s.altitude}`, lat: lp.lat, lon: lp.lon });
     }
-    // MSA name below ring
     const np = ringPt(180, 1.15);
-    labels.push({ text: `MSA${msa.fix}`, lat: np.lat, lon: np.lon });
+    labels.push({ text: `MSA_${radius}NM`, lat: np.lat, lon: np.lon });
   }
   return { geo, labels, fix: msa.fix };
 }
@@ -183,6 +216,7 @@ function loadGround(icao) {
 }
 
 function addRunwaysCenterlines(L, airport, icao) {
+  // Short centerline only (10nm) — extended centrelines via TopSky MAP with ACTIVE:RWY
   for (const rwy of airport.runways) {
     if (!rwy.ident1 || !rwy.lat1) continue;
     const hdg = bearing(rwy.lat1, rwy.lon1, rwy.lat2, rwy.lon2);
@@ -192,6 +226,68 @@ function addRunwaysCenterlines(L, airport, icao) {
     L.push(`${icao}-${rwy.ident1} ${coordPair(rwy.lat1, rwy.lon1)} ${coordPair(ext1.lat, ext1.lon)} centrelinecolour`);
     if (rwy.ident2) L.push(`${icao}-${rwy.ident2} ${coordPair(rwy.lat2, rwy.lon2)} ${coordPair(ext2.lat, ext2.lon)} centrelinecolour`);
   }
+}
+
+// Build TopSky MAP entries for extended centrelines with runway-conditional activation
+function buildCentrelineMaps(airport, icao, positionShortIds) {
+  const extDist = 20;
+  const tickSpacing = 1;
+  const shortTick = 0.3;
+  const longTick = 0.6;
+  const lines = [];
+  const toRad = d => d * Math.PI / 180;
+
+  function addMapEntry(rwyIdent, lat, lon, hdg) {
+    const ext = projectPoint(lat, lon, hdg, extDist);
+    const rwyTag = `${icao}${rwyIdent.replace(/\s/g, '')}`;
+    // Centreline MAP — show when runway is active for arrivals
+    lines.push('');
+    lines.push(`MAP:${icao} ${rwyIdent}`);
+    lines.push('FOLDER:Extended Centrelines');
+    lines.push('COLOR:Active_Map_Type_5');
+    lines.push('ZOOM:5');
+    lines.push('STYLE:Solid:1');
+    lines.push('ASRDATA:Centrelines');
+    lines.push(`LINE:${coordPair(lat, lon).replace(' ', ':')}:${coordPair(ext.lat, ext.lon).replace(' ', ':')}`);
+    lines.push(`ACTIVE:RWY:ARR:${rwyTag}:DEP:*`);
+
+    // Ticks MAP — screen-space perpendiculars
+    const dlat = ext.lat - lat;
+    const dlon = ext.lon - lon;
+    const len = Math.sqrt(dlat * dlat + dlon * dlon);
+    const perpLat = -dlon / len;
+    const perpLon = dlat / len;
+
+    lines.push('');
+    lines.push(`MAP:${icao} ${rwyIdent} Ticks`);
+    lines.push('FOLDER:Extended Centrelines');
+    lines.push('COLOR:Active_Map_Type_5');
+    lines.push('ZOOM:5');
+    lines.push('STYLE:Solid:1');
+    lines.push('ASRDATA:Ticks');
+    for (let d = tickSpacing; d <= extDist; d += tickSpacing) {
+      const frac = d / extDist;
+      const ptLat = lat + dlat * frac;
+      const ptLon = lon + dlon * frac;
+      const halfLen = (d % 5 === 0) ? longTick : shortTick;
+      const tickDeg = halfLen / 60;
+      const lLat = ptLat + perpLat * tickDeg;
+      const lLon = ptLon + perpLon * tickDeg;
+      const rLat = ptLat - perpLat * tickDeg;
+      const rLon = ptLon - perpLon * tickDeg;
+      lines.push(`LINE:${coordPair(lLat, lLon).replace(' ', ':')}:${coordPair(rLat, rLon).replace(' ', ':')}`);
+    }
+    lines.push(`ACTIVE:RWY:ARR:${rwyTag}:DEP:*`);
+  }
+
+  for (const rwy of airport.runways) {
+    if (!rwy.ident1 || !rwy.lat1) continue;
+    const hdg = bearing(rwy.lat1, rwy.lon1, rwy.lat2, rwy.lon2);
+    const recip = (hdg + 180) % 360;
+    addMapEntry(rwy.ident1, rwy.lat1, rwy.lon1, recip);
+    if (rwy.ident2) addMapEntry(rwy.ident2, rwy.lat2, rwy.lon2, hdg);
+  }
+  return lines;
 }
 
 function addGeoForAirport(L, airport, icao, groundData) {
@@ -279,12 +375,10 @@ function buildSmrAsr(legName, icao, airport, suffix, freeTextItems) {
   lines.push(`PLUGIN:vSMR Vatsim UK:SRW1Rotation:0`, `PLUGIN:vSMR Vatsim UK:SRW1Scale:30`);
   lines.push(`PLUGIN:vSMR Vatsim UK:SRW1TopLeftX:1545`, `PLUGIN:vSMR Vatsim UK:SRW1TopLeftY:629`);
   lines.push(`PLUGIN:vSMR Vatsim UK:SRW1BottomRightX:1920`, `PLUGIN:vSMR Vatsim UK:SRW1BottomRightY:928`);
-  lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
-  lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
   return lines;
 }
 
-function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSet, ndbSet, routeFixNames, msaFixNames, sctRelPath) {
+function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSet, ndbSet, routeFixNames, msaFixNames, depIcao, nextRouteFixNames, nextRouteName) {
   const boxSize = 0.5; // degrees for APP view
   const lines = [
     'DisplayTypeName:Standard ES radar screen',
@@ -295,7 +389,8 @@ function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSe
   const items = [];
   items.push(`Airports:${icao}:symbol`);
   items.push(`ARTCC boundary:${icao}-MSA:`);
-  if (legName) items.push(`ARTCC boundary:${icao}-${legName}:`);
+  // Route line uses departure ICAO as prefix in the SCT
+  if (legName && depIcao) items.push(`ARTCC boundary:${depIcao}-${legName}:`);
   for (const item of (freeTextItems || [])) {
     items.push(`Free Text:${item}:freetext`);
   }
@@ -316,13 +411,27 @@ function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSe
   for (const f of (msaFixNames || [])) {
     items.push(`Fixes:${f}:name`);
   }
+  // Next leg outbound route
+  if (nextRouteName) items.push(`ARTCC boundary:${nextRouteName}:`);
+  for (const f of (nextRouteFixNames || [])) {
+    if (vorSet && vorSet.has(f)) {
+      items.push(`VORs:${f}:name`);
+      items.push(`VORs:${f}:symbol`);
+    } else if (ndbSet && ndbSet.has(f)) {
+      items.push(`NDBs:${f}:name`);
+      items.push(`NDBs:${f}:symbol`);
+    } else {
+      items.push(`Fixes:${f}:name`);
+      items.push(`Fixes:${f}:symbol`);
+    }
+  }
   items.push('Geo:Coastline:');
-  // Runways (SIDs/STARs available but not enabled by default)
+  // Runways (extended centrelines via TopSky ACTIVE:RWY maps)
   for (const rwy of airport.runways) {
     if (rwy.ident1) items.push(`Runways:${icao}:${rwy.ident1}:centerline`);
     if (rwy.ident2) items.push(`Runways:${icao}:${rwy.ident2}:centerline`);
   }
-  items.sort();
+  items.sort((a, b) => a.toLowerCase().replace(/-/g, '~').localeCompare(b.toLowerCase().replace(/-/g, '~')));
   lines.push(...items);
   // Display settings
   lines.push('SHOWC:1', 'SHOWSB:0', 'BELOW:0', 'ABOVE:0');
@@ -330,14 +439,11 @@ function buildAppAsr(icao, airport, freeTextItems, relevantProcs, legName, vorSe
   lines.push('HISTORY_DOTS:5', 'SIMULATION_MODE:1');
   lines.push('DISABLEPANNING:0', 'DISABLEZOOMING:0');
   lines.push('DisplayRotation:0.00000');
-  lines.push('TAGFAMILY:AC-TopSky');
+  lines.push('TAGFAMILY:AC-TopSky-Easy');
   lines.push(`WINDOWAREA:${(airport.lat - boxSize).toFixed(6)}:${(airport.lon - boxSize * 1.5).toFixed(6)}:${(airport.lat + boxSize).toFixed(6)}:${(airport.lon + boxSize * 1.5).toFixed(6)}`);
   // Plugin settings
   lines.push('PLUGIN:TopSky plugin:HideMapData:AirspaceBases,Fixes,FixLabels');
   lines.push('PLUGIN:TopSky plugin:ShowMapData:Centrelines,Ticks');
-  lines.push('PLUGIN:UK Controller Plugin:DisplayCountdown:1');
-  lines.push('PLUGIN:UK Controller Plugin:DisplayMinStack:0');
-  lines.push('PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0');
   return lines;
 }
 
@@ -348,6 +454,15 @@ async function main() {
   const arrAirport = await prisma.airport.findUnique({ where: { icao: TO }, include: { runways: true } });
   if (!depAirport) { console.error(`Departure airport ${FROM} not found`); process.exit(1); }
   if (!arrAirport) { console.error(`Arrival airport ${TO} not found`); process.exit(1); }
+
+  // Look up previous and next legs for inbound/outbound route drawing
+  const legNum = parseInt(LEG_NUM);
+  const prevLegName = `WF26${String(legNum - 1).padStart(2, '0')}`;
+  const nextLegName = `WF26${String(legNum + 1).padStart(2, '0')}`;
+  const prevLeg = await prisma.wfScheduleRow.findFirst({ where: { number: prevLegName } });
+  const nextLeg = await prisma.wfScheduleRow.findFirst({ where: { number: nextLegName } });
+  if (prevLeg) console.log(`  Previous leg: ${prevLegName} (${prevLeg.from} -> ${prevLeg.to})`);
+  if (nextLeg) console.log(`  Next leg: ${nextLegName} (${nextLeg.from} -> ${nextLeg.to})`);
 
   const centers = [
     { icao: FROM, lat: depAirport.lat, lon: depAirport.lon },
@@ -569,70 +684,125 @@ async function main() {
     }
   }
 
+  // Build airway graph (always, used by both main and next-leg route expansion)
+  const awyGraph = {};
+  const awyFile = fs.readFileSync(path.join(NAVDATA_DIR, 'earth_awy.dat'), 'utf-8');
+  for (const line of awyFile.split('\n')) {
+    if (line.startsWith('I') || line.startsWith('9') || !line.trim()) continue;
+    const p = line.trim().split(/\s+/);
+    if (p.length < 10) continue;
+    const fix1 = p[0], lat1 = parseFloat(p[1]), lon1 = parseFloat(p[2]);
+    const fix2 = p[3], lat2 = parseFloat(p[4]), lon2 = parseFloat(p[5]);
+    const name = p[9];
+    if (!awyGraph[name]) awyGraph[name] = {};
+    if (!awyGraph[name][fix1]) awyGraph[name][fix1] = [];
+    if (!awyGraph[name][fix2]) awyGraph[name][fix2] = [];
+    awyGraph[name][fix1].push({ fix: fix2, lat: lat2, lon: lon2 });
+    awyGraph[name][fix2].push({ fix: fix1, lat: lat1, lon: lon1 });
+    if (!wpLookup.has(fix1) && haversineNm(mid.lat, mid.lon, lat1, lon1) < dist + 500) wpLookup.set(fix1, { ident: fix1, lat: lat1, lon: lon1 });
+    if (!wpLookup.has(fix2) && haversineNm(mid.lat, mid.lon, lat2, lon2) < dist + 500) wpLookup.set(fix2, { ident: fix2, lat: lat2, lon: lon2 });
+  }
+
+  // Expand airway between two fixes using BFS
+  function expandAirway(awyName, fromFix, toFix) {
+    const graph = awyGraph[awyName] || awyGraph['U' + awyName] || awyGraph[awyName.replace(/^U/, '')];
+    if (!graph || !graph[fromFix]) return [fromFix, toFix];
+    const visited = new Set([fromFix]);
+    const queue = [[fromFix]];
+    while (queue.length) {
+      const p = queue.shift();
+      const current = p[p.length - 1];
+      if (current === toFix) return p;
+      for (const next of (graph[current] || [])) {
+        if (!visited.has(next.fix)) {
+          visited.add(next.fix);
+          queue.push([...p, next.fix]);
+        }
+      }
+    }
+    return [fromFix, toFix];
+  }
+
+  // Fetch NAT tracks if route contains any NAT track identifier (NATA-NATZ)
+  let natTracks = null;
+  if (ATC_ROUTE && /\bNAT[A-Z]\b/.test(ATC_ROUTE)) {
+    try {
+      console.log('  Fetching NAT tracks...');
+      const natResp = await fetch('https://notams.aim.faa.gov/nat.html');
+      const natHtml = await natResp.text();
+      // Parse from plain text — match fix + coordinates + fixes pattern, stop at EAST/WEST
+      const allText = natHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+      natTracks = [];
+      const natRegex = /([A-Z]{4,5}(?:\s+\d{2,4}\/\d{2,4})+(?:\s+[A-Z]{4,5})+)/g;
+      let nm;
+      while ((nm = natRegex.exec(allText)) !== null) {
+        const wps = nm[1].trim().split(/\s+/).filter(w => w !== 'EAST' && w !== 'WEST' && w !== 'LVLS' && w !== 'NIL');
+        if (wps.length >= 3) natTracks.push(wps);
+      }
+      console.log(`  Found ${natTracks.length} NAT tracks`);
+    } catch (err) {
+      console.log(`  NAT track fetch failed: ${err.message}`);
+    }
+  }
+
   // Draw ATC route with airway expansion
   let deduped = null;
   if (ATC_ROUTE) {
-    // Build airway graph: awyName -> adjacency list of fix pairs
-    const awyGraph = {};
-    const awyFile = fs.readFileSync(path.join(NAVDATA_DIR, 'earth_awy.dat'), 'utf-8');
-    for (const line of awyFile.split('\n')) {
-      if (line.startsWith('I') || line.startsWith('9') || !line.trim()) continue;
-      const p = line.trim().split(/\s+/);
-      if (p.length < 10) continue;
-      const fix1 = p[0], lat1 = parseFloat(p[1]), lon1 = parseFloat(p[2]);
-      const fix2 = p[3], lat2 = parseFloat(p[4]), lon2 = parseFloat(p[5]);
-      const name = p[9];
-      if (!awyGraph[name]) awyGraph[name] = {};
-      if (!awyGraph[name][fix1]) awyGraph[name][fix1] = [];
-      if (!awyGraph[name][fix2]) awyGraph[name][fix2] = [];
-      awyGraph[name][fix1].push({ fix: fix2, lat: lat2, lon: lon2 });
-      awyGraph[name][fix2].push({ fix: fix1, lat: lat1, lon: lon1 });
-      // Also add to wpLookup
-      // Only add to wpLookup if reasonably close to the route (avoid global duplicates)
-      if (!wpLookup.has(fix1) && haversineNm(mid.lat, mid.lon, lat1, lon1) < dist + 500) wpLookup.set(fix1, { ident: fix1, lat: lat1, lon: lon1 });
-      if (!wpLookup.has(fix2) && haversineNm(mid.lat, mid.lon, lat2, lon2) < dist + 500) wpLookup.set(fix2, { ident: fix2, lat: lat2, lon: lon2 });
-    }
-
-    // Expand airway between two fixes using BFS
-    function expandAirway(awyName, fromFix, toFix) {
-      const graph = awyGraph[awyName] || awyGraph['U' + awyName] || awyGraph[awyName.replace(/^U/, '')];
-      if (!graph || !graph[fromFix]) return [fromFix, toFix]; // fallback: direct
-      const visited = new Set([fromFix]);
-      const queue = [[fromFix]];
-      while (queue.length) {
-        const path = queue.shift();
-        const current = path[path.length - 1];
-        if (current === toFix) return path;
-        for (const next of (graph[current] || [])) {
-          if (!visited.has(next.fix)) {
-            visited.add(next.fix);
-            queue.push([...path, next.fix]);
-          }
-        }
-      }
-      return [fromFix, toFix]; // fallback
-    }
-
     // Parse route: FIX AWY FIX AWY FIX...
     const routeParts = ATC_ROUTE.trim().split(/\s+/);
     const expandedFixes = [];
     let i = 0;
     while (i < routeParts.length) {
       const current = routeParts[i];
-      const isAirway = /\d/.test(current) && /^[A-Z]{1,2}\d/.test(current);
-      if (isAirway && i > 0 && i < routeParts.length - 1) {
-        // This is an airway — expand between previous fix and next fix
+      // NAT track (NATA-NATZ) — expand using fetched track data
+      if (/^NAT[A-Z]$/.test(current) && natTracks && i > 0 && i < routeParts.length - 1) {
         const prevFix = routeParts[i - 1];
         const nextFix = routeParts[i + 1];
-        const expanded = expandAirway(current, prevFix, nextFix);
-        // Skip first element (already added) and add the rest
-        for (let j = 1; j < expanded.length; j++) expandedFixes.push(expanded[j]);
-        i += 2; // skip the airway and the next fix (already added via expansion)
-      } else if (!isAirway && current !== 'DCT') {
-        expandedFixes.push(current);
-        i++;
+        // Find matching track: starts with prevFix or ends with nextFix
+        let matchedTrack = null;
+        for (const track of natTracks) {
+          if ((track[0] === prevFix && track[track.length - 1] === nextFix) ||
+              (track[track.length - 1] === prevFix && track[0] === nextFix)) {
+            matchedTrack = track;
+            break;
+          }
+        }
+        if (matchedTrack) {
+          // Determine direction — if prevFix matches first element, use forward; otherwise reverse
+          const trackWps = matchedTrack[0] === prevFix ? matchedTrack : [...matchedTrack].reverse();
+          console.log(`  NAT Track ${current.slice(3)}: ${trackWps.join(' ')}`);
+          // Convert DD/DD coords to coordinate waypoint format and add intermediate waypoints
+          for (let j = 1; j < trackWps.length; j++) {
+            const wp = trackWps[j];
+            const coordMatch = wp.match(/^(\d{2})\/(\d{2})$/);
+            if (coordMatch) {
+              // DD/DD = DDN/DDDW format (North Atlantic = always N, always W)
+              const lat = parseInt(coordMatch[1]);
+              const lon = parseInt(coordMatch[2]);
+              expandedFixes.push(`${lat}N0${lon}W`);
+            } else {
+              expandedFixes.push(wp);
+            }
+          }
+          i += 2; // skip NAT token and next fix
+        } else {
+          console.log(`  Warning: No NAT track found matching ${prevFix} -> ${nextFix}`);
+          i++;
+        }
       } else {
-        i++;
+        const isAirway = /\d/.test(current) && /^[A-Z]{1,2}\d/.test(current);
+        if (isAirway && i > 0 && i < routeParts.length - 1) {
+          const prevFix = routeParts[i - 1];
+          const nextFix = routeParts[i + 1];
+          const expanded = expandAirway(current, prevFix, nextFix);
+          for (let j = 1; j < expanded.length; j++) expandedFixes.push(expanded[j]);
+          i += 2;
+        } else if (!isAirway && current !== 'DCT') {
+          expandedFixes.push(current);
+          i++;
+        } else {
+          i++;
+        }
       }
     }
 
@@ -655,14 +825,30 @@ async function main() {
       return null;
     }
 
-    // Build route points from expanded fixes
+    // Build route points from expanded fixes — pick closest to previous for duplicates
     const routePoints = [{ lat: depAirport.lat, lon: depAirport.lon, name: FROM }];
     for (const name of expandedFixes) {
-      const wp = wpLookup.get(name);
-      if (wp) { routePoints.push({ lat: wp.lat, lon: wp.lon, name }); continue; }
       const coord = parseCoordWaypoint(name);
       if (coord) { routePoints.push({ lat: coord.lat, lon: coord.lon, name }); continue; }
-      // Skip DCT and other non-waypoint tokens
+      // Find all candidates with this name, pick closest to previous point
+      const lastPt = routePoints[routePoints.length - 1];
+      const candidates = [];
+      const wp = wpLookup.get(name);
+      if (wp) candidates.push(wp);
+      // Check airway graph for additional positions of this fix
+      for (const awyName in awyGraph) {
+        const g = awyGraph[awyName];
+        if (g[name]) {
+          for (const nb of g[name]) {
+            // The neighbor has the fix's own position implied by the graph entry
+          }
+        }
+      }
+      if (candidates.length > 1) {
+        candidates.sort((a, b) => haversineNm(lastPt.lat, lastPt.lon, a.lat, a.lon) - haversineNm(lastPt.lat, lastPt.lon, b.lat, b.lon));
+      }
+      if (candidates.length > 0) { routePoints.push({ lat: candidates[0].lat, lon: candidates[0].lon, name }); continue; }
+      // Skip unresolvable tokens
     }
     routePoints.push({ lat: arrAirport.lat, lon: arrAirport.lon, name: TO });
 
@@ -689,6 +875,40 @@ async function main() {
       }
     }
     console.log(`  ${routeCenters.length} corridor centers from actual route`);
+
+    // Add next leg route points to corridor so navdata covers outbound route too
+    if (nextLeg && nextLeg.atcRoute) {
+      const nextArr = await prisma.airport.findUnique({ where: { icao: nextLeg.to } });
+      if (nextArr) {
+        // Add next leg destination as corridor center
+        routeCenters.push({ icao: nextLeg.to, lat: nextArr.lat, lon: nextArr.lon });
+        // Add GC interpolated points between arr airport and next destination
+        const nextDist = haversineNm(arrAirport.lat, arrAirport.lon, nextArr.lat, nextArr.lon);
+        const nextSamples = Math.max(1, Math.ceil(nextDist / 80));
+        for (let s = 1; s < nextSamples; s++) {
+          const frac = s / nextSamples;
+          const pt = interpolateGC(arrAirport.lat, arrAirport.lon, nextArr.lat, nextArr.lon, frac);
+          routeCenters.push({ icao: 'RTE', lat: pt.lat, lon: pt.lon });
+        }
+        console.log(`  Added next leg corridor (${nextLeg.to}), ${routeCenters.length} total centers`);
+      }
+    }
+
+    // Add previous leg route points to corridor so navdata covers inbound route too
+    if (prevLeg && prevLeg.atcRoute) {
+      const prevDep = await prisma.airport.findUnique({ where: { icao: prevLeg.from } });
+      if (prevDep) {
+        routeCenters.push({ icao: prevLeg.from, lat: prevDep.lat, lon: prevDep.lon });
+        const prevDist = haversineNm(prevDep.lat, prevDep.lon, depAirport.lat, depAirport.lon);
+        const prevSamples = Math.max(1, Math.ceil(prevDist / 80));
+        for (let s = 1; s < prevSamples; s++) {
+          const frac = s / prevSamples;
+          const pt = interpolateGC(prevDep.lat, prevDep.lon, depAirport.lat, depAirport.lon, frac);
+          routeCenters.push({ icao: 'RTE', lat: pt.lat, lon: pt.lon });
+        }
+        console.log(`  Added prev leg corridor (${prevLeg.from}), ${routeCenters.length} total centers`);
+      }
+    }
 
     // Load navdata using actual route corridor (not GC between airports)
     console.log('  Loading navdata along actual route corridor...');
@@ -767,6 +987,15 @@ async function main() {
         msaFixNames.push(lbl.text);
       }
     }
+    // Add coordinate waypoints from route as named fixes (e.g. 55N050W)
+    if (deduped) {
+      for (const pt of deduped) {
+        if (/^\d+[NS]\d+[EW]$/.test(pt.name) && !fixMap.has(`${pt.name}_${pt.lat.toFixed(4)}`)) {
+          navLines.push(`${pt.name.padEnd(6)} ${coordPair(pt.lat, pt.lon)}`);
+          fixMap.set(`${pt.name}_${pt.lat.toFixed(4)}`, pt);
+        }
+      }
+    }
     navLines.push('');
     navLines.push('[HIGH AIRWAY]');
     const awyDedup = new Set();
@@ -827,6 +1056,127 @@ async function main() {
       L.push(`${routeName.padEnd(6)} ${coordPair(deduped[i].lat, deduped[i].lon)} ${coordPair(deduped[i + 1].lat, deduped[i + 1].lon)}`);
     }
   }
+  // Draw next leg outbound route if available
+  let nextDeduped = null;
+  if (nextLeg && nextLeg.atcRoute) {
+    const nextRoute = nextLeg.atcRoute;
+    const nextTo = nextLeg.to;
+    const nextArr = await prisma.airport.findUnique({ where: { icao: nextTo } });
+    if (nextArr) {
+      // Expand next leg route using existing wpLookup + airway graph
+      const nextParts = nextRoute.split(/\s+/).filter(Boolean);
+      const nextExpanded = [];
+      let ni = 0;
+      while (ni < nextParts.length) {
+        const current = nextParts[ni];
+        const isAirway = /\d/.test(current) && /^[A-Z]{1,2}\d/.test(current);
+        if (isAirway && ni > 0 && ni < nextParts.length - 1) {
+          const prevFix = nextParts[ni - 1];
+          const nextFix = nextParts[ni + 1];
+          const expanded = expandAirway(current, prevFix, nextFix);
+          for (let j = 1; j < expanded.length; j++) nextExpanded.push(expanded[j]);
+          ni += 2;
+        } else if (!isAirway && current !== 'DCT') {
+          nextExpanded.push(current);
+          ni++;
+        } else {
+          ni++;
+        }
+      }
+      // Resolve to coordinates — pick closest to previous waypoint for duplicates
+      const nextPoints = [{ lat: arrAirport.lat, lon: arrAirport.lon, name: TO }];
+      for (const name of nextExpanded) {
+        const lastPt = nextPoints[nextPoints.length - 1];
+        // Try coordinate waypoint first
+        let m = name.match(/^(\d{2})([NS])(\d{2,3})([EW])$/);
+        if (m) {
+          const lat = parseInt(m[1]) * (m[2] === 'S' ? -1 : 1);
+          const lon = parseInt(m[3]) * (m[4] === 'W' ? -1 : 1);
+          nextPoints.push({ lat, lon, name }); continue;
+        }
+        // Search all fixes/VORs/NDBs for closest match to previous waypoint
+        const candidates = [];
+        for (const [ident, wp] of wpLookup) {
+          if (ident === name) candidates.push(wp);
+        }
+        // Also check fixes array for duplicates wpLookup may have deduplicated
+        for (const f of fixes) { if (f.ident === name && !candidates.some(c => Math.abs(c.lat - f.lat) < 0.01)) candidates.push(f); }
+        for (const v of vors) { if (v.ident === name && !candidates.some(c => Math.abs(c.lat - v.lat) < 0.01)) candidates.push(v); }
+        if (candidates.length > 0) {
+          candidates.sort((a, b) => haversineNm(lastPt.lat, lastPt.lon, a.lat, a.lon) - haversineNm(lastPt.lat, lastPt.lon, b.lat, b.lon));
+          nextPoints.push({ lat: candidates[0].lat, lon: candidates[0].lon, name });
+        } else {
+          const wp = wpLookup.get(name);
+          if (wp) nextPoints.push({ lat: wp.lat, lon: wp.lon, name });
+        }
+      }
+      nextPoints.push({ lat: nextArr.lat, lon: nextArr.lon, name: nextTo });
+      nextDeduped = nextPoints.filter((p, idx) => idx === 0 || p.name !== nextPoints[idx - 1].name);
+      const nextRouteName = `${TO}-${nextLegName}`;
+      console.log(`  Next route: ${nextDeduped.length} waypoints for ${nextLegName}`);
+      // Skip first (dep airport) and last two (arr airport) — same as inbound route
+      for (let i = 1; i < nextDeduped.length - 2; i++) {
+        L.push(`${nextRouteName.padEnd(6)} ${coordPair(nextDeduped[i].lat, nextDeduped[i].lon)} ${coordPair(nextDeduped[i + 1].lat, nextDeduped[i + 1].lon)}`);
+      }
+    }
+  }
+  // Draw previous leg inbound route if available
+  let prevDeduped = null;
+  if (prevLeg && prevLeg.atcRoute) {
+    const prevRoute = prevLeg.atcRoute;
+    const prevFrom = prevLeg.from;
+    const prevDep = await prisma.airport.findUnique({ where: { icao: prevFrom } });
+    if (prevDep) {
+      const prevParts = prevRoute.split(/\s+/).filter(Boolean);
+      const prevExpanded = [];
+      let pi = 0;
+      while (pi < prevParts.length) {
+        const current = prevParts[pi];
+        const isAirway = /\d/.test(current) && /^[A-Z]{1,2}\d/.test(current);
+        if (isAirway && pi > 0 && pi < prevParts.length - 1) {
+          const prevFix = prevParts[pi - 1];
+          const nextFix = prevParts[pi + 1];
+          const expanded = expandAirway(current, prevFix, nextFix);
+          for (let j = 1; j < expanded.length; j++) prevExpanded.push(expanded[j]);
+          pi += 2;
+        } else if (!isAirway && current !== 'DCT') {
+          prevExpanded.push(current);
+          pi++;
+        } else {
+          pi++;
+        }
+      }
+      // Resolve to coordinates — pick closest to previous waypoint
+      const prevPoints = [{ lat: prevDep.lat, lon: prevDep.lon, name: prevFrom }];
+      for (const name of prevExpanded) {
+        const lastPt = prevPoints[prevPoints.length - 1];
+        let m = name.match(/^(\d{2})([NS])(\d{2,3})([EW])$/);
+        if (m) {
+          const lat = parseInt(m[1]) * (m[2] === 'S' ? -1 : 1);
+          const lon = parseInt(m[3]) * (m[4] === 'W' ? -1 : 1);
+          prevPoints.push({ lat, lon, name }); continue;
+        }
+        const candidates = [];
+        for (const [ident, wp] of wpLookup) { if (ident === name) candidates.push(wp); }
+        for (const f of fixes) { if (f.ident === name && !candidates.some(c => Math.abs(c.lat - f.lat) < 0.01)) candidates.push(f); }
+        for (const v of vors) { if (v.ident === name && !candidates.some(c => Math.abs(c.lat - v.lat) < 0.01)) candidates.push(v); }
+        if (candidates.length > 0) {
+          candidates.sort((a, b) => haversineNm(lastPt.lat, lastPt.lon, a.lat, a.lon) - haversineNm(lastPt.lat, lastPt.lon, b.lat, b.lon));
+          prevPoints.push({ lat: candidates[0].lat, lon: candidates[0].lon, name });
+        } else {
+          const wp = wpLookup.get(name);
+          if (wp) prevPoints.push({ lat: wp.lat, lon: wp.lon, name });
+        }
+      }
+      prevPoints.push({ lat: depAirport.lat, lon: depAirport.lon, name: FROM });
+      prevDeduped = prevPoints.filter((p, idx) => idx === 0 || p.name !== prevPoints[idx - 1].name);
+      const prevRouteName = `${prevFrom}-${prevLegName}`;
+      console.log(`  Prev route: ${prevDeduped.length} waypoints for ${prevLegName}`);
+      for (let i = 1; i < prevDeduped.length - 2; i++) {
+        L.push(`${prevRouteName.padEnd(6)} ${coordPair(prevDeduped[i].lat, prevDeduped[i].lon)} ${coordPair(prevDeduped[i + 1].lat, prevDeduped[i + 1].lon)}`);
+      }
+    }
+  }
   L.push('');
   L.push('[ARTCC HIGH]');
   L.push('');
@@ -839,8 +1189,6 @@ async function main() {
   L.push('');
   addGeoForAirport(L, arrAirport, TO, arrGround);
   L.push('');
-  // Extended centrelines generated via TopSky MAP entries (not GEO)
-  const extDist = 20; // nm
   L.push('');
 
   // Add world coastline clipped to route corridor
@@ -1093,6 +1441,50 @@ async function main() {
       }
     }
   }
+  // US TRACON positions: add TRACON facility + sibling airport positions
+  const addedTraconAirports = new Set([FROM, TO]); // track what we've already added
+  for (const [icao, apt] of [[FROM, depAirport], [TO, arrAirport]]) {
+    for (const [tracon, airports] of Object.entries(US_TRACON_MAP)) {
+      if (airports.includes(icao)) {
+        const coord = coordPair(apt.lat, apt.lon).replace(' ', ':');
+        // Add TRACON facility positions (e.g. N90_APP, N90_DEP)
+        const traconCs = Object.keys(afvFreqs).filter(cs => cs.startsWith(tracon + '_'));
+        for (const cs of traconCs) {
+          const lastUs = cs.lastIndexOf('_');
+          const csPfx = cs.substring(0, lastUs);
+          const csSfx = cs.substring(lastUs + 1);
+          const csMid = sfxToMiddle(csSfx);
+          const freq = afvFreqs[cs];
+          E.push(`${cs}:${tracon} TRACON:${freq}:${tracon}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coord}`);
+          E.push(`${cs}:${tracon} TRACON:199.998:${tracon}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coord}`);
+        }
+        if (traconCs.length > 0) console.log(`  Added ${traconCs.length} ${tracon} TRACON positions for ${icao}`);
+        // Add sibling airport positions from the same TRACON
+        for (const siblingIcao of airports) {
+          if (addedTraconAirports.has(siblingIcao)) continue;
+          addedTraconAirports.add(siblingIcao);
+          const sibAfvPfx = afvAirportPrefix(siblingIcao);
+          const sibCs = Object.keys(afvFreqs).filter(cs => {
+            if (!cs.startsWith(sibAfvPfx + '_')) return false;
+            const sfx = cs.substring(cs.lastIndexOf('_') + 1);
+            return sfx !== 'CTR' && sfx !== 'FSS';
+          });
+          for (const cs of sibCs) {
+            const lastUs = cs.lastIndexOf('_');
+            const csPfx = cs.substring(0, lastUs);
+            const csSfx = cs.substring(lastUs + 1);
+            const csMid = sfxToMiddle(csSfx);
+            const freq = afvFreqs[cs];
+            E.push(`${cs}:${siblingIcao}:${freq}:${sibAfvPfx}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coord}`);
+            E.push(`${cs}:${siblingIcao}:199.998:${sibAfvPfx}:${csMid}:${csPfx}:${csSfx}:-:-:0100:0177:${coord}`);
+          }
+          if (sibCs.length > 0) console.log(`  Added ${sibCs.length} sibling ${sibAfvPfx} positions (${tracon} TRACON)`);
+        }
+        break;
+      }
+    }
+  }
+
   // Overlay FIRs that don't have their own GeoJSON boundary but appear when constituent FIRs are transited
   const OVERLAY_POSITIONS = [
     { callsign: 'NAT_FSS', name: 'Shanwick & Gander', triggerFirs: new Set(['EGGX', 'CZQO', 'CZQX', 'BIRD', 'LPPO', 'ENOB']) },
@@ -1247,6 +1639,10 @@ async function main() {
     E.push(`SECTOR:${icao}_TWR:0:24500`);
     const aptPrefix = airportAfvPrefixes[icao] || icao;
     const aptOwners = [aptPrefix];
+    // Add TRACON as owner if applicable
+    for (const [tracon, airports] of Object.entries(US_TRACON_MAP)) {
+      if (airports.includes(icao)) { aptOwners.push(tracon); break; }
+    }
     if (fir && firOwnerMap[fir]) aptOwners.push(...firOwnerMap[fir]);
     E.push(`OWNER:${[...new Set(aptOwners)].join(':')}`);
     E.push(`BORDER:${icao}_BOUNDARY`);
@@ -1284,6 +1680,7 @@ async function main() {
     `Settings\tSettingsfileSEL\t\\..\\Data\\Settings\\Lists.txt`,
     `Settings\tSettingsfileSIL\t\\..\\Data\\Settings\\Lists.txt`,
     `Settings\tSettingsfileCONFLICT\t\\..\\Data\\Settings\\Lists.txt`,
+    `Settings\talias\t\\..\\Data\\Alias\\WorldFlight.txt`,
     `Settings\tsector\t\\..\\Data\\Sector_Files\\${LEG_NAME}.sct`,
     `Settings\tairlines\t\\..\\Data\\Datafiles\\ICAO_Airlines.txt`,
     `Settings\tairports\t\\..\\Data\\Datafiles\\ICAO_Airports.txt`,
@@ -1301,11 +1698,8 @@ async function main() {
     `RecentFiles\tRecent5\t\\..\\Data\\ASR\\${LEG_NAME}_${TO}_APP.asr`,
     `Plugins\tPlugin0\t\\..\\Data\\Plugin\\vSMR\\vSMR.dll`,
     `Plugins\tPlugin0Display0\tSMR radar display`,
-    `Plugins\tPlugin1\t\\..\\Data\\Plugin\\UKControllerPlugin.dll`,
+    `Plugins\tPlugin1\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
     `Plugins\tPlugin1Display0\tStandard ES radar screen`,
-    `Plugins\tPlugin1Display1\tSMR radar display`,
-    `Plugins\tPlugin2\t\\..\\Data\\Plugin\\TopSky\\TopSky.dll`,
-    `Plugins\tPlugin2Display0\tStandard ES radar screen`,
     `LastSession\tserver\tAUTOMATIC`,
     `LastSession\tcallsign\t- Select profile---->`,
   ];
@@ -1410,13 +1804,19 @@ async function main() {
   });
 
   // Route waypoint names (excluding airports and coord waypoints like 66N071W)
-  const routeWaypointNames = deduped ? deduped.slice(1, -1).map(p => p.name).filter(n => !n.match(/^\d+[NS]\d+[EW]$/)) : [];
+  const routeWaypointNames = deduped ? deduped.slice(1, -1).map(p => p.name) : [];
+  // Next leg waypoint names for outbound route display
+  const nextRouteWaypointNames = nextDeduped ? nextDeduped.slice(1, -1).map(p => p.name) : [];
+  const nextRouteName = nextLeg ? `${TO}-${nextLegName}` : null;
+  // Previous leg waypoint names for inbound route display
+  const prevRouteWaypointNames = prevDeduped ? prevDeduped.slice(1, -1).map(p => p.name) : [];
+  const prevRouteName = prevLeg ? `${prevLeg.from}-${prevLegName}` : null;
 
   // F1: Departure SMR
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_SMR.asr`), buildSmrAsr(LEG_NAME, FROM, depAirport, 'DEP', smrFreeTextItems).join('\n'), 'utf-8');
 
-  // F2: Departure APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport, appFreeTextItems, depRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames).join('\n'), 'utf-8');
+  // F2: Departure APP — includes previous leg inbound route
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${FROM}_APP.asr`), buildAppAsr(FROM, depAirport, appFreeTextItems, depRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames, FROM, prevRouteWaypointNames, prevRouteName).join('\n'), 'utf-8');
 
   // F3: Enroute
   const enrPad = dist < 500 ? 2 : dist < 2000 ? 5 : 10; // degrees padding
@@ -1429,24 +1829,34 @@ async function main() {
   enrItems.push(`Airports:${FROM}:symbol`, `Airports:${TO}:symbol`);
   // FIR ARTCC boundaries
   for (const fir of routeFirs) enrItems.push(`ARTCC boundary:${fir.icao}:`);
-  // MSA rings
+  // MSA rings for both airports
   enrItems.push(`ARTCC boundary:${FROM}-MSA:`, `ARTCC boundary:${TO}-MSA:`);
-  // Route line
-  if (ATC_ROUTE) enrItems.push(`ARTCC high boundary:${FROM}-${LEG_NAME}:`);
   // MSA labels — name only
   for (const f of msaFixNames) enrItems.push(`Fixes:${f}:name`);
-  // Route waypoint fixes
-  for (const wp of routeWaypointNames) {
-    if (vorIdents.has(wp)) {
-      enrItems.push(`VORs:${wp}:name`, `VORs:${wp}:symbol`);
-    } else if (ndbIdents.has(wp)) {
-      enrItems.push(`NDBs:${wp}:name`, `NDBs:${wp}:symbol`);
-    } else {
-      enrItems.push(`Fixes:${wp}:name`, `Fixes:${wp}:symbol`);
+  // Helper to add waypoint fix/VOR/NDB entries
+  function addWpItems(wpList) {
+    for (const wp of wpList) {
+      if (vorIdents.has(wp)) {
+        enrItems.push(`VORs:${wp}:name`, `VORs:${wp}:symbol`);
+      } else if (ndbIdents.has(wp)) {
+        enrItems.push(`NDBs:${wp}:name`, `NDBs:${wp}:symbol`);
+      } else {
+        enrItems.push(`Fixes:${wp}:name`, `Fixes:${wp}:symbol`);
+      }
     }
   }
+  // Current route line + fixes
+  if (ATC_ROUTE) enrItems.push(`ARTCC boundary:${FROM}-${LEG_NAME}:`);
+  addWpItems(routeWaypointNames);
+  // Previous leg inbound route + fixes
+  if (prevRouteName) enrItems.push(`ARTCC boundary:${prevRouteName}:`);
+  addWpItems(prevRouteWaypointNames);
+  // Next leg outbound route + fixes
+  if (nextRouteName) enrItems.push(`ARTCC boundary:${nextRouteName}:`);
+  addWpItems(nextRouteWaypointNames);
   enrItems.push('Geo:Coastline:');
-  enrItems.sort();
+  // Sort case-insensitive; replace - with ~ in sort key so parents (EGPX:) sort before children (EGPX-A:)
+  enrItems.sort((a, b) => a.toLowerCase().replace(/-/g, '~').localeCompare(b.toLowerCase().replace(/-/g, '~')));
   enroute.push(...enrItems);
   // Calculate WINDOWAREA from dep/arr with padding
   const minLat = Math.min(depAirport.lat, arrAirport.lat) - enrPad;
@@ -1459,19 +1869,10 @@ async function main() {
     'HISTORY_DOTS:0', 'SIMULATION_MODE:1',
     'DISABLEPANNING:0', 'DISABLEZOOMING:0',
     'DisplayRotation:0.00000',
-    'TAGFAMILY:AC-TopSky',
+    'TAGFAMILY:AC-TopSky-Easy',
     `WINDOWAREA:${minLat.toFixed(6)}:${minLon.toFixed(6)}:${maxLat.toFixed(6)}:${maxLon.toFixed(6)}`,
     'PLUGIN:TopSky plugin:HideMapData:AirspaceBases,Fixes,FixLabels',
-    'PLUGIN:TopSky plugin:ShowMapData:NERC,Centrelines',
-    'PLUGIN:UK Controller Plugin:DisplayCountdown:1',
-    'PLUGIN:UK Controller Plugin:DisplayMinStack:0',
-    'PLUGIN:UK Controller Plugin:DisplayRegionalPressures:0',
-    'PLUGIN:UK Controller Plugin:HistoryTrailColour:255,130,20',
-    'PLUGIN:UK Controller Plugin:HistoryTrailDegrade:1',
-    'PLUGIN:UK Controller Plugin:HistoryTrailDisplay:1',
-    'PLUGIN:UK Controller Plugin:HistoryTrailDotSize:4',
-    'PLUGIN:UK Controller Plugin:HistoryTrailFade:1',
-    'PLUGIN:UK Controller Plugin:HistoryTrailLength:15',
+    'PLUGIN:TopSky plugin:ShowMapData:Centrelines,Ticks',
   );
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_Enroute.asr`), enroute.join('\n'), 'utf-8');
 
@@ -1479,7 +1880,7 @@ async function main() {
   fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_SMR.asr`), buildSmrAsr(LEG_NAME, TO, arrAirport, 'ARR', smrFreeTextItems).join('\n'), 'utf-8');
 
   // F5: Arrival APP
-  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport, appFreeTextItems, arrRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames).join('\n'), 'utf-8');
+  fs.writeFileSync(path.join(asrDir, `${LEG_NAME}_${TO}_APP.asr`), buildAppAsr(TO, arrAirport, appFreeTextItems, arrRelevantProcs, LEG_NAME, vorIdents, ndbIdents, routeWaypointNames, msaFixNames, FROM, nextRouteWaypointNames, nextRouteName).join('\n'), 'utf-8');
 
   // ===== vSMR PROFILES =====
   const pluginDir = path.join(OUTPUT_DIR, 'Data', 'Plugin', 'vSMR');
@@ -1546,85 +1947,26 @@ async function main() {
     console.log(`  ${vatspy.radars.length} TopSky radars generated`);
 
     // Write extended centreline tick marks to TopSkyMaps.txt
+    // Generate extended centreline MAP entries with ACTIVE:RWY triggers — append, don't overwrite
     const mapsPath = path.join(topskyDir, 'TopSkyMaps.txt');
     if (fs.existsSync(mapsPath)) {
-      // Remove any previous generated sections
       let mapsContent = fs.readFileSync(mapsPath, 'utf-8');
+      // Ensure marker exists
       const genMarker = '\n; === GENERATED CENTRELINES ===';
-      const markerIdx = mapsContent.indexOf(genMarker);
-      if (markerIdx >= 0) mapsContent = mapsContent.substring(0, markerIdx);
+      if (!mapsContent.includes(genMarker)) mapsContent += genMarker;
 
-      const mapLines = [genMarker];
-      const tickSpacing = 1; // nm between ticks
-      const shortTick = 0.3; // nm half-length for regular ticks
-      const longTick = 0.6; // nm half-length for 5nm ticks
+      const allPosIds = [airportAfvPrefixes[FROM] || FROM, airportAfvPrefixes[TO] || TO, ...positionShortIds];
+      const uniqueIds = [...new Set(allPosIds)];
+      // Only add centrelines for airports not already present
+      const clLines = [];
       for (const [icao, airport] of [[FROM, depAirport], [TO, arrAirport]]) {
-        for (const rwy of airport.runways) {
-          if (!rwy.lat1 || !rwy.lon1 || !rwy.lat2 || !rwy.lon2 || !rwy.ident1) continue;
-          const hdg = bearing(rwy.lat1, rwy.lon1, rwy.lat2, rwy.lon2);
-          const recip = (hdg + 180) % 360;
-
-          // Centreline for rwy ident1 approach (from rwy1 end along recip)
-          const ext1 = projectPoint(rwy.lat1, rwy.lon1, recip, extDist);
-          mapLines.push('');
-          mapLines.push(`MAP:${icao} ${rwy.ident1}`);
-          mapLines.push('FOLDER:Extended Centrelines');
-          mapLines.push('COLOR:Active_Map_Type_5');
-          mapLines.push('ZOOM:5');
-          mapLines.push('STYLE:Solid:1');
-          mapLines.push('ASRDATA:Centrelines');
-          mapLines.push(`LINE:${coordPair(rwy.lat1, rwy.lon1).replace(' ', ':')}:${coordPair(ext1.lat, ext1.lon).replace(' ', ':')}`);
-
-          // Ticks for rwy ident1
-          const perpL = (recip + 90) % 360;
-          const perpR = (recip + 270) % 360;
-          mapLines.push('');
-          mapLines.push(`MAP:${icao} ${rwy.ident1} Ticks`);
-          mapLines.push('FOLDER:Extended Centrelines');
-          mapLines.push('COLOR:Active_Map_Type_5');
-          mapLines.push('ZOOM:5');
-          mapLines.push('STYLE:Solid:1');
-          mapLines.push('ASRDATA:Ticks');
-          for (let d = tickSpacing; d <= extDist; d += tickSpacing) {
-            const pt = projectPoint(rwy.lat1, rwy.lon1, recip, d);
-            const halfLen = (d % 5 === 0) ? longTick : shortTick;
-            const left = projectPoint(pt.lat, pt.lon, perpL, halfLen);
-            const right = projectPoint(pt.lat, pt.lon, perpR, halfLen);
-            mapLines.push(`LINE:${coordPair(left.lat, left.lon).replace(' ', ':')}:${coordPair(right.lat, right.lon).replace(' ', ':')}`);
-          }
-
-          // Centreline + ticks for rwy ident2
-          if (rwy.ident2) {
-            const ext2 = projectPoint(rwy.lat2, rwy.lon2, hdg, extDist);
-            mapLines.push('');
-            mapLines.push(`MAP:${icao} ${rwy.ident2}`);
-            mapLines.push('FOLDER:Extended Centrelines');
-            mapLines.push('COLOR:Active_Map_Type_5');
-            mapLines.push('ZOOM:5');
-            mapLines.push('STYLE:Solid:1');
-            mapLines.push('ASRDATA:Centrelines');
-            mapLines.push(`LINE:${coordPair(rwy.lat2, rwy.lon2).replace(' ', ':')}:${coordPair(ext2.lat, ext2.lon).replace(' ', ':')}`);
-
-            const perpL2 = (hdg + 90) % 360;
-            const perpR2 = (hdg + 270) % 360;
-            mapLines.push('');
-            mapLines.push(`MAP:${icao} ${rwy.ident2} Ticks`);
-            mapLines.push('FOLDER:Extended Centrelines');
-            mapLines.push('COLOR:Active_Map_Type_5');
-            mapLines.push('ZOOM:5');
-            mapLines.push('STYLE:Solid:1');
-            mapLines.push('ASRDATA:Ticks');
-            for (let d = tickSpacing; d <= extDist; d += tickSpacing) {
-              const pt = projectPoint(rwy.lat2, rwy.lon2, hdg, d);
-              const halfLen = (d % 5 === 0) ? longTick : shortTick;
-              const left = projectPoint(pt.lat, pt.lon, perpL2, halfLen);
-              const right = projectPoint(pt.lat, pt.lon, perpR2, halfLen);
-              mapLines.push(`LINE:${coordPair(left.lat, left.lon).replace(' ', ':')}:${coordPair(right.lat, right.lon).replace(' ', ':')}`);
-            }
-          }
+        if (!mapsContent.includes(`MAP:${icao} `)) {
+          clLines.push(...buildCentrelineMaps(airport, icao, uniqueIds));
         }
       }
-      fs.writeFileSync(mapsPath, mapsContent + mapLines.join('\n'), 'utf-8');
+      if (clLines.length > 0) {
+        fs.writeFileSync(mapsPath, mapsContent + clLines.join('\n'), 'utf-8');
+      }
     }
   }
 
