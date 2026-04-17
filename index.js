@@ -14877,8 +14877,8 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
 
   // Get legs from active event schedule
   const legs = adminSheetCache.filter(r => r.from && r.to && r.number).map(r => {
-    // r.number is already "WF2606" format — extract leg num
-    const legNum = r.number.replace(/^WF26/, '');
+    // r.number is already "WF2606" format — extract leg num (strip WF + 2-digit year prefix)
+    const legNum = r.number.replace(/^WF\d{2}/, '');
     return {
       number: legNum,
       legName: r.number,
@@ -15103,9 +15103,9 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
       job.legs[legName] = { status: 'error', progress: 100, step: '', error: err.message.slice(0, 100) };
     }
   }
-  // Create zip of the controller pack
-  const anyDone = Object.values(job.legs).some(l => l.status === 'done');
-  if (anyDone) {
+  // Create zip containing only the selected/generated legs + shared Data folder
+  const doneLegNames = Object.entries(job.legs).filter(([, l]) => l.status === 'done').map(([name]) => name);
+  if (doneLegNames.length > 0) {
     try {
       const archiver = (await import('archiver')).default;
       const now = new Date();
@@ -15115,7 +15115,14 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
       const output = fs.createWriteStream(zipPath);
       const archive = archiver('zip', { zlib: { level: 5 } });
       archive.pipe(output);
-      archive.directory(path.resolve('Euroscope_Files', 'WorldFlight'), 'WorldFlight');
+      const wfDir = path.resolve('Euroscope_Files', 'WorldFlight');
+      // Shared Data folder (Settings, Plugin, ASR, Sector_Files, Alias, Datafiles)
+      archive.directory(path.join(wfDir, 'Data'), 'WorldFlight/Data');
+      // Only include PRF folders for selected legs
+      for (const legName of doneLegNames) {
+        const legDir = path.join(wfDir, legName);
+        if (fs.existsSync(legDir)) archive.directory(legDir, `WorldFlight/${legName}`);
+      }
       await archive.finalize();
       await new Promise(resolve => output.on('close', resolve));
       job.zipFile = zipName;

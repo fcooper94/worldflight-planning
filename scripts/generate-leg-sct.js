@@ -13,7 +13,8 @@ const LEG_NUM = process.argv[2] || '01';
 const FROM = process.argv[3] || 'EGLL';
 const TO = process.argv[4] || 'EHAM';
 const ATC_ROUTE = process.argv[5] || '';
-const LEG_NAME = `WF26${LEG_NUM.padStart(2, '0')}`;
+const YEAR_PREFIX = `WF${String(new Date().getFullYear()).slice(2)}`;
+const LEG_NAME = `${YEAR_PREFIX}${LEG_NUM.padStart(2, '0')}`;
 
 const RADIUS = 200; // 200nm radius around departure/arrival airports
 const COASTLINE_PATH = path.join(__dirname, '..', 'data', 'world_coastline.sct');
@@ -457,8 +458,8 @@ async function main() {
 
   // Look up previous and next legs for inbound/outbound route drawing
   const legNum = parseInt(LEG_NUM);
-  const prevLegName = `WF26${String(legNum - 1).padStart(2, '0')}`;
-  const nextLegName = `WF26${String(legNum + 1).padStart(2, '0')}`;
+  const prevLegName = `${YEAR_PREFIX}${String(legNum - 1).padStart(2, '0')}`;
+  const nextLegName = `${YEAR_PREFIX}${String(legNum + 1).padStart(2, '0')}`;
   const prevLeg = await prisma.wfScheduleRow.findFirst({ where: { number: prevLegName } });
   const nextLeg = await prisma.wfScheduleRow.findFirst({ where: { number: nextLegName } });
   if (prevLeg) console.log(`  Previous leg: ${prevLegName} (${prevLeg.from} -> ${prevLeg.to})`);
