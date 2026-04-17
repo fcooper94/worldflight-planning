@@ -6,3 +6,15 @@ nodemon.json
 prisma/dev.db
 prisma/dev.db-journal
 prisma/schema.prisma.bak
+
+# EuroScope generated output (rebuilt by generation scripts)
+Euroscope_Files/WorldFlight/WF*/
+Euroscope_Files/WorldFlight/*_ground.txt
+Euroscope_Files/WorldFlight/cache/
+Euroscope_Files/WorldFlight/Data/ASR/
+Euroscope_Files/WorldFlight/Data/Sector_Files/
+Euroscope_Files/WorldFlight/Data/Settings/Profiles_*.txt
+Euroscope_Files/WorldFlight/Data/Settings/Voice_*.txt
+Euroscope_Files/WorldFlight/Data/Plugin/TopSky/TopSkyRadars.txt
+Euroscope_Files/WorldFlight/Data/Plugin/vSMR/vSMR_Profiles.json
+Euroscope_Files/*.zip
