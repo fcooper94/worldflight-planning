@@ -14788,13 +14788,17 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
   const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
 
   // Get legs from active event schedule
-  const legs = adminSheetCache.filter(r => r.from && r.to && r.number).map(r => ({
-    number: r.number,
-    legName: `WF26${String(r.number).padStart(2, '0')}`,
-    from: r.from,
-    to: r.to,
-    route: r.atcRoute || ''
-  }));
+  const legs = adminSheetCache.filter(r => r.from && r.to && r.number).map(r => {
+    // r.number is already "WF2606" format — extract leg num
+    const legNum = r.number.replace(/^WF26/, '');
+    return {
+      number: legNum,
+      legName: r.number,
+      from: r.from,
+      to: r.to,
+      route: r.atcRoute || ''
+    };
+  });
 
   const content = `
     <section class="card card-full">
@@ -14963,47 +14967,28 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
     await new Promise((resolve) => bp.on('close', resolve));
   } catch (e) { /* non-fatal */ }
 
-  const fetchGround = (icao, legName, progressBase) => new Promise((resolve) => {
-    job.legs[legName] = { status: 'running', progress: progressBase, step: `Ground ${icao}...` };
-    const proc = spawn('node', [path.join(scriptsDir, 'fetch-airport-ground.js'), icao], { cwd: path.resolve('.') });
-    let output = '';
-    proc.stdout.on('data', d => {
-      output += d.toString();
-      const match = output.match(/attempt (\d+)/g);
-      if (match) {
-        const last = match[match.length - 1].match(/\d+/)[0];
-        job.legs[legName] = { status: 'running', progress: progressBase + parseInt(last), step: `Ground ${icao} (attempt ${last})...` };
-      }
-    });
-    proc.stderr.on('data', d => { output += d.toString(); });
-    proc.on('close', code => resolve({ code, output }));
-  });
-
   for (const leg of legs) {
     const { number, from, to, legName, route } = leg;
     try {
-      // Fetch departure ground
-      const depResult = await fetchGround(from, legName, 5);
-      if (depResult.code !== 0 && depResult.code !== 2) {
-        throw new Error(`${from} ground failed: ${depResult.output.split('\\n').pop()}`);
-      }
-
-      // Fetch arrival ground
-      const arrResult = await fetchGround(to, legName, 25);
-      if (arrResult.code !== 0 && arrResult.code !== 2) {
-        throw new Error(`${to} ground failed: ${arrResult.output.split('\\n').pop()}`);
-      }
-
-      // Generate combined leg
-      job.legs[legName] = { status: 'running', progress: 50, step: 'Generating leg...' };
+      // Generate leg — includes ground layout fetching, navdata, SID/STAR, ASR, PRF
+      job.legs[legName] = { status: 'running', progress: 5, step: 'Starting...' };
       await new Promise((resolve, reject) => {
-        const proc = spawn('node', [path.join(scriptsDir, 'generate-leg-sct.js'), number, from, to, route || ''], { cwd: path.resolve('.') });
+        const proc = spawn('node', ['--experimental-vm-modules', path.join(scriptsDir, 'generate-leg-sct.js'), number, from, to, route || ''], {
+          cwd: path.resolve('.'),
+          timeout: 600000 // 10 minute timeout per leg
+        });
         let output = '';
         proc.stdout.on('data', d => {
           output += d.toString();
-          if (output.includes('navdata')) job.legs[legName] = { status: 'running', progress: 60, step: 'Navdata...' };
-          if (output.includes('ground layouts')) job.legs[legName] = { status: 'running', progress: 70, step: 'Ground layouts...' };
+          // Update progress based on generation stage
+          if (output.includes('Fetching') && output.includes('ground')) job.legs[legName] = { status: 'running', progress: 10, step: 'Fetching ground layouts...' };
+          if (output.includes('Pre-resolved')) job.legs[legName] = { status: 'running', progress: 25, step: 'Resolving route...' };
+          if (output.includes('Loading navdata')) job.legs[legName] = { status: 'running', progress: 40, step: 'Loading navdata...' };
+          if (output.includes('FIRs along actual')) job.legs[legName] = { status: 'running', progress: 55, step: 'Processing FIRs...' };
+          if (output.includes('coastline')) job.legs[legName] = { status: 'running', progress: 70, step: 'Coastline...' };
+          if (output.includes('Written') && output.includes('.sct')) job.legs[legName] = { status: 'running', progress: 80, step: 'Writing sector file...' };
           if (output.includes('SIDs')) job.legs[legName] = { status: 'running', progress: 85, step: 'SID/STARs...' };
+          if (output.includes('TopSky radars')) job.legs[legName] = { status: 'running', progress: 90, step: 'TopSky...' };
           if (output.includes('Generated')) job.legs[legName] = { status: 'running', progress: 95, step: 'Finalizing...' };
         });
         proc.stderr.on('data', d => { output += d.toString(); });
@@ -15019,7 +15004,7 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
     }
   }
   job.complete = true;
-  setTimeout(() => delete cpJobs[jobId], 60000);
+  setTimeout(() => delete cpJobs[jobId], 600000); // 10 min expiry
 });
 
 app.get('/admin/api/controller-pack/progress/:jobId', requireAdmin, (req, res) => {
