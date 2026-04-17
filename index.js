@@ -14384,7 +14384,7 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
               '<tr><td style="color:var(--muted);padding:4px 0;">Last Modified</td><td>' + afvDate + '</td></tr>' +
               '<tr><td style="color:var(--muted);padding:4px 0;">Stations</td><td>' + afvCount.toLocaleString() + ' positions</td></tr>' +
             '</table>' +
-            '<div style="margin-top:8px;font-size:12px;color:var(--muted2);">Real VATSIM frequencies for controller positions. Scraped from AFV Station Editor.</div>' +
+            '<div style="margin-top:8px;font-size:12px;color:var(--muted2);">Real VATSIM frequencies for controller positions. File: data/afv_stations.csv</div>' +
           '</div>';
         })()}
       </div>
