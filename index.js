@@ -14997,7 +14997,19 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
                   dl = document.createElement('a');
                   dl.id = 'downloadBtn';
                   dl.className = 'action-btn';
-                  dl.style.cssText = 'padding:10px 32px;font-size:14px;margin-left:12px;background:#2ecc71;color:#fff;text-decoration:none;border-radius:6px;display:inline-block;';
+                  dl.style.cssText = 'padding:10px 32px;font-size:14px;margin-left:12px;background:#2ecc71;color:#fff;text-decoration:none;border-radius:6px;display:inline-block;cursor:pointer;';
+                  dl.addEventListener('click', async function(e) {
+                    e.preventDefault();
+                    // Start download
+                    window.location.href = this.href;
+                    // Ask about cleanup after a short delay
+                    setTimeout(async () => {
+                      if (confirm('Download started. Delete the generated files from the server?')) {
+                        await fetch('/admin/api/controller-pack/cleanup', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                        this.remove();
+                      }
+                    }, 1500);
+                  });
                   btn.parentNode.insertBefore(dl, btn.nextSibling);
                 }
                 dl.href = '/admin/api/controller-pack/download/' + data.zipFile;
@@ -15181,6 +15193,11 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
       job.zipFile = zipName;
       job.zipSize = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(1);
       console.log(`[CP] Zip created: ${zipName} (${job.zipSize} MB)`);
+      // Clean up the WorldFlight working directory after zip
+      try {
+        fs.rmSync(wfDir, { recursive: true, force: true });
+        console.log('[CP] Cleaned up WorldFlight working directory');
+      } catch (e) { console.error('[CP] Cleanup failed:', e.message); }
     } catch (err) {
       console.error('[CP] Zip failed:', err.message);
     }
@@ -15200,6 +15217,25 @@ app.get('/admin/api/controller-pack/download/:filename', requireAdmin, (req, res
   const zipPath = path.resolve('Euroscope_Files', filename);
   if (!fs.existsSync(zipPath)) return res.status(404).send('File not found');
   res.download(zipPath, filename);
+});
+
+app.post('/admin/api/controller-pack/cleanup', requireAdmin, express.json(), (req, res) => {
+  const esDir = path.resolve('Euroscope_Files');
+  try {
+    // Remove all zip files and the WorldFlight directory
+    if (fs.existsSync(esDir)) {
+      for (const f of fs.readdirSync(esDir)) {
+        const fp = path.join(esDir, f);
+        if (f.endsWith('.zip') || f === 'WorldFlight') {
+          fs.rmSync(fp, { recursive: true, force: true });
+        }
+      }
+    }
+    console.log('[CP] Euroscope_Files cleaned up');
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
 });
 
 /* ===== ADMIN: MAILING LIST ===== */
