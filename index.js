@@ -15116,9 +15116,50 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
       const archive = archiver('zip', { zlib: { level: 5 } });
       archive.pipe(output);
       const wfDir = path.resolve('Euroscope_Files', 'WorldFlight');
-      // Shared Data folder (Settings, Plugin, ASR, Sector_Files, Alias, Datafiles)
-      archive.directory(path.join(wfDir, 'Data'), 'WorldFlight/Data');
-      // Only include PRF folders for selected legs
+      const dataDir = path.join(wfDir, 'Data');
+
+      // Shared folders (no UKCP)
+      for (const sub of ['Alias', 'Datafiles']) {
+        const p = path.join(dataDir, sub);
+        if (fs.existsSync(p)) archive.directory(p, `WorldFlight/Data/${sub}`);
+      }
+      // Plugins — exclude UKControllerPlugin
+      for (const sub of ['vSMR', 'TopSky']) {
+        const p = path.join(dataDir, 'Plugin', sub);
+        if (fs.existsSync(p)) archive.directory(p, `WorldFlight/Data/Plugin/${sub}`);
+      }
+      // Shared settings (non-per-leg files)
+      const settingsDir = path.join(dataDir, 'Settings');
+      if (fs.existsSync(settingsDir)) {
+        for (const f of fs.readdirSync(settingsDir)) {
+          // Include shared settings + only selected legs' Profiles/Voice files
+          const isPerLeg = f.startsWith('Profiles_') || f.startsWith('Voice_');
+          if (isPerLeg) {
+            const belongsToSelected = doneLegNames.some(ln => f.includes(ln));
+            if (!belongsToSelected) continue;
+          }
+          archive.file(path.join(settingsDir, f), { name: `WorldFlight/Data/Settings/${f}` });
+        }
+      }
+      // Only selected legs' SCT/ESE files
+      const sctDir = path.join(dataDir, 'Sector_Files');
+      if (fs.existsSync(sctDir)) {
+        for (const f of fs.readdirSync(sctDir)) {
+          if (doneLegNames.some(ln => f.startsWith(ln))) {
+            archive.file(path.join(sctDir, f), { name: `WorldFlight/Data/Sector_Files/${f}` });
+          }
+        }
+      }
+      // Only selected legs' ASR files
+      const asrDir = path.join(dataDir, 'ASR');
+      if (fs.existsSync(asrDir)) {
+        for (const f of fs.readdirSync(asrDir)) {
+          if (doneLegNames.some(ln => f.startsWith(ln))) {
+            archive.file(path.join(asrDir, f), { name: `WorldFlight/Data/ASR/${f}` });
+          }
+        }
+      }
+      // Only selected legs' PRF folders
       for (const legName of doneLegNames) {
         const legDir = path.join(wfDir, legName);
         if (fs.existsSync(legDir)) archive.directory(legDir, `WorldFlight/${legName}`);
