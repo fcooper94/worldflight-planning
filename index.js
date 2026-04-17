@@ -14249,11 +14249,18 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
         </div>
       </div>
 
+      <h3 style="color:var(--text);margin:24px 0 12px;border-bottom:1px solid var(--border);padding-bottom:8px;">Navigraph AIRAC Data</h3>
+      <p style="color:var(--muted);font-size:12px;margin-bottom:16px;">Download <strong>X-Plane 10 Native</strong> format from <a href="https://navigraph.com/downloads" target="_blank" style="color:var(--accent);">navigraph.com/downloads</a> and upload below. Update each AIRAC cycle (every 28 days).</p>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
         ${fileCard('Waypoints / Fixes (earth_fix.dat)', fixInfo, 'earth_fix')}
         ${fileCard('Navaids (earth_nav.dat)', parseAiracHeader(path.join(navDir, 'earth_nav.dat')), 'earth_nav')}
         ${fileCard('Airways (earth_awy.dat)', awyInfo, 'earth_awy')}
         ${fileCard('MSA Data (earth_msa.dat)', parseAiracHeader(path.join(navDir, 'earth_msa.dat')), 'earth_msa')}
+      </div>
+
+      <h3 style="color:var(--text);margin:32px 0 12px;border-bottom:1px solid var(--border);padding-bottom:8px;">Procedures &amp; SID/STAR Data</h3>
+      <p style="color:var(--muted);font-size:12px;margin-bottom:16px;">CIFP data provides SID/STAR procedures for each airport. Place updated files in <code style="background:var(--surface);padding:2px 6px;border-radius:3px;">data/XP12/CIFP/</code></p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
         ${(() => {
           const cifpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'XP12', 'CIFP');
           let cifpInfo = null;
@@ -14264,8 +14271,8 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
               // Try to read cycle from first CIFP file
               let cifpCycle = 'Unknown';
               if (files.length > 0) {
-                const head = fs.readFileSync(path.join(cifpDir, files[0]), 'utf-8').split('\\n').slice(0, 3).join(' ');
-                const cm = head.match(/cycle (\\d{4})/i) || head.match(/(\\d{4})/);
+                const head = fs.readFileSync(path.join(cifpDir, files[0]), 'utf-8').split('\n').slice(0, 3).join(' ');
+                const cm = head.match(/cycle (\d{4})/i) || head.match(/(\d{4})/);
                 if (cm) cifpCycle = cm[1];
               }
               cifpInfo = {
@@ -14354,13 +14361,18 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
             '</div>' +
           '</div>';
         })()}
+      </div>
+
+      <h3 style="color:var(--text);margin:32px 0 12px;border-bottom:1px solid var(--border);padding-bottom:8px;">VATSIM Data Sources</h3>
+      <p style="color:var(--muted);font-size:12px;margin-bottom:16px;">Position mapping, FIR boundaries, and real frequencies. These don't follow AIRAC cycles but should be updated periodically.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
         ${(() => {
           const vatspyPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'VATSPY', 'VATSpy.dat');
           const firBoundsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'VATSPY', 'FIRBoundaries.dat');
           let vatspyLines = 0, firBoundsLines = 0, vatspyDate = 'Unknown';
           try {
-            if (fs.existsSync(vatspyPath)) { vatspyLines = fs.readFileSync(vatspyPath, 'utf-8').split('\\n').length; vatspyDate = fs.statSync(vatspyPath).mtime.toISOString().slice(0, 10); }
-            if (fs.existsSync(firBoundsPath)) firBoundsLines = fs.readFileSync(firBoundsPath, 'utf-8').split('\\n').length;
+            if (fs.existsSync(vatspyPath)) { vatspyLines = fs.readFileSync(vatspyPath, 'utf-8').split('\n').length; vatspyDate = fs.statSync(vatspyPath).mtime.toISOString().slice(0, 10); }
+            if (fs.existsSync(firBoundsPath)) firBoundsLines = fs.readFileSync(firBoundsPath, 'utf-8').split('\n').length;
           } catch {}
           return '<div class="leg-section"><div class="leg-section-title">VATSpy Data</div>' +
             '<table style="width:100%;font-size:13px;color:var(--text);">' +
@@ -14376,7 +14388,7 @@ app.get('/admin/airac', requireAdmin, (req, res) => {
           const afvPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'afv_stations.csv');
           let afvCount = 0, afvDate = 'Unknown';
           try {
-            if (fs.existsSync(afvPath)) { afvCount = fs.readFileSync(afvPath, 'utf-8').split('\\n').filter(l => l.trim()).length - 1; afvDate = fs.statSync(afvPath).mtime.toISOString().slice(0, 10); }
+            if (fs.existsSync(afvPath)) { afvCount = fs.readFileSync(afvPath, 'utf-8').split('\n').filter(l => l.trim()).length - 1; afvDate = fs.statSync(afvPath).mtime.toISOString().slice(0, 10); }
           } catch {}
           return '<div class="leg-section"><div class="leg-section-title">AFV Station Database</div>' +
             '<table style="width:100%;font-size:13px;color:var(--text);">' +
