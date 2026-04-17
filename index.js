@@ -11849,7 +11849,7 @@ ${eventRows.map((r, idx) => {
 
           <table class="leg-fields" style="width:100%;border-collapse:separate;border-spacing:6px 0;">
             <tr>
-              <td style="width:50%;"><label>From<input type="text" id="addLegFrom" readonly style="text-transform:uppercase;font-family:monospace;" /></label></td>
+              <td style="width:50%;"><label>From<div style="display:flex;gap:4px;"><input type="text" id="addLegFrom" readonly style="text-transform:uppercase;font-family:monospace;flex:1;" /><button type="button" id="addLegFromEdit" title="Override start airport (first leg only)" style="display:none;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:3px;cursor:pointer;">✎</button></div></label></td>
               <td style="width:50%;"><label>To<input type="text" id="addLegTo" required placeholder="ICAO" maxlength="4" style="text-transform:uppercase;font-family:monospace;" /></label></td>
               <td style="width:36px;vertical-align:bottom;"><button type="button" id="openMapBtn" class="action-btn" style="padding:7px 8px;" title="Browse suggested airports">🌍</button></td>
             </tr>
@@ -12294,17 +12294,36 @@ firstRowInputs.forEach(function(input) {
 
   function updateFrom() {
     var opt = prevSelect.options[prevSelect.selectedIndex];
+    var editBtn = document.getElementById('addLegFromEdit');
     if (prevSelect.value === 'START') {
       fromInput.value = 'YSSY';
       depTimeInput.value = 'Set in schedule';
+      if (editBtn) editBtn.style.display = 'inline-block';
     } else {
       fromInput.value = opt.dataset.to || '';
       // Calculate departure time from previous leg arrival + turnaround + delay
       var prevArr = opt.dataset.arr || '';
       var prevDate = opt.dataset.date || '';
       updateDepTime(prevArr, prevDate);
+      if (editBtn) editBtn.style.display = 'none';
     }
     fromInput.setAttribute('readonly', true);
+  }
+
+  // Edit button toggles readonly on first leg's FROM field
+  var fromEditBtn = document.getElementById('addLegFromEdit');
+  if (fromEditBtn) {
+    fromEditBtn.addEventListener('click', function() {
+      if (fromInput.hasAttribute('readonly')) {
+        fromInput.removeAttribute('readonly');
+        fromInput.focus();
+        fromInput.select();
+        fromEditBtn.textContent = '✓';
+      } else {
+        fromInput.setAttribute('readonly', true);
+        fromEditBtn.textContent = '✎';
+      }
+    });
   }
 
   function updateDepTime(prevArr, prevDate) {
