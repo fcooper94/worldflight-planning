@@ -1,1 +1,0 @@
-// WorldFlight TopSky Airspace - no QNH transition levels configured
