@@ -14993,6 +14993,18 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
               clearInterval(poll);
               btn.disabled = false;
               btn.textContent = 'Generate Controller Pack';
+              if (data.zipFile) {
+                let dl = document.getElementById('downloadBtn');
+                if (!dl) {
+                  dl = document.createElement('a');
+                  dl.id = 'downloadBtn';
+                  dl.className = 'action-btn';
+                  dl.style.cssText = 'padding:10px 32px;font-size:14px;margin-left:12px;background:#2ecc71;color:#fff;text-decoration:none;border-radius:6px;display:inline-block;';
+                  btn.parentNode.insertBefore(dl, btn.nextSibling);
+                }
+                dl.href = '/admin/api/controller-pack/download/' + data.zipFile;
+                dl.textContent = 'Download ' + data.zipFile + ' (' + data.zipSize + ' MB)';
+              }
             }
           }, 500);
         }
@@ -15091,6 +15103,28 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
       job.legs[legName] = { status: 'error', progress: 100, step: '', error: err.message.slice(0, 100) };
     }
   }
+  // Create zip of the controller pack
+  const anyDone = Object.values(job.legs).some(l => l.status === 'done');
+  if (anyDone) {
+    try {
+      const archiver = (await import('archiver')).default;
+      const now = new Date();
+      const dateStr = String(now.getDate()).padStart(2, '0') + '_' + String(now.getMonth() + 1).padStart(2, '0');
+      const zipName = `WorldFlight_Controller_Pack_${dateStr}.zip`;
+      const zipPath = path.resolve('Euroscope_Files', zipName);
+      const output = fs.createWriteStream(zipPath);
+      const archive = archiver('zip', { zlib: { level: 5 } });
+      archive.pipe(output);
+      archive.directory(path.resolve('Euroscope_Files', 'WorldFlight'), 'WorldFlight');
+      await archive.finalize();
+      await new Promise(resolve => output.on('close', resolve));
+      job.zipFile = zipName;
+      job.zipSize = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(1);
+      console.log(`[CP] Zip created: ${zipName} (${job.zipSize} MB)`);
+    } catch (err) {
+      console.error('[CP] Zip failed:', err.message);
+    }
+  }
   job.complete = true;
   setTimeout(() => delete cpJobs[jobId], 600000); // 10 min expiry
 });
@@ -15099,6 +15133,13 @@ app.get('/admin/api/controller-pack/progress/:jobId', requireAdmin, (req, res) =
   const job = cpJobs[req.params.jobId];
   if (!job) return res.json({ complete: true, legs: {} });
   res.json(job);
+});
+
+app.get('/admin/api/controller-pack/download/:filename', requireAdmin, (req, res) => {
+  const filename = req.params.filename.replace(/[^a-zA-Z0-9_.\-]/g, '');
+  const zipPath = path.resolve('Euroscope_Files', filename);
+  if (!fs.existsSync(zipPath)) return res.status(404).send('File not found');
+  res.download(zipPath, filename);
 });
 
 /* ===== ADMIN: MAILING LIST ===== */
