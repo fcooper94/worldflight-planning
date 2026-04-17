@@ -14877,10 +14877,8 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
 
   // Get legs from active event schedule
   const legs = adminSheetCache.filter(r => r.from && r.to && r.number).map(r => {
-    // r.number is already "WF2606" format — extract leg num (strip WF + 2-digit year prefix)
-    const legNum = r.number.replace(/^WF\d{2}/, '');
     return {
-      number: legNum,
+      number: r.number,  // pass full WF2606 to generate-leg-sct.js
       legName: r.number,
       from: r.from,
       to: r.to,
@@ -15104,7 +15102,8 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
     }
   }
   // Create zip containing only the selected/generated legs + shared Data folder
-  const doneLegNames = Object.entries(job.legs).filter(([, l]) => l.status === 'done').map(([name]) => name);
+  const doneLegs = legs.filter(l => job.legs[l.legName]?.status === 'done');
+  const doneLegNames = doneLegs.map(l => l.legName);
   if (doneLegNames.length > 0) {
     try {
       const archiver = (await import('archiver')).default;
@@ -15159,10 +15158,23 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
           }
         }
       }
-      // Only selected legs' PRF folders
-      for (const legName of doneLegNames) {
-        const legDir = path.join(wfDir, legName);
-        if (fs.existsSync(legDir)) archive.directory(legDir, `WorldFlight/${legName}`);
+      // Selected legs' PRF folders + ground layout files
+      const addedGroundFiles = new Set();
+      for (const leg of doneLegs) {
+        // PRF folder
+        const legDir = path.join(wfDir, leg.legName);
+        if (fs.existsSync(legDir)) archive.directory(legDir, `WorldFlight/${leg.legName}`);
+        // Ground layout files for dep/arr airports
+        for (const icao of [leg.from, leg.to]) {
+          const groundFile = `${icao}_ground.txt`;
+          if (!addedGroundFiles.has(groundFile)) {
+            const groundPath = path.join(wfDir, groundFile);
+            if (fs.existsSync(groundPath)) {
+              archive.file(groundPath, { name: `WorldFlight/${groundFile}` });
+              addedGroundFiles.add(groundFile);
+            }
+          }
+        }
       }
       await archive.finalize();
       await new Promise(resolve => output.on('close', resolve));
