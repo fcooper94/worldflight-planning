@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "WfEvent" ADD COLUMN "costIndex" INTEGER NOT NULL DEFAULT 30;

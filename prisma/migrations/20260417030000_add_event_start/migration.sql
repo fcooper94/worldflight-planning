@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "WfEvent" ADD COLUMN "startDateUtc" TEXT NOT NULL DEFAULT '';
+ALTER TABLE "WfEvent" ADD COLUMN "startTimeUtc" TEXT NOT NULL DEFAULT '';

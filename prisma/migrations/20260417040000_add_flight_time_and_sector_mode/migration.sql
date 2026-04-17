@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "WfScheduleRow" ADD COLUMN "flightTime" TEXT NOT NULL DEFAULT '';
+ALTER TABLE "WfEvent" ADD COLUMN "nextSectorAfter" TEXT NOT NULL DEFAULT 'BLOCK';

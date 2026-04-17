@@ -3680,6 +3680,7 @@ async function loadScheduleFromDb(eventId) {
     dep_time_utc: r.depTimeUtc,
     arr_time_utc: r.arrTimeUtc,
     block_time: r.blockTime,
+    flight_time: r.flightTime,
     atc_route: r.atcRoute
   }));
 
@@ -11649,6 +11650,7 @@ app.get('/wf-schedule/:eventId', requireAdmin, async (req, res) => {
 const eventId = Number(req.params.eventId);
 const event = wfEvents.find(e => e.id === eventId);
 if (!event) return res.redirect('/wf-schedule');
+console.log('[WF-SCHEDULE GET] event', eventId, 'startDateUtc=', JSON.stringify(event.startDateUtc), 'startTimeUtc=', JSON.stringify(event.startTimeUtc));
 
 const eventRows = eventSheetCaches[eventId] || [];
 
@@ -11707,8 +11709,36 @@ const mapAirports = suggestedAirports.map(a => {
   return { icao: a.icao, lat: a.lat, lon: a.lon, name: a.name, votes: a.votes, color, tooltip };
 });
 
+function formatStartDateLabel(iso) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return 'Pick date';
+  const parts = iso.split('-');
+  const d = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const day = d.getUTCDate();
+  const suf = day === 1 || day === 21 || day === 31 ? 'st'
+    : day === 2 || day === 22 ? 'nd'
+    : day === 3 || day === 23 ? 'rd' : 'th';
+  return days[d.getUTCDay()] + ' ' + day + suf + ' ' + months[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+}
+const startDateLabelText = formatStartDateLabel(event.startDateUtc);
+
 const content = `
- <script>window.WF_EVENT_ID = ${eventId};</script>
+ <script>
+   window.WF_EVENT_ID = ${eventId};
+   window.WF_EVENT_CONFIG = {
+     isWorldFlight: ${event.isWorldFlight !== false},
+     flightSuffix: ${JSON.stringify(event.flightSuffix || '')},
+     flightStartNumber: ${event.flightStartNumber ?? 1},
+     aircraftType: ${JSON.stringify(event.aircraftType || 'B738')},
+     costIndex: ${event.costIndex ?? 30},
+     startDateUtc: ${JSON.stringify(event.startDateUtc || '')},
+     startTimeUtc: ${JSON.stringify(event.startTimeUtc || '')},
+     nextSectorAfter: ${JSON.stringify(event.nextSectorAfter || 'BLOCK')},
+     cruiseAltitude: ${event.cruiseAltitude ?? 0},
+     cruiseMode: ${JSON.stringify(event.cruiseMode || 'CI')}
+   };
+ </script>
  <div style="margin-bottom:16px;">
    <a href="/wf-schedule" style="color:var(--accent);text-decoration:none;font-size:13px;">&larr; Back to all schedules</a>
    <span style="color:var(--muted);font-size:13px;margin-left:12px;">${event.name}${event.isActive ? ' (Active)' : ''}</span>
@@ -11720,15 +11750,57 @@ const content = `
   <h2 style="margin:0;">WorldFlight Admin Schedule</h2>
   <div style="display:flex;gap:8px;align-items:center;">
     ${isScratch ? `
+    <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:4px 12px;" title="Treat as WorldFlight: YSSY start, WF flight numbers, B738 SimBrief default">
+      <input type="checkbox" id="isWorldFlightChk" ${event.isWorldFlight !== false ? 'checked' : ''} style="cursor:pointer;" />
+      <label for="isWorldFlightChk" style="font-size:12px;color:var(--muted);cursor:pointer;">Is a WorldFlight event?</label>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:4px 12px;" title="First leg departure date and time (UTC)">
+      <span style="font-size:11px;color:var(--muted);">Start:</span>
+      <button type="button" id="eventStartDateBtn" class="date-picker-trigger">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.7;"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+        <span id="eventStartDateLabel">${startDateLabelText}</span>
+      </button>
+      <input type="hidden" id="eventStartDateInput" value="${event.startDateUtc || ''}" />
+      <input type="time" id="eventStartTimeInput" value="${event.startTimeUtc || ''}" step="60" style="padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:monospace;" />
+      <span style="font-size:10px;color:var(--muted);">UTC</span>
+    </div>
+    <div id="nonWfConfig" style="display:${event.isWorldFlight !== false ? 'none' : 'flex'};align-items:center;gap:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:4px 12px;">
+      <span style="font-size:11px;color:var(--muted);">Suffix:</span>
+      <input type="text" id="flightSuffixInput" value="${(event.flightSuffix || '').toUpperCase()}" placeholder="BA" maxlength="4" style="width:50px;padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;text-align:center;text-transform:uppercase;" />
+      <span style="font-size:11px;color:var(--muted);margin-left:6px;" title="Flight number of the first leg. Subsequent legs increment from this.">First #:</span>
+      <div style="display:flex;align-items:center;background:#0f172a;border:1px solid var(--border);border-radius:4px;overflow:hidden;">
+        <span id="flightPrefixLabel" style="padding:2px 6px;background:rgba(255,255,255,0.04);color:var(--muted);font-size:12px;font-family:monospace;border-right:1px solid var(--border);">${(event.flightSuffix || 'BA').toUpperCase()}</span>
+        <input type="number" id="flightStartInput" value="${event.flightStartNumber ?? 1}" min="0" max="99999" style="width:60px;padding:2px 6px;background:transparent;border:none;color:var(--text);font-size:12px;text-align:center;font-family:monospace;" />
+      </div>
+      <span style="font-size:11px;color:var(--muted);margin-left:6px;">A/C:</span>
+      <select id="aircraftTypeSelect" style="padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;">
+        <option value="B738" ${(event.aircraftType || 'B738') === 'B738' ? 'selected' : ''}>737</option>
+        <option value="B744" ${event.aircraftType === 'B744' ? 'selected' : ''}>747</option>
+        <option value="B77W" ${event.aircraftType === 'B77W' ? 'selected' : ''}>777</option>
+      </select>
+      <select id="cruiseModeSelect" title="Cruise planning mode sent to SimBrief" style="padding:2px 6px;margin-left:6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;">
+        <option value="CI" ${(event.cruiseMode || 'CI') === 'CI' ? 'selected' : ''}>CI</option>
+        <option value="MACH" ${event.cruiseMode === 'MACH' ? 'selected' : ''}>Mach</option>
+        <option value="KIAS" ${event.cruiseMode === 'KIAS' ? 'selected' : ''}>KIAS</option>
+      </select>
+      <input type="number" id="costIndexInput" value="${event.costIndex ?? 30}" min="0" max="999" style="width:60px;padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;text-align:center;font-family:monospace;" />
+      <span style="font-size:11px;color:var(--muted);margin-left:6px;" title="BLOCK = next dep after arrival + turnaround (current default). FLIGHT = next dep after flight time (airborne only, no turnaround).">Next sector after:</span>
+      <select id="nextSectorAfterSelect" style="padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;">
+        <option value="BLOCK" ${(event.nextSectorAfter || 'BLOCK') === 'BLOCK' ? 'selected' : ''}>Block time</option>
+        <option value="FLIGHT" ${event.nextSectorAfter === 'FLIGHT' ? 'selected' : ''}>Flight time</option>
+      </select>
+      <span style="font-size:11px;color:var(--muted);margin-left:6px;" title="Forced cruise flight level for all legs (0 = auto/SimBrief optimum). Sent to SimBrief as &amp;fl=.">FL:</span>
+      <input type="number" id="cruiseAltitudeInput" value="${event.cruiseAltitude || ''}" placeholder="auto" min="0" max="600" style="width:60px;padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;text-align:center;font-family:monospace;" />
+    </div>
     <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:4px 12px;">
       <a href="https://www.simbrief.com/system/profile.php#settings" target="_blank" style="font-size:11px;color:var(--muted);text-decoration:none;" title="Find your Pilot ID in SimBrief Account Settings">SB Pilot ID:</a>
       <input type="text" id="simbriefPilotId" value="" placeholder="e.g. 546033" style="width:80px;padding:2px 6px;background:#0f172a;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;text-align:center;" />
     </div>
     <div class="turnaround-setting" style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px;padding:4px 12px;">
       <span style="font-size:12px;color:var(--muted);">Turnaround:</span>
-      <span id="turnaroundDisplay" style="font-size:13px;color:var(--text);font-weight:600;">${event.turnaroundMins || 45} min</span>
+      <span id="turnaroundDisplay" style="font-size:13px;color:var(--text);font-weight:600;">${event.turnaroundMins ?? 45} min</span>
       <button type="button" id="editTurnaroundBtn" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:2px 4px;">&#9998;</button>
-      <input type="hidden" id="turnaroundInput" value="${event.turnaroundMins || 45}" />
+      <input type="hidden" id="turnaroundInput" value="${event.turnaroundMins ?? 45}" />
     </div>
     <button id="addRowBtn" class="action-btn" style="background:var(--success);color:#020617;font-weight:600;">+ Add Leg</button>
     ` : `
@@ -11752,6 +11824,7 @@ const content = `
   <th>Date</th>
   <th>Dep</th>
   <th>Arr</th>
+  <th>Flight</th>
   <th>Block</th>
   <th class="col-route">ATC Route</th>
 </tr>
@@ -11802,9 +11875,12 @@ ${eventRows.map((r, idx) => {
       : '<td class="calc-cell" data-field="dep">' + r.dep_time_utc + '</td>')
     : '<td>' + r.dep_time_utc + '</td>'}
   ${isScratch && !r.block_time && r.from && r.to
-    ? '<td></td><td></td>'
+    ? '<td></td><td></td><td></td>'
       + '<td><div class="sched-edit sched-route" data-field="atcRoute" contenteditable="true" style="min-width:200px;">' + (r.atc_route || '') + '</div></td>'
     : '<td class="calc-cell" data-field="arr">' + r.arr_time_utc + '</td>'
+      + (isScratch
+        ? '<td><input class="sched-edit" data-field="flightTime" value="' + (r.flight_time || '') + '" placeholder="HH:MM" style="width:60px;" /></td>'
+        : '<td>' + (r.flight_time || '') + '</td>')
       + (isScratch
         ? '<td><input class="sched-edit" data-field="blockTime" value="' + r.block_time + '" style="width:60px;" /></td>'
         : '<td>' + r.block_time + '</td>')
@@ -12074,6 +12150,27 @@ ${eventRows.map((r, idx) => {
   }
 </style>
 
+<!-- DATE PICKER MODAL -->
+<div id="datePickerModal" class="modal hidden" style="z-index:10001;">
+  <div class="modal-backdrop"></div>
+  <div class="date-picker-card">
+    <div class="date-picker-header">
+      <button type="button" id="dpPrev" class="dp-nav-btn" aria-label="Previous month">&#x2039;</button>
+      <button type="button" id="dpMonthYear" class="dp-title-btn"></button>
+      <button type="button" id="dpNext" class="dp-nav-btn" aria-label="Next month">&#x203A;</button>
+    </div>
+    <div class="date-picker-weekdays">
+      <span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span><span>Su</span>
+    </div>
+    <div id="dpGrid" class="date-picker-grid"></div>
+    <div class="date-picker-actions">
+      <button type="button" id="dpToday" class="dp-action-btn">Today</button>
+      <button type="button" id="dpClear" class="dp-action-btn">Clear</button>
+      <button type="button" id="dpClose" class="dp-action-btn dp-close">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- AIRPORT MAP MODAL -->
 <div id="airportMapModal" class="modal hidden" style="z-index:10000;">
   <div class="modal-backdrop"></div>
@@ -12172,7 +12269,8 @@ document.querySelectorAll('.sched-edit').forEach(function(input) {
 
 /* ===== TURNAROUND TIME ===== */
 if (document.getElementById('editTurnaroundBtn')) document.getElementById('editTurnaroundBtn').addEventListener('click', function() {
-  var currentVal = Number(document.getElementById('turnaroundInput').value) || 45;
+  var rawVal = document.getElementById('turnaroundInput').value;
+  var currentVal = rawVal === '' || isNaN(Number(rawVal)) ? 45 : Number(rawVal);
 
   // Reuse callsign modal for input
   var modal = document.getElementById('callsignModal');
@@ -12290,14 +12388,17 @@ firstRowInputs.forEach(function(input) {
 
   var depTimeInput = document.getElementById('addLegDepTime');
   var delayInput = document.getElementById('addLegDelay');
-  var turnaroundMins = Number(document.getElementById('turnaroundInput')?.value) || 45;
+  var _rawTurn = document.getElementById('turnaroundInput')?.value;
+  var turnaroundMins = _rawTurn === '' || _rawTurn == null || isNaN(Number(_rawTurn)) ? 45 : Number(_rawTurn);
 
   function updateFrom() {
     var opt = prevSelect.options[prevSelect.selectedIndex];
     var editBtn = document.getElementById('addLegFromEdit');
+    var isNonWf = window.WF_EVENT_CONFIG && window.WF_EVENT_CONFIG.isWorldFlight === false;
     if (prevSelect.value === 'START') {
-      fromInput.value = 'YSSY';
-      depTimeInput.value = 'Set in schedule';
+      fromInput.value = isNonWf ? '' : 'YSSY';
+      var eventStart = window.WF_EVENT_CONFIG && window.WF_EVENT_CONFIG.startTimeUtc;
+      depTimeInput.value = eventStart ? eventStart + ' UTC' : 'Set in schedule';
       if (editBtn) editBtn.style.display = 'inline-block';
     } else {
       fromInput.value = opt.dataset.to || '';
@@ -12307,7 +12408,11 @@ firstRowInputs.forEach(function(input) {
       updateDepTime(prevArr, prevDate);
       if (editBtn) editBtn.style.display = 'none';
     }
-    fromInput.setAttribute('readonly', true);
+    if (isNonWf && prevSelect.value === 'START') {
+      fromInput.removeAttribute('readonly');
+    } else {
+      fromInput.setAttribute('readonly', true);
+    }
   }
 
   // Edit button toggles readonly on first leg's FROM field
@@ -12391,7 +12496,8 @@ firstRowInputs.forEach(function(input) {
         depFlow: Number(document.getElementById('addLegFlow').value) || 0,
         flowType: document.getElementById('addLegFlowType').value,
         atcRoute: (document.getElementById('addLegRoute').value || '').trim(),
-        blockTime: (document.getElementById('addLegSimbriefFetch')?.dataset?.blockTime || '')
+        blockTime: (document.getElementById('addLegSimbriefFetch')?.dataset?.blockTime || ''),
+        flightTime: (document.getElementById('addLegSimbriefFetch')?.dataset?.flightTime || '')
       })
     });
 
@@ -12689,12 +12795,20 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
 
     var pilotId = (document.getElementById('simbriefPilotId')?.value || '').trim();
 
+    var cfg = window.WF_EVENT_CONFIG || {};
+    var acType = cfg.aircraftType || 'B738';
+    var isNonWf = cfg.isWorldFlight === false;
+    var mode = isNonWf ? (cfg.cruiseMode || 'CI') : null;
+    var cruise = isNonWf ? mode : (acType === 'B744' ? 'M85' : acType === 'B77W' ? 'M84' : 'M78');
+    var forcedFl = isNonWf && cfg.cruiseAltitude && cfg.cruiseAltitude > 0 ? cfg.cruiseAltitude : 0;
     var url = 'https://dispatch.simbrief.com/options/custom'
       + '?orig=' + encodeURIComponent(from)
       + '&dest=' + encodeURIComponent(to)
       + (route ? '&route=' + encodeURIComponent(route) : '')
-      + '&type=B738'
-      + '&cruise=M78'
+      + '&type=' + acType
+      + '&cruise=' + cruise
+      + (isNonWf ? '&civalue=' + (cfg.costIndex ?? 30) : '')
+      + (forcedFl ? '&fl=' + forcedFl : '')
       + '&manualrmk=' + encodeURIComponent('WorldFlight Validated Route - www.planning.worldflight.center');
 
     window.open(url, 'simbrief', 'width=1100,height=750,scrollbars=yes,resizable=yes');
@@ -12744,6 +12858,10 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
       var blockHrs = Math.floor(blockSecs / 3600);
       var blockMins = Math.floor((blockSecs % 3600) / 60);
       var blockStr = String(blockHrs).padStart(2, '0') + ':' + String(blockMins).padStart(2, '0');
+      var flightSecs = Number(data.times?.est_time_enroute) || 0;
+      var flightHrs = Math.floor(flightSecs / 3600);
+      var flightMinsOut = Math.floor((flightSecs % 3600) / 60);
+      var flightStr = flightSecs ? (String(flightHrs).padStart(2, '0') + ':' + String(flightMinsOut).padStart(2, '0')) : '';
 
       // Fill in route
       if (ofpRoute) {
@@ -12751,11 +12869,12 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
         routeTextarea.dispatchEvent(new Event('input'));
       }
 
-      msgEl.innerHTML = 'Route and block time (' + blockStr + ') loaded from SimBrief.';
+      msgEl.innerHTML = 'Route, block (' + blockStr + ')' + (flightStr ? ', flight (' + flightStr + ')' : '') + ' loaded from SimBrief.';
       msgEl.style.color = 'var(--success)';
 
-      // Store block time for when we submit
+      // Store times for when we submit
       fetchBtn.dataset.blockTime = blockStr;
+      fetchBtn.dataset.flightTime = flightStr;
       fetchBtn.textContent = 'Pull SimBrief Data';
       fetchBtn.disabled = true;
 
@@ -12801,6 +12920,264 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
   });
 })();
 
+/* ===== EVENT FLIGHT CONFIG (WorldFlight toggle / suffix / a/c type) ===== */
+(function() {
+  var chk = document.getElementById('isWorldFlightChk');
+  if (!chk) return;
+  var cfgBox = document.getElementById('nonWfConfig');
+  var suffixInput = document.getElementById('flightSuffixInput');
+  var acSelect = document.getElementById('aircraftTypeSelect');
+  var startInput = document.getElementById('flightStartInput');
+  var prefixLabel = document.getElementById('flightPrefixLabel');
+  var ciInput = document.getElementById('costIndexInput');
+
+  function save(payload) {
+    fetch('/admin/api/wf-events/' + window.WF_EVENT_ID + '/flight-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function(r) {
+      if (r.ok) {
+        Object.assign(window.WF_EVENT_CONFIG, payload);
+        if (payload.flightSuffix !== undefined) {
+          payload.flightSuffix = payload.flightSuffix.toUpperCase().trim();
+          window.WF_EVENT_CONFIG.flightSuffix = payload.flightSuffix;
+        }
+      }
+    });
+  }
+
+  chk.addEventListener('change', function() {
+    cfgBox.style.display = chk.checked ? 'none' : 'flex';
+    save({ isWorldFlight: chk.checked });
+    var fromInput = document.getElementById('addLegFrom');
+    var prevSel = document.getElementById('addLegPrev');
+    if (fromInput && prevSel && prevSel.value === 'START') {
+      fromInput.value = chk.checked ? 'YSSY' : '';
+    }
+  });
+
+  if (suffixInput) {
+    suffixInput.addEventListener('input', function() {
+      if (prefixLabel) prefixLabel.textContent = (suffixInput.value || '').toUpperCase().trim() || 'BA';
+    });
+    suffixInput.addEventListener('change', function() {
+      save({ flightSuffix: suffixInput.value });
+    });
+  }
+  if (startInput) {
+    startInput.addEventListener('change', function() {
+      var n = Number(startInput.value);
+      if (!Number.isFinite(n) || n < 0) return;
+      save({ flightStartNumber: Math.floor(n) });
+    });
+  }
+  if (acSelect) {
+    acSelect.addEventListener('change', function() {
+      save({ aircraftType: acSelect.value });
+    });
+  }
+  var cruiseModeSelect = document.getElementById('cruiseModeSelect');
+  function applyCruiseModeBounds(mode) {
+    if (!ciInput) return;
+    if (mode === 'KIAS') {
+      ciInput.min = '100'; ciInput.max = '350'; ciInput.title = 'KIAS — indicated airspeed in knots (100-350)';
+    } else if (mode === 'MACH') {
+      ciInput.min = '50'; ciInput.max = '99'; ciInput.title = 'Mach — enter tens digit(s), e.g. 78 for M0.78';
+    } else {
+      ciInput.min = '0'; ciInput.max = '999'; ciInput.title = 'Cost Index (0-999)';
+    }
+  }
+  applyCruiseModeBounds((window.WF_EVENT_CONFIG && window.WF_EVENT_CONFIG.cruiseMode) || 'CI');
+  if (cruiseModeSelect) {
+    cruiseModeSelect.addEventListener('change', function() {
+      applyCruiseModeBounds(cruiseModeSelect.value);
+      save({ cruiseMode: cruiseModeSelect.value });
+    });
+  }
+  if (ciInput) {
+    ciInput.addEventListener('change', function() {
+      var n = Number(ciInput.value);
+      if (!Number.isFinite(n) || n < 0 || n > 999) return;
+      save({ costIndex: Math.floor(n) });
+    });
+  }
+  var nsaSelect = document.getElementById('nextSectorAfterSelect');
+  if (nsaSelect) {
+    nsaSelect.addEventListener('change', function() {
+      saveStartAndReload({ nextSectorAfter: nsaSelect.value });
+    });
+  }
+  var flInput = document.getElementById('cruiseAltitudeInput');
+  if (flInput) {
+    flInput.addEventListener('change', function() {
+      var raw = flInput.value.trim();
+      var n = raw === '' ? 0 : Number(raw);
+      if (!Number.isFinite(n) || n < 0 || n > 600) return;
+      save({ cruiseAltitude: Math.floor(n) });
+    });
+  }
+
+  var startDateEl = document.getElementById('eventStartDateInput');
+  var startTimeEl = document.getElementById('eventStartTimeInput');
+  var startDateBtn = document.getElementById('eventStartDateBtn');
+  var startDateLabel = document.getElementById('eventStartDateLabel');
+
+  function formatDisplayDate(iso) {
+    if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return 'Pick date';
+    var parts = iso.split('-');
+    var d = new Date(Date.UTC(+parts[0], +parts[1] - 1, +parts[2]));
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var day = d.getUTCDate();
+    var suf = day === 1 || day === 21 || day === 31 ? 'st'
+      : day === 2 || day === 22 ? 'nd'
+      : day === 3 || day === 23 ? 'rd' : 'th';
+    return days[d.getUTCDay()] + ' ' + day + suf + ' ' + months[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+  }
+  if (startDateLabel) startDateLabel.textContent = formatDisplayDate(startDateEl ? startDateEl.value : '');
+
+  var dpModal = document.getElementById('datePickerModal');
+  var dpGrid = document.getElementById('dpGrid');
+  var dpMonthYear = document.getElementById('dpMonthYear');
+  var dpViewYear, dpViewMonth;
+
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function toIso(y, m, d) { return y + '-' + pad2(m + 1) + '-' + pad2(d); }
+
+  function renderDp() {
+    var monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    dpMonthYear.textContent = monthNames[dpViewMonth] + ' ' + dpViewYear;
+
+    var firstOfMonth = new Date(Date.UTC(dpViewYear, dpViewMonth, 1));
+    var firstWeekday = (firstOfMonth.getUTCDay() + 6) % 7; // Monday = 0
+    var daysInMonth = new Date(Date.UTC(dpViewYear, dpViewMonth + 1, 0)).getUTCDate();
+    var daysInPrev = new Date(Date.UTC(dpViewYear, dpViewMonth, 0)).getUTCDate();
+
+    var today = new Date();
+    var todayIso = toIso(today.getFullYear(), today.getMonth(), today.getDate());
+    var selectedIso = startDateEl ? startDateEl.value : '';
+
+    dpGrid.innerHTML = '';
+    var totalCells = 42;
+    for (var i = 0; i < totalCells; i++) {
+      var dayNum, cellMonth, cellYear, isOther;
+      if (i < firstWeekday) {
+        dayNum = daysInPrev - firstWeekday + 1 + i;
+        cellMonth = dpViewMonth === 0 ? 11 : dpViewMonth - 1;
+        cellYear = dpViewMonth === 0 ? dpViewYear - 1 : dpViewYear;
+        isOther = true;
+      } else if (i < firstWeekday + daysInMonth) {
+        dayNum = i - firstWeekday + 1;
+        cellMonth = dpViewMonth;
+        cellYear = dpViewYear;
+        isOther = false;
+      } else {
+        dayNum = i - firstWeekday - daysInMonth + 1;
+        cellMonth = dpViewMonth === 11 ? 0 : dpViewMonth + 1;
+        cellYear = dpViewMonth === 11 ? dpViewYear + 1 : dpViewYear;
+        isOther = true;
+      }
+      var iso = toIso(cellYear, cellMonth, dayNum);
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dp-day' + (isOther ? ' dp-other-month' : '') + (iso === todayIso ? ' dp-today' : '') + (iso === selectedIso ? ' dp-selected' : '');
+      btn.textContent = dayNum;
+      btn.dataset.iso = iso;
+      btn.addEventListener('click', function() {
+        var picked = this.dataset.iso;
+        startDateEl.value = picked;
+        startDateLabel.textContent = formatDisplayDate(picked);
+        dpModal.classList.add('hidden');
+        saveStartAndReload({ startDateUtc: picked });
+      });
+      dpGrid.appendChild(btn);
+    }
+  }
+
+  function openDp() {
+    var current = startDateEl && startDateEl.value;
+    var base;
+    if (current && /^\d{4}-\d{2}-\d{2}$/.test(current)) {
+      var p = current.split('-');
+      base = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+    } else {
+      base = new Date();
+    }
+    dpViewYear = base.getUTCFullYear ? base.getUTCFullYear() : base.getFullYear();
+    dpViewMonth = base.getUTCMonth ? base.getUTCMonth() : base.getMonth();
+    renderDp();
+    dpModal.classList.remove('hidden');
+  }
+
+  if (startDateBtn) startDateBtn.addEventListener('click', openDp);
+  if (dpModal) {
+    dpModal.querySelector('.modal-backdrop').addEventListener('click', function() {
+      dpModal.classList.add('hidden');
+    });
+    document.getElementById('dpPrev').addEventListener('click', function() {
+      dpViewMonth--;
+      if (dpViewMonth < 0) { dpViewMonth = 11; dpViewYear--; }
+      renderDp();
+    });
+    document.getElementById('dpNext').addEventListener('click', function() {
+      dpViewMonth++;
+      if (dpViewMonth > 11) { dpViewMonth = 0; dpViewYear++; }
+      renderDp();
+    });
+    document.getElementById('dpMonthYear').addEventListener('click', function() {
+      var t = new Date();
+      dpViewYear = t.getFullYear();
+      dpViewMonth = t.getMonth();
+      renderDp();
+    });
+    document.getElementById('dpToday').addEventListener('click', function() {
+      var t = new Date();
+      var iso = toIso(t.getFullYear(), t.getMonth(), t.getDate());
+      startDateEl.value = iso;
+      startDateLabel.textContent = formatDisplayDate(iso);
+      dpModal.classList.add('hidden');
+      saveStartAndReload({ startDateUtc: iso });
+    });
+    document.getElementById('dpClear').addEventListener('click', function() {
+      startDateEl.value = '';
+      startDateLabel.textContent = 'Pick date';
+      dpModal.classList.add('hidden');
+      saveStartAndReload({ startDateUtc: '' });
+    });
+    document.getElementById('dpClose').addEventListener('click', function() {
+      dpModal.classList.add('hidden');
+    });
+  }
+
+  function saveStartAndReload(payload) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,0.9);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;';
+    overlay.innerHTML = '<div style="text-align:center;">' +
+      '<div style="width:36px;height:36px;border:3px solid rgba(255,255,255,0.1);border-top-color:var(--accent,#38bdf8);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px;"></div>' +
+      '<h2 style="color:var(--text,#e5e7eb);font-size:18px;margin:0 0 6px;">Recalculating...</h2>' +
+      '<p style="color:var(--muted,#94a3b8);font-size:13px;">Applying new start date/time</p>' +
+      '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style>';
+    document.body.appendChild(overlay);
+    fetch('/admin/api/wf-events/' + window.WF_EVENT_ID + '/flight-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function(r) {
+      if (r.ok) location.reload();
+      else {
+        document.body.removeChild(overlay);
+        alert('Failed to save start date/time.');
+      }
+    });
+  }
+  if (startTimeEl) {
+    startTimeEl.addEventListener('change', function() {
+      saveStartAndReload({ startTimeUtc: startTimeEl.value });
+    });
+  }
+})();
+
 /* ===== SECTOR OVERVIEW ===== */
 (function() {
   var sectorModal = document.getElementById('sectorModal');
@@ -12844,12 +13221,20 @@ document.addEventListener('click', function(e) {
   var routeEl = tr.querySelector('[data-field="atcRoute"]');
   var route = routeEl ? (routeEl.value || routeEl.textContent || '').trim() : '';
 
+  var cfg = window.WF_EVENT_CONFIG || {};
+  var acType = cfg.aircraftType || 'B738';
+  var isNonWf = cfg.isWorldFlight === false;
+  var mode = isNonWf ? (cfg.cruiseMode || 'CI') : null;
+  var cruise = isNonWf ? mode : (acType === 'B744' ? 'M85' : acType === 'B77W' ? 'M84' : 'M78');
+  var forcedFl = isNonWf && cfg.cruiseAltitude && cfg.cruiseAltitude > 0 ? cfg.cruiseAltitude : 0;
   var url = 'https://dispatch.simbrief.com/options/custom'
     + '?orig=' + encodeURIComponent(from)
     + '&dest=' + encodeURIComponent(to)
     + (route ? '&route=' + encodeURIComponent(route) : '')
-    + '&type=B738'
-    + '&cruise=M78'
+    + '&type=' + acType
+    + '&cruise=' + cruise
+    + (isNonWf ? '&civalue=' + (cfg.costIndex ?? 30) : '')
+    + (forcedFl ? '&fl=' + forcedFl : '')
     + '&manualrmk=' + encodeURIComponent('WorldFlight Validated Route - www.planning.worldflight.center');
 
   window.open(url, 'simbrief', 'width=1100,height=750,scrollbars=yes,resizable=yes');
@@ -12931,11 +13316,16 @@ document.addEventListener('click', async function(e) {
       return;
     }
 
-    // Extract block time (in seconds) and route
+    // Extract block + flight time and route
     var blockSecs = Number(data.times?.sched_block) || Number(data.times?.est_block) || 0;
     var blockHrs = Math.floor(blockSecs / 3600);
     var blockMins = Math.floor((blockSecs % 3600) / 60);
     var blockStr = String(blockHrs).padStart(2, '0') + ':' + String(blockMins).padStart(2, '0');
+
+    var flightSecs = Number(data.times?.est_time_enroute) || 0;
+    var flightHrs = Math.floor(flightSecs / 3600);
+    var flightMinsOut = Math.floor((flightSecs % 3600) / 60);
+    var flightStr = flightSecs ? (String(flightHrs).padStart(2, '0') + ':' + String(flightMinsOut).padStart(2, '0')) : '';
 
     var ofpRoute = data.general?.route || '';
 
@@ -12945,6 +13335,15 @@ document.addEventListener('click', async function(e) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eventId: window.WF_EVENT_ID, number: wfNum, field: 'blockTime', value: blockStr })
     });
+
+    // Save flight time
+    if (flightStr) {
+      await fetch('/admin/api/schedule-row/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId: window.WF_EVENT_ID, number: wfNum, field: 'flightTime', value: flightStr })
+      });
+    }
 
     // Save route from SimBrief
     if (ofpRoute) {
@@ -13074,6 +13473,92 @@ document.addEventListener('click', async function(e) {
   .row-icon:hover { opacity: 1; }
   a.row-icon.simbrief-launch { color: #60a5fa; }
   button.row-icon.sb-fetch { color: #4ade80; font-size: 13px; }
+
+  /* ===== DATE PICKER ===== */
+  .date-picker-trigger {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; background: #0f172a; border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text); font-size: 12px; font-family: monospace;
+    cursor: pointer; transition: border-color .15s, background .15s;
+    min-width: 110px; justify-content: flex-start;
+  }
+  .date-picker-trigger:hover { border-color: var(--accent); background: #111c33; }
+  .date-picker-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .date-picker-card {
+    position: relative; z-index: 1;
+    width: 320px; padding: 16px;
+    background: #0b1220;
+    border: 1px solid rgba(56,189,248,0.25);
+    border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(56,189,248,0.08) inset;
+  }
+  .date-picker-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .dp-nav-btn {
+    width: 28px; height: 28px; border-radius: 6px;
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text); font-size: 16px; line-height: 1;
+    cursor: pointer; transition: all .15s;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .dp-nav-btn:hover { background: rgba(56,189,248,0.12); border-color: var(--accent); color: var(--accent); }
+  .dp-title-btn {
+    flex: 1; margin: 0 8px; padding: 6px 10px;
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    color: var(--text); font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: background .15s;
+  }
+  .dp-title-btn:hover { background: rgba(255,255,255,0.04); }
+
+  .date-picker-weekdays {
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px;
+    margin-bottom: 6px;
+    font-size: 10px; color: var(--muted); text-align: center;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .date-picker-weekdays span { padding: 4px 0; }
+
+  .date-picker-grid {
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px;
+  }
+  .dp-day {
+    height: 34px; border-radius: 6px;
+    background: transparent; border: 1px solid transparent;
+    color: var(--text); font-size: 13px;
+    cursor: pointer; transition: background .15s, border-color .15s, color .15s;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .dp-day:hover { background: rgba(56,189,248,0.15); border-color: rgba(56,189,248,0.4); }
+  .dp-day.dp-other-month { color: #475569; }
+  .dp-day.dp-today { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .dp-day.dp-selected {
+    background: linear-gradient(160deg, var(--accent2), #1d4ed8);
+    color: #fff; font-weight: 700; border-color: var(--accent);
+    box-shadow: 0 4px 12px rgba(37,99,235,0.35);
+  }
+  .dp-day.dp-selected:hover { background: linear-gradient(160deg, #3b82f6, #1e40af); }
+
+  .date-picker-actions {
+    display: flex; gap: 8px; margin-top: 14px;
+    padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06);
+  }
+  .dp-action-btn {
+    flex: 1; padding: 6px 10px; border-radius: 6px;
+    background: transparent; border: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; cursor: pointer;
+    transition: all .15s;
+  }
+  .dp-action-btn:hover { color: var(--text); border-color: var(--accent); background: rgba(56,189,248,0.08); }
+  .dp-action-btn.dp-close { color: var(--text); }
+
+  /* Style the companion time input to match */
+  #eventStartTimeInput::-webkit-calendar-picker-indicator {
+    filter: invert(0.7) sepia(1) saturate(5) hue-rotate(175deg);
+    cursor: pointer;
+  }
 </style>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -13747,7 +14232,7 @@ function parseNavLatLon(token) {
 app.post('/admin/api/schedule-row/update', requireAdmin, async (req, res) => {
   const { eventId, number, field, value } = req.body;
 
-  const allowed = ['number', 'from', 'to', 'dateUtc', 'depTimeUtc', 'arrTimeUtc', 'blockTime', 'atcRoute'];
+  const allowed = ['number', 'from', 'to', 'dateUtc', 'depTimeUtc', 'arrTimeUtc', 'blockTime', 'flightTime', 'atcRoute'];
   if (!allowed.includes(field)) {
     return res.status(400).json({ error: 'Invalid field' });
   }
@@ -13773,7 +14258,7 @@ app.post('/admin/api/schedule-row/update', requireAdmin, async (req, res) => {
 });
 
 app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
-  const { eventId, from, to, depFlow, flowType, atcRoute, blockTime } = req.body;
+  const { eventId, from, to, depFlow, flowType, atcRoute, blockTime, flightTime } = req.body;
 
   // Find next WF number
   const existing = await prisma.wfScheduleRow.findMany({
@@ -13784,12 +14269,31 @@ app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
 
   const lastOrder = existing.length ? existing[0].sortOrder : -1;
   const evt = wfEvents.find(e => e.id === eventId);
-  const yearPrefix = String(evt?.year || new Date().getFullYear()).slice(-2);
-  const sectorCount = existing.length
-    ? parseInt(existing[0].number.replace(/\D/g, '').slice(-2)) || existing.length
-    : 0;
-  const nextNum = 'WF' + yearPrefix + String(sectorCount + 1).padStart(2, '0');
+  const isWf = evt?.isWorldFlight !== false;
+  let nextNum;
+  if (isWf) {
+    const yearPrefix = String(evt?.year || new Date().getFullYear()).slice(-2);
+    const sectorCount = existing.length
+      ? parseInt(existing[0].number.replace(/\D/g, '').slice(-2)) || existing.length
+      : 0;
+    nextNum = 'WF' + yearPrefix + String(sectorCount + 1).padStart(2, '0');
+  } else {
+    const suffix = (evt?.flightSuffix || '').toUpperCase().trim() || 'FL';
+    let nextSeq;
+    if (existing.length) {
+      nextSeq = (parseInt(existing[0].number.replace(/\D/g, '')) || existing.length) + 1;
+    } else {
+      nextSeq = evt?.flightStartNumber ?? 1;
+    }
+    nextNum = suffix + String(nextSeq).padStart(3, '0');
+  }
 
+  const isFirstLeg = existing.length === 0;
+  let seedDate = '';
+  if (isFirstLeg && evt?.startDateUtc && /^\d{4}-\d{2}-\d{2}$/.test(evt.startDateUtc)) {
+    const parts = evt.startDateUtc.split('-');
+    seedDate = formatServerDate(new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))));
+  }
   const row = await prisma.wfScheduleRow.create({
     data: {
       eventId,
@@ -13797,10 +14301,11 @@ app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
       number: nextNum,
       from: (from || '').toUpperCase(),
       to: (to || '').toUpperCase(),
-      dateUtc: '',
-      depTimeUtc: '',
+      dateUtc: seedDate,
+      depTimeUtc: isFirstLeg ? (evt?.startTimeUtc || '') : '',
       arrTimeUtc: '',
       blockTime: (blockTime || '').trim(),
+      flightTime: (flightTime || '').trim(),
       atcRoute: (atcRoute || '').trim()
     }
   });
@@ -13849,6 +14354,88 @@ app.post('/admin/api/schedule-row/recalc', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/admin/api/wf-events/:id/flight-config', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const { isWorldFlight, flightSuffix, aircraftType, flightStartNumber, costIndex, startDateUtc, startTimeUtc } = req.body;
+  const data = {};
+  if (typeof isWorldFlight === 'boolean') data.isWorldFlight = isWorldFlight;
+  if (typeof flightSuffix === 'string') data.flightSuffix = flightSuffix.toUpperCase().trim().slice(0, 4);
+  if (typeof aircraftType === 'string' && ['B738', 'B744', 'B77W'].includes(aircraftType)) {
+    data.aircraftType = aircraftType;
+  }
+  if (flightStartNumber !== undefined) {
+    const n = Number(flightStartNumber);
+    if (Number.isFinite(n) && n >= 0 && n <= 99999) data.flightStartNumber = Math.floor(n);
+  }
+  if (costIndex !== undefined) {
+    const n = Number(costIndex);
+    if (Number.isFinite(n) && n >= 0 && n <= 999) data.costIndex = Math.floor(n);
+  }
+  if (typeof startDateUtc === 'string') {
+    const trimmed = startDateUtc.trim();
+    if (!trimmed || /^\d{4}-\d{2}-\d{2}$/.test(trimmed)) data.startDateUtc = trimmed;
+  }
+  if (typeof startTimeUtc === 'string') {
+    const trimmed = startTimeUtc.trim();
+    if (!trimmed || /^\d{2}:\d{2}$/.test(trimmed)) data.startTimeUtc = trimmed;
+  }
+  const { nextSectorAfter, cruiseAltitude } = req.body;
+  if (typeof nextSectorAfter === 'string' && ['BLOCK', 'FLIGHT'].includes(nextSectorAfter)) {
+    data.nextSectorAfter = nextSectorAfter;
+  }
+  if (cruiseAltitude !== undefined) {
+    const n = Number(cruiseAltitude);
+    if (Number.isFinite(n) && n >= 0 && n <= 600) data.cruiseAltitude = Math.floor(n);
+  }
+  const { cruiseMode } = req.body;
+  if (typeof cruiseMode === 'string' && ['CI', 'MACH', 'KIAS'].includes(cruiseMode)) {
+    data.cruiseMode = cruiseMode;
+  }
+  if (!Object.keys(data).length) return res.status(400).json({ error: 'No valid fields' });
+
+  try {
+    console.log('[FLIGHT-CONFIG] event', id, 'update', data);
+    await prisma.wfEvent.update({ where: { id }, data });
+    const verify = await prisma.wfEvent.findUnique({ where: { id } });
+    console.log('[FLIGHT-CONFIG] after update, DB has startDateUtc=', JSON.stringify(verify?.startDateUtc), 'startTimeUtc=', JSON.stringify(verify?.startTimeUtc));
+    const evt = wfEvents.find(e => e.id === id);
+    if (evt) Object.assign(evt, data);
+    console.log('[FLIGHT-CONFIG] in-memory cache now has startDateUtc=', JSON.stringify(evt?.startDateUtc));
+
+    // If start date/time changed and a first leg exists, sync it
+    if (data.startDateUtc !== undefined || data.startTimeUtc !== undefined) {
+      const firstLeg = await prisma.wfScheduleRow.findFirst({
+        where: { eventId: id },
+        orderBy: { sortOrder: 'asc' }
+      });
+      if (firstLeg) {
+        const updateData = {};
+        if (data.startDateUtc !== undefined) {
+          if (data.startDateUtc) {
+            const parts = data.startDateUtc.split('-');
+            const d = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+            updateData.dateUtc = formatServerDate(d);
+          } else {
+            updateData.dateUtc = '';
+          }
+        }
+        if (data.startTimeUtc !== undefined) updateData.depTimeUtc = data.startTimeUtc;
+        await prisma.wfScheduleRow.update({ where: { id: firstLeg.id }, data: updateData });
+      }
+    }
+
+    // Recalc if anything that affects times changed
+    if (data.startDateUtc !== undefined || data.startTimeUtc !== undefined || data.nextSectorAfter !== undefined) {
+      await recalcScheduleTimes(id);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[FLIGHT-CONFIG] save failed:', err);
+    res.status(500).json({ error: err.message || 'Save failed' });
+  }
+});
+
 app.post('/admin/api/wf-events/:id/turnaround', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
   const { turnaroundMins } = req.body;
@@ -13867,36 +14454,50 @@ app.post('/admin/api/wf-events/:id/turnaround', requireAdmin, async (req, res) =
 
 async function recalcScheduleTimes(eventId) {
   const evt = wfEvents.find(e => e.id === eventId);
-  const turnaround = evt?.turnaroundMins || 45;
+  const turnaround = evt?.turnaroundMins ?? 45;
 
   const rows = await prisma.wfScheduleRow.findMany({
     where: { eventId },
     orderBy: { sortOrder: 'asc' }
   });
 
-  if (!rows.length) return;
+  if (!rows.length) {
+    await loadScheduleFromDb(eventId);
+    return;
+  }
 
   // Parse first leg's departure
   const first = rows[0];
   const startDate = parseServerDate(first.dateUtc);
-  if (!startDate || !first.depTimeUtc) return;
+  if (!startDate || !first.depTimeUtc) {
+    await loadScheduleFromDb(eventId);
+    return;
+  }
 
   const depParts = first.depTimeUtc.split(':');
-  if (depParts.length < 2) return;
+  if (depParts.length < 2) {
+    await loadScheduleFromDb(eventId);
+    return;
+  }
 
   let currentTime = new Date(startDate);
   currentTime.setUTCHours(Number(depParts[0]), Number(depParts[1]), 0, 0);
 
+  const sectorMode = evt?.nextSectorAfter === 'FLIGHT' ? 'FLIGHT' : 'BLOCK';
+
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const blockParts = (r.blockTime || '').split(':');
-    const blockMins = blockParts.length >= 2
-      ? Number(blockParts[0]) * 60 + Number(blockParts[1])
-      : 0;
+    const parseHm = (s) => {
+      const p = (s || '').split(':');
+      return p.length >= 2 ? Number(p[0]) * 60 + Number(p[1]) : 0;
+    };
+    const blockMins = parseHm(r.blockTime);
+    const flightMins = parseHm(r.flightTime);
 
     const hasBlock = blockMins > 0;
     const depTime = new Date(currentTime);
-    const arrTime = hasBlock ? new Date(depTime.getTime() + blockMins * 60000) : null;
+    const arrMins = sectorMode === 'FLIGHT' ? (flightMins > 0 ? flightMins : blockMins) : blockMins;
+    const arrTime = arrMins > 0 ? new Date(depTime.getTime() + arrMins * 60000) : null;
 
     const depStr = String(depTime.getUTCHours()).padStart(2, '0') + ':' + String(depTime.getUTCMinutes()).padStart(2, '0');
     const arrStr = arrTime
@@ -13915,17 +14516,27 @@ async function recalcScheduleTimes(eventId) {
       data: updateData
     });
 
-    // Next leg departs after turnaround (only if we have an arrival time)
-    if (arrTime) {
-      currentTime = new Date(arrTime.getTime() + turnaround * 60000);
+    // Advance clock for next leg
+    if (sectorMode === 'FLIGHT') {
+      // Next dep = this dep + flight time (no turnaround). Fall back to block if flight time missing.
+      const gap = flightMins > 0 ? flightMins : blockMins;
+      if (gap > 0) {
+        currentTime = new Date(depTime.getTime() + gap * 60000);
+      } else {
+        break;
+      }
     } else {
-      // No block time — next leg can't be calculated, stop here
-      break;
+      // BLOCK mode: next dep = arrival + turnaround
+      if (arrTime) {
+        currentTime = new Date(arrTime.getTime() + turnaround * 60000);
+      } else {
+        break;
+      }
     }
   }
 
   await loadScheduleFromDb(eventId);
-  console.log(`[RECALC] Recalculated ${rows.length} legs for event ${eventId} (turnaround: ${turnaround}min)`);
+  console.log(`[RECALC] Recalculated ${rows.length} legs for event ${eventId} (turnaround: ${turnaround}min, mode: ${sectorMode})`);
 }
 
 function parseServerDate(str) {
@@ -14984,7 +15595,8 @@ app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
               if (info.status === 'running') {
                 progress.style.display = 'flex';
                 fill.style.width = info.progress + '%';
-                text.textContent = info.step || '';
+                text.textContent = (info.step || '') + (info.detail ? ' — ' + info.detail : '');
+                text.title = info.detail || '';
                 status.textContent = '';
               } else if (info.status === 'done') {
                 progress.style.display = 'flex';
@@ -15106,22 +15718,44 @@ app.post('/admin/api/controller-pack/generate', requireAdmin, express.json(), as
           cwd: path.resolve('.'),
           timeout: 600000 // 10 minute timeout per leg
         });
+        const legStart = Date.now();
         let output = '';
+        let stdoutBuf = '';
+        const flushLines = (chunk, isErr) => {
+          stdoutBuf += chunk;
+          let idx;
+          while ((idx = stdoutBuf.indexOf('\n')) !== -1) {
+            const line = stdoutBuf.slice(0, idx).replace(/\r$/, '');
+            stdoutBuf = stdoutBuf.slice(idx + 1);
+            if (line.trim()) {
+              const elapsed = ((Date.now() - legStart) / 1000).toFixed(1);
+              console.log(`[GEN ${legName} +${elapsed}s]${isErr ? '[err]' : ''} ${line}`);
+              // Expose the latest meaningful output line to the UI
+              if (!isErr && job.legs[legName] && job.legs[legName].status === 'running') {
+                job.legs[legName].detail = line.slice(0, 120);
+              }
+            }
+          }
+        };
         proc.stdout.on('data', d => {
-          output += d.toString();
+          const s = d.toString();
+          output += s;
+          flushLines(s, false);
           // Update progress based on generation stage
-          if (output.includes('Fetching') && output.includes('ground')) job.legs[legName] = { status: 'running', progress: 10, step: 'Fetching ground layouts...' };
-          if (output.includes('Pre-resolved')) job.legs[legName] = { status: 'running', progress: 25, step: 'Resolving route...' };
-          if (output.includes('Loading navdata')) job.legs[legName] = { status: 'running', progress: 40, step: 'Loading navdata...' };
-          if (output.includes('FIRs along actual')) job.legs[legName] = { status: 'running', progress: 55, step: 'Processing FIRs...' };
-          if (output.includes('coastline')) job.legs[legName] = { status: 'running', progress: 70, step: 'Coastline...' };
-          if (output.includes('Written') && output.includes('.sct')) job.legs[legName] = { status: 'running', progress: 80, step: 'Writing sector file...' };
-          if (output.includes('SIDs')) job.legs[legName] = { status: 'running', progress: 85, step: 'SID/STARs...' };
-          if (output.includes('TopSky radars')) job.legs[legName] = { status: 'running', progress: 90, step: 'TopSky...' };
-          if (output.includes('Generated')) job.legs[legName] = { status: 'running', progress: 95, step: 'Finalizing...' };
+          if (output.includes('Fetching') && output.includes('ground')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 10, step: 'Fetching ground layouts...' };
+          if (output.includes('Pre-resolved')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 25, step: 'Resolving route...' };
+          if (output.includes('Loading navdata')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 40, step: 'Loading navdata...' };
+          if (output.includes('FIRs along actual')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 55, step: 'Processing FIRs...' };
+          if (output.includes('coastline')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 70, step: 'Coastline...' };
+          if (output.includes('Written') && output.includes('.sct')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 80, step: 'Writing sector file...' };
+          if (output.includes('SIDs')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 85, step: 'SID/STARs...' };
+          if (output.includes('TopSky radars')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 90, step: 'TopSky...' };
+          if (output.includes('Generated')) job.legs[legName] = { ...job.legs[legName], status: 'running', progress: 95, step: 'Finalizing...' };
         });
-        proc.stderr.on('data', d => { output += d.toString(); });
+        proc.stderr.on('data', d => { const s = d.toString(); output += s; flushLines(s, true); });
         proc.on('close', code => {
+          const secs = ((Date.now() - legStart) / 1000).toFixed(1);
+          console.log(`[GEN ${legName}] finished in ${secs}s (exit ${code})`);
           if (code === 0) resolve(output);
           else reject(new Error(output.split('\n').filter(l => l.trim()).pop() || 'Generation failed'));
         });

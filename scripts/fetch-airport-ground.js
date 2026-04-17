@@ -6,7 +6,19 @@ import { decimalToDMS, coordPair } from './lib/geo.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const ICAO = process.argv[2] || 'EGLL';
-const OVERPASS_URL = process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
+
+// Mirror pool — rotated on 504/429/timeout. Override with OVERPASS_URL (single endpoint).
+const OVERPASS_ENDPOINTS = process.env.OVERPASS_URL
+  ? [process.env.OVERPASS_URL]
+  : [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.private.coffee/api/interpreter',
+      'https://overpass.openstreetmap.fr/api/interpreter',
+    ];
+
+const USER_AGENT = 'WorldFlight-Planning/1.0 (+https://planning.worldflight.center)';
+const FETCH_TIMEOUT_MS = 60000;
 
 // EuroScope colour definitions (RGB as decimal)
 const COLOURS = {
@@ -21,36 +33,96 @@ const COLOURS = {
   standlabel: '16777215' // white
 };
 
-const MAX_RETRIES = 10;
-const RETRY_DELAY_MS = 5000;
+const MAX_RETRIES = 6;
+const INITIAL_BACKOFF_MS = 2000;
+const MAX_BACKOFF_MS = 60000;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Check an endpoint's /api/status — if it reports a waiting slot, sleep until it frees up.
+// Best-effort: any failure here is ignored so we still try the main query.
+async function waitForSlot(endpoint) {
+  const statusUrl = endpoint.replace(/\/interpreter\/?$/, '/status');
+  if (statusUrl === endpoint) return; // non-standard endpoint, skip
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(statusUrl, { signal: ctrl.signal, headers: { 'User-Agent': USER_AGENT } });
+    clearTimeout(timer);
+    if (!res.ok) return;
+    const txt = await res.text();
+    // Slot free signals: "N slots available now."
+    if (/slots? available now/i.test(txt)) return;
+    // Busy signals: "Slot available after: ... in <N> seconds."
+    const m = txt.match(/in (\d+) seconds/i);
+    if (m) {
+      const waitSecs = Math.min(Number(m[1]) + 1, 30);
+      if (waitSecs > 0) {
+        console.log(`  Overpass status: ${endpoint} busy, waiting ${waitSecs}s for a slot...`);
+        await sleep(waitSecs * 1000);
+      }
+    }
+  } catch { /* best-effort */ }
+}
 
 async function fetchOverpass(query) {
+  let backoff = INITIAL_BACKOFF_MS;
+  const errors = [];
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    console.log(`  Querying Overpass API (attempt ${attempt}/${MAX_RETRIES})...`);
+    const endpoint = OVERPASS_ENDPOINTS[(attempt - 1) % OVERPASS_ENDPOINTS.length];
+    console.log(`  [attempt ${attempt}/${MAX_RETRIES}] ${endpoint}`);
+    await waitForSlot(endpoint);
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+    const t0 = Date.now();
     try {
-      const res = await fetch(OVERPASS_URL, {
+      const res = await fetch(endpoint, {
         method: 'POST',
         body: 'data=' + encodeURIComponent(query),
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': USER_AGENT,
+        },
+        signal: ctrl.signal,
       });
-      if (res.ok) return res.json();
-      if (res.status === 429 || res.status === 504 || res.status === 503) {
-        console.log(`  Got ${res.status}, retrying in ${RETRY_DELAY_MS / 1000}s...`);
-        if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      clearTimeout(timer);
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      if (res.ok) {
+        console.log(`    OK in ${secs}s`);
+        return res.json();
+      }
+      const body = await res.text().catch(() => '');
+      const snippet = body.slice(0, 160).replace(/\s+/g, ' ');
+      errors.push(`HTTP ${res.status} from ${endpoint}: ${snippet}`);
+      if ([429, 502, 503, 504].includes(res.status)) {
+        console.log(`    ${res.status} after ${secs}s — backoff ${Math.round(backoff / 1000)}s, will rotate mirror.`);
+        if (attempt < MAX_RETRIES) await sleep(backoff);
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
         continue;
       }
-      throw new Error(`Overpass API error: ${res.status}`);
+      // Other HTTP errors: fail fast (likely query syntax or endpoint-specific)
+      throw new Error(`Overpass HTTP ${res.status}: ${snippet}`);
     } catch (err) {
-      if (err.message.includes('Overpass API error')) throw err;
-      console.log(`  Network error: ${err.message}, retrying in ${RETRY_DELAY_MS / 1000}s...`);
-      if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      clearTimeout(timer);
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      const isAbort = err.name === 'AbortError';
+      const label = isAbort ? `client timeout after ${secs}s` : err.message;
+      errors.push(`${endpoint}: ${label}`);
+      console.log(`    ${label} — backoff ${Math.round(backoff / 1000)}s, will rotate mirror.`);
+      if (attempt < MAX_RETRIES) {
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+        continue;
+      }
     }
   }
-  throw new Error(`Overpass API failed after ${MAX_RETRIES} attempts`);
+  throw new Error(`Overpass failed across ${OVERPASS_ENDPOINTS.length} mirror(s) after ${MAX_RETRIES} attempts. Last errors:\n  - ${errors.slice(-3).join('\n  - ')}`);
 }
 
 async function checkIcaoExistsInOSM(icao) {
-  const query = `[out:json][timeout:30];(way[icao="${icao}"];relation[icao="${icao}"];node[icao="${icao}"];);out tags;`;
+  // Lightweight probe — short server-side budget so an unreachable airport fails fast.
+  const query = `[out:json][timeout:15];(way[icao="${icao}"];relation[icao="${icao}"];node[icao="${icao}"];);out ids;`;
   const data = await fetchOverpass(query);
   return data.elements && data.elements.length > 0;
 }
@@ -85,9 +157,11 @@ async function main() {
       process.exit(2); // Exit code 2 = ICAO not in OSM (skip, not an error)
     }
 
-    // Query OSM for airport features
+    // Query OSM for airport features — 60s server-side budget is enough for 99% of airports.
+    // If a specific airport exceeds this, the client retry/rotation will eventually land on a
+    // faster mirror or a less-loaded slot.
     const query = `
-[out:json][timeout:120];
+[out:json][timeout:60];
 area[icao="${ICAO}"]->.airport;
 (
   way(area.airport)[aeroway=runway];
