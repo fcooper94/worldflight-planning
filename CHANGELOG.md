@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-04-19 (later)
+
+### Site password gate — double-prompt fix
+
+- **Removed the gate from `/auth/callback`.** The VATSIM callback is only
+  ever reached via a redirect from `/auth/login` (which is still gated),
+  so re-gating the callback was redundant and flaky across the OAuth
+  round-trip in some proxy/session setups.
+- **`/auth/login` no longer captures gate/auth pages as `returnTo`.** When
+  a visitor entered the password, got redirected to `/auth/login`, and the
+  referer was `/site-password`, the login handler stored `/site-password`
+  as the post-login return destination — so the VATSIM callback's final
+  redirect would bounce them straight back to the password prompt. Skip
+  list now also excludes `/auth/login`, `/auth/callback`, `/site-password`,
+  and `/dev-login`; real page referers still work.
+
 ## 2026-04-19
 
 ### Site password gate

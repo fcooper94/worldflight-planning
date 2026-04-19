@@ -5361,14 +5361,20 @@ app.get('/auth/login', requireSiteGate, (req, res, next) => {
     const referer = req.headers.referer || '';
     try {
       const url = new URL(referer);
-      if (url.pathname && url.pathname !== '/' && url.pathname !== '/auth/login') {
+      const skip = new Set(['/', '/auth/login', '/auth/callback', '/site-password', '/dev-login']);
+      if (url.pathname && !skip.has(url.pathname)) {
         req.session.returnTo = url.pathname;
       }
     } catch (e) {}
   }
   next();
 }, vatsimLogin);
-app.get('/auth/callback', requireSiteGate, vatsimCallback);
+// Note: /auth/callback is deliberately NOT gated. It's only reached via a
+// VATSIM redirect that follows /auth/login (which IS gated), so the visitor
+// has already satisfied the gate to start the flow. Re-gating here causes a
+// second password prompt if the session state gets shuffled by the OAuth
+// round-trip (which it does across some proxy configurations).
+app.get('/auth/callback', vatsimCallback);
 /* ===== SECTOR INFO PAGE ===== */
 app.get('/sector/:wf/:from/:to', (req, res) => {
   const user = req.session?.user?.data || null;
