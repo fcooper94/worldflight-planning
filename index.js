@@ -947,13 +947,24 @@ const sessionMiddleware = session({
 app.use(sessionMiddleware);
 
 /* ===== SITE PASSWORD GATE =====
-   Required before ANY other auth (VATSIM, dev-login, etc). Protects the whole
-   site with a shared secret during early rollout. Set SITE_PASSWORD env var
-   to enable; when unset the gate is disabled (open access). */
+   Required before ANY other auth (VATSIM, dev-login, etc). Password comes
+   from SITE_PASSWORD env var (never baked into code). Enabled/disabled state
+   is stored in SiteSetting 'site-gate-enabled' so admins can toggle at runtime
+   via the Page Visibility page. The gate auto-disables if no password is set
+   in env (can't gate with an empty secret). */
 const SITE_PASSWORD = (process.env.SITE_PASSWORD || '').trim();
-const SITE_GATE_ENABLED = SITE_PASSWORD.length > 0;
-if (SITE_GATE_ENABLED) console.log('[SECURITY] Site password gate ENABLED');
-else console.log('[SECURITY] Site password gate DISABLED (SITE_PASSWORD not set)');
+const siteGate = { enabled: false };
+async function loadSiteGate() {
+  if (!SITE_PASSWORD) {
+    siteGate.enabled = false;
+    console.log('[SECURITY] Site password gate DISABLED (SITE_PASSWORD not set in env)');
+    return;
+  }
+  const row = await prisma.siteSetting.findUnique({ where: { key: 'site-gate-enabled' } });
+  // Default to enabled if SITE_PASSWORD is set and there's no stored preference yet
+  siteGate.enabled = row ? row.value === 'true' : true;
+  console.log('[SECURITY] Site password gate', siteGate.enabled ? 'ENABLED' : 'DISABLED', '(toggle via Admin → Page Visibility)');
+}
 const SITE_GATE_ALLOW = /\.(css|js|png|jpg|jpeg|gif|svg|geojson|ico|webp|woff2?|ttf|otf|map)$/i;
 
 app.get('/site-password', (req, res) => {
@@ -964,25 +975,42 @@ app.get('/site-password', (req, res) => {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   html,body{margin:0;padding:0;height:100%;background:#020617;color:#e2e8f0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
-  .wrap{display:flex;align-items:center;justify-content:center;min-height:100%;padding:24px;}
-  .card{background:#0b1220;border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:28px;width:100%;max-width:360px;box-shadow:0 20px 60px rgba(0,0,0,0.5);}
-  h1{margin:0 0 6px;font-size:18px;color:#93c5fd;font-weight:600;}
+  .backdrop{position:fixed;inset:0;background:rgba(2,6,23,0.85);display:flex;align-items:center;justify-content:center;padding:24px;cursor:pointer;}
+  .card{position:relative;background:#0b1220;border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:28px;width:100%;max-width:360px;box-shadow:0 20px 60px rgba(0,0,0,0.5);cursor:auto;}
+  .close-x{position:absolute;top:10px;right:10px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:6px;color:#94a3b8;font-size:18px;line-height:1;cursor:pointer;padding:0;}
+  .close-x:hover{background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.12);color:#e2e8f0;}
+  h1{margin:0 0 6px;font-size:18px;color:#93c5fd;font-weight:600;padding-right:28px;}
   p{margin:0 0 18px;font-size:13px;color:#94a3b8;line-height:1.5;}
   label{display:block;font-size:11px;color:#94a3b8;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;}
-  input{width:100%;box-sizing:border-box;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px;font-family:inherit;}
-  input:focus{outline:none;border-color:#38bdf8;}
-  button{margin-top:16px;width:100%;padding:10px;background:linear-gradient(160deg,#2563eb,#1d4ed8);color:#fff;border:0;border-radius:6px;font-weight:700;font-size:14px;cursor:pointer;}
-  button:hover{filter:brightness(1.08);}
+  input[type=password]{width:100%;box-sizing:border-box;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px;font-family:inherit;}
+  input[type=password]:focus{outline:none;border-color:#38bdf8;}
+  button.submit{margin-top:16px;width:100%;padding:10px;background:linear-gradient(160deg,#2563eb,#1d4ed8);color:#fff;border:0;border-radius:6px;font-weight:700;font-size:14px;cursor:pointer;}
+  button.submit:hover{filter:brightness(1.08);}
+  .cancel-link{display:block;text-align:center;margin-top:10px;font-size:12px;color:#94a3b8;text-decoration:none;padding:6px;border-radius:4px;}
+  .cancel-link:hover{color:#e2e8f0;background:rgba(255,255,255,0.04);}
   .err{margin-top:12px;font-size:12px;color:#f87171;}
-</style></head><body><div class="wrap"><form class="card" method="post" action="/site-password">
-<h1>Restricted Access</h1>
-<p>This site is currently password-protected. Enter the access password to continue.</p>
-<label for="sp">Password</label>
-<input id="sp" type="password" name="password" autocomplete="current-password" autofocus required />
-<input type="hidden" name="next" value="${nxt.replace(/"/g, '&quot;')}" />
-<button type="submit">Unlock</button>
-${err ? '<div class="err">Incorrect password.</div>' : ''}
-</form></div></body></html>`);
+</style></head><body>
+<div class="backdrop" id="backdrop">
+  <form class="card" method="post" action="/site-password">
+    <button type="button" class="close-x" id="closeBtn" aria-label="Close">&times;</button>
+    <h1>Restricted Access</h1>
+    <p>This site is currently password-protected. Enter the access password to continue.</p>
+    <label for="sp">Password</label>
+    <input id="sp" type="password" name="password" autocomplete="current-password" autofocus required />
+    <input type="hidden" name="next" value="${nxt.replace(/"/g, '&quot;')}" />
+    <button type="submit" class="submit">Unlock</button>
+    <a href="/" class="cancel-link" id="cancelLink">Cancel and go back</a>
+    ${err ? '<div class="err">Incorrect password.</div>' : ''}
+  </form>
+</div>
+<script>
+  function dismiss(e){ e.preventDefault(); if(history.length > 1) history.back(); else location.href='/'; }
+  document.getElementById('closeBtn').addEventListener('click', dismiss);
+  document.getElementById('cancelLink').addEventListener('click', dismiss);
+  document.getElementById('backdrop').addEventListener('click', function(e){ if(e.target === this) dismiss(e); });
+  document.addEventListener('keydown', function(e){ if(e.key === 'Escape') dismiss(e); });
+</script>
+</body></html>`);
 });
 
 app.post('/site-password', express.urlencoded({ extended: false }), (req, res) => {
@@ -997,16 +1025,16 @@ app.post('/site-password', express.urlencoded({ extended: false }), (req, res) =
   }
 });
 
-app.use((req, res, next) => {
-  if (!SITE_GATE_ENABLED) return next();
+// Login-path-only gate: intercept the auth entry points and force the site
+// password first. Public pages (dashboard, map, etc) stay open; the gate only
+// fires the moment someone tries to start a login flow.
+function requireSiteGate(req, res, next) {
+  if (!siteGate.enabled || !SITE_PASSWORD) return next();
   if (req.session?.siteAccess) return next();
-  if (req.path === '/site-password') return next();
-  if (req.path === '/favicon.ico') return next();
-  if (SITE_GATE_ALLOW.test(req.path)) return next();
-  // Non-GET requests that aren't allow-listed get a 401 (avoids breaking APIs with a HTML redirect)
-  if (req.method !== 'GET') return res.status(401).json({ error: 'Site locked' });
   return res.redirect('/site-password?next=' + encodeURIComponent(req.originalUrl));
-});
+}
+// Applied explicitly to each login route below — see /auth/login, /auth/callback,
+// and /dev-login handlers.
 
 
 function getNextAvailableTobts(from, to, limit = 5) {
@@ -1765,6 +1793,7 @@ async function bootstrap() {
   setBootstrapStatus(3, 'Loading site settings');
   await loadPageVisibility();
   await loadSiteBanner();
+  await loadSiteGate();
   await loadMasterUsers();
 
   setBootstrapStatus(4, 'Loading event schedule');
@@ -5297,7 +5326,7 @@ app.get('/previous-destinations', (req, res) => {
 
 // ===== DEV LOGIN (only when DEV_MODE=true) =====
 if (process.env.DEV_MODE === 'true') {
-  app.get('/dev-login', (req, res) => {
+  app.get('/dev-login', requireSiteGate, (req, res) => {
     req.session.user = {
       data: {
         cid: 1303570,
@@ -5322,7 +5351,7 @@ if (process.env.DEV_MODE === 'true') {
   console.log('[DEV] Dev login available at /dev-login');
 }
 
-app.get('/auth/login', (req, res, next) => {
+app.get('/auth/login', requireSiteGate, (req, res, next) => {
   // In dev mode, skip VATSIM and use dev login
   if (process.env.DEV_MODE === 'true') {
     return res.redirect('/dev-login');
@@ -5339,7 +5368,7 @@ app.get('/auth/login', (req, res, next) => {
   }
   next();
 }, vatsimLogin);
-app.get('/auth/callback', vatsimCallback);
+app.get('/auth/callback', requireSiteGate, vatsimCallback);
 /* ===== SECTOR INFO PAGE ===== */
 app.get('/sector/:wf/:from/:to', (req, res) => {
   const user = req.session?.user?.data || null;
@@ -15191,7 +15220,37 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
       </div>`;
   }).join('');
 
+  const siteGatePasswordSet = !!SITE_PASSWORD;
   const content = `
+    <section class="card card-full">
+      <h2>Site Password</h2>
+      <p class="settings-subtitle">
+        When enabled, visitors must enter the shared access password before reaching the login page or any content.
+        The password itself is read from the <code>SITE_PASSWORD</code> environment variable and is never stored in the database.
+      </p>
+
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <span class="settings-row-icon">🔒</span>
+          <div>
+            <div class="settings-row-label">Password Gate</div>
+            <div class="settings-row-desc">${siteGatePasswordSet
+              ? 'Require the site password before any page or login path is accessible.'
+              : '<span style="color:#f87171;">SITE_PASSWORD env var is not set — the gate cannot be enabled. Set it in Railway then restart.</span>'}</div>
+          </div>
+        </div>
+        <div class="settings-row-controls">
+          <span class="vis-pill ${siteGate.enabled ? 'vis-on' : 'vis-off'}" id="siteGatePill">
+            ${siteGate.enabled ? 'Enabled' : 'Disabled'}
+          </span>
+          <label class="toggle-switch" ${siteGatePasswordSet ? '' : 'style="opacity:0.4;pointer-events:none;"'}>
+            <input type="checkbox" id="siteGateToggle" ${siteGate.enabled ? 'checked' : ''} ${siteGatePasswordSet ? '' : 'disabled'} />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+    </section>
+
     <section class="card card-full">
       <h2>Site Banner</h2>
       <p class="settings-subtitle">
@@ -15369,6 +15428,28 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         });
       });
 
+      // Site password gate toggle
+      var siteGateToggle = document.getElementById('siteGateToggle');
+      if (siteGateToggle) {
+        siteGateToggle.addEventListener('change', async function() {
+          var enabled = this.checked;
+          var pill = document.getElementById('siteGatePill');
+          var res = await fetch('/api/admin/site-gate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabled })
+          });
+          if (res.ok) {
+            pill.textContent = enabled ? 'Enabled' : 'Disabled';
+            pill.className = 'vis-pill ' + (enabled ? 'vis-on' : 'vis-off');
+          } else {
+            this.checked = !enabled;
+            var err = await res.json().catch(function() { return {}; });
+            alert(err.error || 'Failed to update site gate');
+          }
+        });
+      }
+
       // Banner toggle
       document.getElementById('bannerToggle').addEventListener('change', async function() {
         const enabled = this.checked;
@@ -15406,6 +15487,24 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
   `;
 
   res.send(renderLayout({ title: 'Page Visibility', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/api/admin/site-gate', requireAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'Invalid value' });
+  }
+  if (enabled && !SITE_PASSWORD) {
+    return res.status(400).json({ error: 'SITE_PASSWORD env var is not set; gate cannot be enabled.' });
+  }
+  await prisma.siteSetting.upsert({
+    where: { key: 'site-gate-enabled' },
+    update: { value: String(enabled) },
+    create: { key: 'site-gate-enabled', value: String(enabled) }
+  });
+  siteGate.enabled = enabled;
+  console.log('[SECURITY] Site password gate', enabled ? 'ENABLED' : 'DISABLED', 'via admin toggle');
+  res.json({ success: true });
 });
 
 app.post('/api/admin/banner', requireAdmin, async (req, res) => {
