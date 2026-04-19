@@ -946,6 +946,68 @@ const sessionMiddleware = session({
 
 app.use(sessionMiddleware);
 
+/* ===== SITE PASSWORD GATE =====
+   Required before ANY other auth (VATSIM, dev-login, etc). Protects the whole
+   site with a shared secret during early rollout. Set SITE_PASSWORD env var
+   to enable; when unset the gate is disabled (open access). */
+const SITE_PASSWORD = (process.env.SITE_PASSWORD || '').trim();
+const SITE_GATE_ENABLED = SITE_PASSWORD.length > 0;
+if (SITE_GATE_ENABLED) console.log('[SECURITY] Site password gate ENABLED');
+else console.log('[SECURITY] Site password gate DISABLED (SITE_PASSWORD not set)');
+const SITE_GATE_ALLOW = /\.(css|js|png|jpg|jpeg|gif|svg|geojson|ico|webp|woff2?|ttf|otf|map)$/i;
+
+app.get('/site-password', (req, res) => {
+  const nxt = typeof req.query.next === 'string' ? req.query.next : '/';
+  const err = req.query.err === '1';
+  res.status(err ? 401 : 200).send(`<!doctype html><html><head>
+<meta charset="utf-8"><title>WorldFlight Planning — Restricted</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#020617;color:#e2e8f0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  .wrap{display:flex;align-items:center;justify-content:center;min-height:100%;padding:24px;}
+  .card{background:#0b1220;border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:28px;width:100%;max-width:360px;box-shadow:0 20px 60px rgba(0,0,0,0.5);}
+  h1{margin:0 0 6px;font-size:18px;color:#93c5fd;font-weight:600;}
+  p{margin:0 0 18px;font-size:13px;color:#94a3b8;line-height:1.5;}
+  label{display:block;font-size:11px;color:#94a3b8;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;}
+  input{width:100%;box-sizing:border-box;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px;font-family:inherit;}
+  input:focus{outline:none;border-color:#38bdf8;}
+  button{margin-top:16px;width:100%;padding:10px;background:linear-gradient(160deg,#2563eb,#1d4ed8);color:#fff;border:0;border-radius:6px;font-weight:700;font-size:14px;cursor:pointer;}
+  button:hover{filter:brightness(1.08);}
+  .err{margin-top:12px;font-size:12px;color:#f87171;}
+</style></head><body><div class="wrap"><form class="card" method="post" action="/site-password">
+<h1>Restricted Access</h1>
+<p>This site is currently password-protected. Enter the access password to continue.</p>
+<label for="sp">Password</label>
+<input id="sp" type="password" name="password" autocomplete="current-password" autofocus required />
+<input type="hidden" name="next" value="${nxt.replace(/"/g, '&quot;')}" />
+<button type="submit">Unlock</button>
+${err ? '<div class="err">Incorrect password.</div>' : ''}
+</form></div></body></html>`);
+});
+
+app.post('/site-password', express.urlencoded({ extended: false }), (req, res) => {
+  const pw = (req.body?.password || '').toString();
+  const nxt = (req.body?.next || '/').toString();
+  const safeNext = nxt.startsWith('/') && !nxt.startsWith('//') ? nxt : '/';
+  if (pw === SITE_PASSWORD) {
+    req.session.siteAccess = true;
+    req.session.save(() => res.redirect(safeNext));
+  } else {
+    res.redirect('/site-password?err=1&next=' + encodeURIComponent(safeNext));
+  }
+});
+
+app.use((req, res, next) => {
+  if (!SITE_GATE_ENABLED) return next();
+  if (req.session?.siteAccess) return next();
+  if (req.path === '/site-password') return next();
+  if (req.path === '/favicon.ico') return next();
+  if (SITE_GATE_ALLOW.test(req.path)) return next();
+  // Non-GET requests that aren't allow-listed get a 401 (avoids breaking APIs with a HTML redirect)
+  if (req.method !== 'GET') return res.status(401).json({ error: 'Site locked' });
+  return res.redirect('/site-password?next=' + encodeURIComponent(req.originalUrl));
+});
+
 
 function getNextAvailableTobts(from, to, limit = 5) {
   return Object.entries(allTobtSlots)
