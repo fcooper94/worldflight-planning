@@ -3825,6 +3825,200 @@ app.get('/view-suggestions', (req, res) => {
   res.redirect(301, '/suggest-airport');
 });
 
+/* ===== PUBLIC POLICY PAGES ===== */
+function renderPolicyPage(req, res, opts) {
+  const user = req.session?.user?.data || null;
+  const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
+  const content = `
+    <section class="card card-full" style="max-width:860px;margin:0 auto;">
+      <h2 style="margin-top:0;color:var(--accent);">${opts.title}</h2>
+      <p style="color:var(--muted);font-size:12px;margin-bottom:24px;">Last updated: ${opts.updated}</p>
+      <div class="policy-body" style="line-height:1.7;font-size:14px;color:var(--text);">
+        ${opts.body}
+      </div>
+    </section>
+    <style>
+      .policy-body h3 { color:#93c5fd; margin:24px 0 8px; font-size:16px; }
+      .policy-body h4 { color:var(--text); margin:16px 0 6px; font-size:14px; }
+      .policy-body p  { margin:0 0 12px; }
+      .policy-body ul { margin:0 0 12px 20px; padding:0; }
+      .policy-body li { margin-bottom:4px; }
+      .policy-body a  { color:var(--accent); }
+      .policy-body code { background:rgba(255,255,255,0.05); padding:1px 6px; border-radius:4px; font-size:13px; }
+    </style>
+  `;
+  res.send(renderLayout({ title: opts.title, user, isAdmin, content, layoutClass: 'dashboard-full' }));
+}
+
+app.get('/privacy', (req, res) => {
+  renderPolicyPage(req, res, {
+    title: 'Privacy Policy',
+    updated: '2026-04-20',
+    body: `
+      <p>This privacy policy explains what personal data the WorldFlight Planning
+      portal (<code>planning.worldflight.center</code>) collects, how it is used,
+      and the choices available to you. The service is operated by the WorldFlight
+      volunteer team and is intended for the global VATSIM community participating
+      in the annual WorldFlight event.</p>
+
+      <h3>What we collect</h3>
+      <ul>
+        <li><strong>VATSIM account data</strong> (via OAuth): VATSIM CID, full name,
+        email address, rating, and division. Returned to us by VATSIM when you
+        click <em>Login with VATSIM</em>.</li>
+        <li><strong>Session data</strong>: a signed session cookie identifying your
+        login, your callsign (if supplied), and a short-lived OAuth
+        verification value.</li>
+        <li><strong>Submissions you make</strong>: airport suggestions, slot bookings,
+        documentation uploads, mailing-list sign-ups, and anything else you
+        voluntarily enter on the site.</li>
+        <li><strong>Operational logs</strong>: request timestamps, IP addresses, and
+        error details, retained only long enough to diagnose issues.</li>
+      </ul>
+
+      <h3>How we use it</h3>
+      <ul>
+        <li>To authenticate you and display your name/CID on bookings and
+        suggestions.</li>
+        <li>To run the event: allocate slots, publish schedules, and coordinate
+        with divisions and vACCs.</li>
+        <li>To send you the emails you explicitly opt in to (e.g. the WorldFlight
+        mailing list or route-notification emails).</li>
+        <li>To prevent abuse and comply with VATSIM Code of Conduct.</li>
+      </ul>
+
+      <h3>How we share it</h3>
+      <p>Submissions you make may be visible to other authenticated users (e.g.
+      your CID and name appear next to your booking or suggestion). Administrative
+      data is visible only to the WorldFlight admin team. We do not sell data,
+      run third-party tracking, or share personal data outside the VATSIM
+      community.</p>
+
+      <h3>Third-party services we rely on</h3>
+      <ul>
+        <li><strong>VATSIM Connect</strong> — login and profile lookup.</li>
+        <li><strong>SimBrief</strong> — optional flight-plan generation at your
+        explicit request.</li>
+        <li><strong>OpenStreetMap / Overpass</strong> — airport ground-layout data
+        used to generate sector files.</li>
+      </ul>
+
+      <h3>Retention</h3>
+      <p>Account data is kept for as long as you remain active in the WorldFlight
+      community. Event-specific data (slot bookings, suggestions, generated
+      sector files) is kept across successive events to inform future planning,
+      but is aggregated/anonymised where possible. Operational logs are rotated
+      regularly.</p>
+
+      <h3>Your rights</h3>
+      <p>You can request a copy of your personal data, correction of inaccuracies,
+      or deletion of your account. Email <a href="mailto:contact@worldflight.center">contact@worldflight.center</a>
+      and we will action reasonable requests within a reasonable time. Deleting
+      your account removes your personal details; aggregate/anonymous event
+      records may be retained.</p>
+
+      <h3>Cookies</h3>
+      <p>We set a single session cookie (<code>worldflight.sid</code>) used solely
+      to keep you logged in. It is <em>httpOnly</em>, <em>SameSite=Lax</em>, and
+      expires when you close your browser. There are no analytics, advertising,
+      or tracking cookies on the site.</p>
+
+      <h3>Contact</h3>
+      <p>For questions or requests about this policy, email
+      <a href="mailto:contact@worldflight.center">contact@worldflight.center</a>.</p>
+    `
+  });
+});
+
+app.get('/data-handling', (req, res) => {
+  renderPolicyPage(req, res, {
+    title: 'Data Handling',
+    updated: '2026-04-20',
+    body: `
+      <p>This page describes, in plain terms, how WorldFlight Planning stores,
+      protects, and processes the data submitted to the site. It sits alongside
+      our <a href="/privacy">Privacy Policy</a> and goes into more technical
+      detail about where your data lives and who touches it.</p>
+
+      <h3>Where data is stored</h3>
+      <ul>
+        <li><strong>Primary database</strong>: a managed PostgreSQL instance hosted
+        on Railway (EU/US region depending on your deployment), accessible only
+        to the application process and authorised operators.</li>
+        <li><strong>Application server</strong>: Node.js process running on
+        Railway with restricted network access. No raw database access is
+        exposed externally.</li>
+        <li><strong>Static caches</strong>: airport / route / FIR data is cached
+        on the server filesystem for performance; contains no personal data.</li>
+      </ul>
+
+      <h3>Who can access it</h3>
+      <ul>
+        <li><strong>You</strong>: any data tied to your CID is visible to you when
+        logged in.</li>
+        <li><strong>WorldFlight administrators</strong>: a small number of trusted
+        volunteers, listed in the WorldFlight organisational chart, with
+        accounts tied to their VATSIM CID.</li>
+        <li><strong>No one else</strong>: third parties do not have production
+        database access. Infrastructure providers (e.g. Railway) have the same
+        operational access they offer any customer and are bound by their own
+        data-processing agreements.</li>
+      </ul>
+
+      <h3>Data we process when you use the site</h3>
+      <h4>Login</h4>
+      <p>When you log in with VATSIM, your browser is redirected to VATSIM
+      Connect, you approve the application, and VATSIM returns a short-lived
+      authorisation code. We exchange that code for a token, fetch your public
+      VATSIM profile, and store it in your session. We do not retain the
+      underlying OAuth token beyond what's needed to complete login.</p>
+
+      <h4>Suggestions & bookings</h4>
+      <p>When you submit an airport suggestion or slot booking, your CID, name,
+      role, and reason are recorded alongside your entry. Admins use this to
+      organise the event. You can request removal of your entries at any time.</p>
+
+      <h4>SimBrief integration</h4>
+      <p>When you click <em>Plan with SimBrief</em>, your browser opens a
+      SimBrief dispatcher URL pre-populated with route details. No credentials
+      pass through our server; we never see your SimBrief password. Fetching a
+      generated plan only happens at your explicit request and uses the Pilot ID
+      you've supplied to the browser.</p>
+
+      <h4>Email (optional)</h4>
+      <p>We only send email when you opt in — for example, by subscribing to the
+      mailing list or enabling route notifications on a suggestion. Emails are
+      delivered via Gmail SMTP on behalf of <code>contact@worldflight.center</code>.
+      You can unsubscribe at any time.</p>
+
+      <h3>Security measures</h3>
+      <ul>
+        <li>All web traffic is served over HTTPS (terminated by Railway).</li>
+        <li>Sessions are signed with a secret known only to the server.</li>
+        <li>Passwords are never stored — authentication is delegated to VATSIM.</li>
+        <li>Database connections are restricted to the application host.</li>
+        <li>Admin-only endpoints check the requester's CID against a whitelist.</li>
+      </ul>
+
+      <h3>Data exports and deletion</h3>
+      <p>Email <a href="mailto:contact@worldflight.center">contact@worldflight.center</a>
+      from the address registered with your VATSIM account (or include your CID
+      so we can verify) to request an export of your data or deletion of your
+      account. We aim to respond within 14 days.</p>
+
+      <h3>Incidents</h3>
+      <p>In the unlikely event of a security incident affecting your personal
+      data, we will notify affected users and the VATSIM community as soon as
+      reasonably practical and take steps to contain, investigate, and remediate
+      the incident.</p>
+
+      <h3>Changes</h3>
+      <p>This page will be updated as the system evolves. Any material changes
+      will be announced via the site banner and the mailing list.</p>
+    `
+  });
+});
+
 httpServer.listen(port, '0.0.0.0', () => {
   console.log('WorldFlight Planning starting on ' + port + ' (loading...)');
 });

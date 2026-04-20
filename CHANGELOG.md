@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-04-20 (later)
+
+### Public policy pages
+
+- Added `/privacy` (Privacy Policy) and `/data-handling` (Data Handling)
+  public pages describing what data is collected, how it's used, where it's
+  stored, retention, user rights, and how to contact us for export or
+  deletion. Both link to each other and carry a last-updated stamp.
+- Extended the admin connected-users footer into a site-wide footer: admins
+  still see the connected-users list on the left; every visitor now sees
+  `Privacy Policy · Data Handling` links anchored to the far right. Styles
+  moved out of the admin-only block.
+
 ## 2026-04-20
 
 ### Admin · Suggestions

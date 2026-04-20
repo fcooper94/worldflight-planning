@@ -220,12 +220,17 @@ export default function renderLayout({
     ${content}
   </main>
 
-  ${isAdmin ? `
   <footer class="admin-connected-footer">
-    <span class="admin-footer-label">Connected Users</span>
-    <span id="connectedUsersList" class="admin-footer-users">Loading...</span>
+    ${isAdmin ? `
+      <span class="admin-footer-label">Connected Users</span>
+      <span id="connectedUsersList" class="admin-footer-users">Loading...</span>
+    ` : ''}
+    <div class="site-policy-links">
+      <a href="/privacy">Privacy Policy</a>
+      <span class="policy-sep" aria-hidden="true">·</span>
+      <a href="/data-handling">Data Handling</a>
+    </div>
   </footer>
-  ` : ''}
 
      <!-- ===== CID VERIFICATION MODAL ===== -->
   <div id="callsignModal" class="modal hidden" style="z-index:20000;">
@@ -1116,7 +1121,6 @@ document.addEventListener('click', async (e) => {
 </script>
 
 
-${isAdmin ? `
 <style>
   .admin-connected-footer {
     position: fixed;
@@ -1140,15 +1144,13 @@ ${isAdmin ? `
   .admin-connected-footer * {
     font-size: 12px;
     line-height: 1;
-    margin: 0; padding: 0;
   }
   .admin-footer-label {
     color: var(--muted);
     font-weight: 600;
+    margin: 0; padding: 0;
   }
-  .admin-footer-users {
-    color: var(--text);
-  }
+  .admin-footer-users { color: var(--text); margin: 0; padding: 0; }
   .cu-dot {
     display: inline-block;
     width: 6px; height: 6px;
@@ -1158,7 +1160,24 @@ ${isAdmin ? `
     margin-right: 4px;
   }
   .cu-entry { margin-left: 12px; }
+
+  .site-policy-links {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+  }
+  .site-policy-links a {
+    color: var(--muted);
+    text-decoration: none;
+    transition: color .15s;
+  }
+  .site-policy-links a:hover { color: var(--accent); text-decoration: underline; }
+  .site-policy-links .policy-sep { opacity: 0.6; }
 </style>
+${isAdmin ? `
+<style>/* admin connected-users socket block wrapper */</style>
 <script>
 (function() {
   var container = document.getElementById('connectedUsersList');
