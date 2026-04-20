@@ -356,7 +356,13 @@ import nodemailer from 'nodemailer';
 import _renderLayout from './layout.js';
 function renderLayout(opts) {
   const cid = Number(opts.user?.cid);
-  return _renderLayout({ ...opts, pageVisibility, siteBanner, isMaster: cid ? isMasterUser(cid) : false });
+  return _renderLayout({
+    ...opts,
+    pageVisibility,
+    siteBanner,
+    isMaster: cid ? isMasterUser(cid) : false,
+    isTeamMember: cid ? isTeamMember(cid) : false
+  });
 }
 
 import { createServer } from 'http';
@@ -991,12 +997,12 @@ app.get('/site-password', (req, res) => {
   .err{margin-top:12px;font-size:12px;color:#f87171;}
 </style></head><body>
 <div class="backdrop" id="backdrop">
-  <form class="card" method="post" action="/site-password">
+  <form class="card" method="post" action="/site-password" autocomplete="off" data-lpignore="true" data-form-type="other">
     <button type="button" class="close-x" id="closeBtn" aria-label="Close">&times;</button>
     <h1>Restricted Access</h1>
     <p>This site is currently password-protected. Enter the access password to continue.</p>
     <label for="sp">Password</label>
-    <input id="sp" type="password" name="password" autocomplete="current-password" autofocus required />
+    <input id="sp" type="password" name="password" autocomplete="new-password" autofocus required readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore="true" data-form-type="other" />
     <input type="hidden" name="next" value="${nxt.replace(/"/g, '&quot;')}" />
     <button type="submit" class="submit">Unlock</button>
     <a href="/" class="cancel-link" id="cancelLink">Cancel and go back</a>
@@ -1586,6 +1592,31 @@ function requireMasterUser(req, res, next) {
   next();
 }
 
+/* ===== WF TEAM MEMBERSHIP ===== */
+const teamMemberCids = new Set();
+
+async function loadTeamMembers() {
+  try {
+    const rows = await prisma.userAdditionalRole.findMany({ where: { role: 'WF_TEAM' } });
+    teamMemberCids.clear();
+    rows.forEach(r => teamMemberCids.add(r.cid));
+    console.log(`[TEAM] Loaded ${teamMemberCids.size} WF team members`);
+  } catch (e) {}
+}
+
+function isTeamMember(cid) {
+  return !!cid && teamMemberCids.has(Number(cid));
+}
+
+function requireTeamMember(req, res, next) {
+  const cid = Number(req.session?.user?.data?.cid);
+  if (!cid || !isTeamMember(cid)) {
+    if (req.accepts('html')) return res.status(403).send('Forbidden');
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+}
+
 /* ===== BOOKING-ONLY CAPACITY ===== */
 function getBookingOnlyCapacity(fromIcao, toIcao) {
   const sectorKey = `${fromIcao}-${toIcao}`;
@@ -1795,6 +1826,7 @@ async function bootstrap() {
   await loadSiteBanner();
   await loadSiteGate();
   await loadMasterUsers();
+  await loadTeamMembers();
 
   setBootstrapStatus(4, 'Loading event schedule');
   await refreshAdminSheet();   // 🔑 sets activeEventId + loads schedule rows
@@ -4827,14 +4859,46 @@ socket.on('updateDepFlowType', async ({ sector, flowtype, eventId: clientEventId
   io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized, eventId: evtId });
 });
 
-socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
+socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBooking }) => {
 
-  console.log('[BOOKING ONLY]', sector, enteredCid);
+  console.log('[BOOKING ONLY]', sector, enteredCid, teamBooking ? '(team)' : '');
 
   if (!sector || !enteredCid) return;
   if (!user || !user.cid) return;
 
-  // CID check skipped — ATC/admin on departures page can assign to any pilot
+  const sessionCid = Number(user.cid);
+
+  // Resolve which CID this booking is filed under.
+  // Team booking: viewer must be a WF_TEAM member whose linked team is
+  // participating and whose mainCid matches enteredCid. Book under that CID.
+  // Otherwise: book under the session CID (enteredCid is a confirmation).
+  let bookingCid = sessionCid;
+  if (teamBooking) {
+    if (!isTeamMember(sessionCid)) {
+      socket.emit('bookingError', { error: 'Not a team member.' });
+      return;
+    }
+    const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid: sessionCid, role: 'WF_TEAM' } }
+    }).catch(() => null);
+    if (!wfTeamRow?.teamName) {
+      socket.emit('bookingError', { error: 'Your team is not linked.' });
+      return;
+    }
+    const allTeams = await prisma.officialTeam.findMany({
+      select: { teamName: true, mainCid: true, participatingWf26: true }
+    });
+    const match = allTeams.find(t =>
+      String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
+      t.participatingWf26 &&
+      Number(t.mainCid) === Number(enteredCid)
+    );
+    if (!match) {
+      socket.emit('bookingError', { error: 'Team owner CID mismatch or team not participating.' });
+      return;
+    }
+    bookingCid = Number(enteredCid);
+  }
 
   const [leg, dateUtc, depTimeUtc] = sector.split('|');
   if (!leg || !dateUtc || !depTimeUtc) return;
@@ -4860,18 +4924,18 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
     return;
   }
 
-  // Prevent duplicate per user
-  const userBookingKey = `${Number(user.cid)}:${slotKey}`;
+  // Prevent duplicate per booking CID
+  const userBookingKey = `${bookingCid}:${slotKey}`;
   if (tobtBookingsByKey[userBookingKey]) {
-    socket.emit('bookingError', { error: 'You already have a booking for this sector' });
+    socket.emit('bookingError', { error: 'There is already a booking for this sector under that CID.' });
     return;
   }
 
   await prisma.tobtBooking.create({
     data: {
       slotKey,
-      cid: Number(user.cid),
-      callsign: String(user.cid),
+      cid: bookingCid,
+      callsign: String(bookingCid),
       from,
       to,
       dateUtc: row.date_utc,
@@ -4882,8 +4946,8 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
 
   const bookingData = {
     slotKey,
-    cid: Number(user.cid),
-    callsign: String(user.cid),
+    cid: bookingCid,
+    callsign: String(bookingCid),
     from,
     to,
     dateUtc: row.date_utc,
@@ -4892,14 +4956,14 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid }) => {
     createdAtISO: new Date().toISOString()
   };
 
-  const bookingKey = `${Number(user.cid)}:${slotKey}`;
+  const bookingKey = `${bookingCid}:${slotKey}`;
   tobtBookingsByKey[bookingKey] = bookingData;
   tobtBookingsByKey[slotKey] = bookingData; // last writer wins for raw key
 
-  if (!tobtBookingsByCid[user.cid]) {
-    tobtBookingsByCid[user.cid] = new Set();
+  if (!tobtBookingsByCid[bookingCid]) {
+    tobtBookingsByCid[bookingCid] = new Set();
   }
-  tobtBookingsByCid[user.cid].add(bookingKey);
+  tobtBookingsByCid[bookingCid].add(bookingKey);
 
   io.emit('bookingCreated', { slotKey });
 });
@@ -6625,7 +6689,7 @@ app.get('/auth/login', requireSiteGate, (req, res, next) => {
 // round-trip (which it does across some proxy configurations).
 app.get('/auth/callback', vatsimCallback);
 /* ===== SECTOR INFO PAGE ===== */
-app.get('/sector/:wf/:from/:to', (req, res) => {
+app.get('/sector/:wf/:from/:to', async (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = user ? Number(user.cid) : null;
   const isAdmin = cid ? ADMIN_CIDS.includes(cid) : false;
@@ -6634,6 +6698,29 @@ app.get('/sector/:wf/:from/:to', (req, res) => {
   const fromIcao = from.toUpperCase();
   const toIcao = to.toUpperCase();
   const wfNum = wf.toUpperCase();
+
+  // Resolve team-booking context: if the viewer is a WF_TEAM member whose
+  // team is linked + participating + has a mainCid, offer a "Book for {team}"
+  // shortcut that files the booking against the team owner's CID.
+  let teamBookingContext = null;
+  if (cid && isTeamMember(cid)) {
+    const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid, role: 'WF_TEAM' } }
+    }).catch(() => null);
+    if (wfTeamRow?.teamName) {
+      const mates = await prisma.officialTeam.findMany({
+        where: {},
+        select: { teamName: true, mainCid: true, participatingWf26: true }
+      });
+      const match = mates.find(t =>
+        String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
+        t.participatingWf26 && t.mainCid
+      );
+      if (match) {
+        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid) };
+      }
+    }
+  }
 
   // Find the leg in the schedule
   const leg = adminSheetCache.find(r => r.number === wfNum && r.from === fromIcao && r.to === toIcao);
@@ -6974,62 +7061,100 @@ app.get('/sector/:wf/:from/:to', (req, res) => {
 
       // Booking-only modal
       var bookBtn = document.getElementById('sectorBookingBtn');
+      var teamCtx = ${teamBookingContext ? JSON.stringify(teamBookingContext) : 'null'};
+      var myCid = ${cid ? cid : 'null'};
       if (bookBtn) {
         bookBtn.addEventListener('click', function(e) {
           e.preventDefault();
           var sector = this.dataset.sector;
-          var overlay = document.createElement('div');
-          overlay.className = 'modal';
-          overlay.innerHTML = '<div class="modal-backdrop"></div>'
-            + '<div class="modal-dialog" style="width:380px;padding:24px;text-align:center;">'
-            + '<h3 style="margin:0 0 8px;">Confirm Your CID</h3>'
-            + '<p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Please re-enter your VATSIM CID to confirm this booking.</p>'
-            + '<input type="text" id="sectorCidInput" placeholder="ENTER CID" style="width:100%;padding:12px;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:16px;text-align:center;font-weight:700;letter-spacing:1px;margin-bottom:12px;" />'
-            + '<p style="color:var(--muted);font-size:11px;margin-bottom:16px;">Your booking will be tied to your CID. You can connect with any callsign.</p>'
-            + '<div id="sectorBookMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
-            + '<div class="modal-actions" style="gap:8px;">'
-            + '<button class="modal-btn modal-btn-cancel" id="sectorBookCancel">Cancel</button>'
-            + '<button class="modal-btn modal-btn-submit" id="sectorBookConfirm">Confirm</button>'
-            + '</div></div>';
-          document.body.appendChild(overlay);
 
-          overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
-          document.getElementById('sectorBookCancel').addEventListener('click', function() { overlay.remove(); });
-
-          document.getElementById('sectorBookConfirm').addEventListener('click', async function() {
-            var cid = document.getElementById('sectorCidInput').value.trim();
-            var msg = document.getElementById('sectorBookMsg');
-            if (!cid) { msg.textContent = 'Please enter your CID'; msg.style.color = '#f87171'; msg.style.display = ''; return; }
-            this.disabled = true;
-            this.textContent = 'Booking...';
+          async function submitBooking(btn, payload, msg) {
+            btn.disabled = true;
+            var originalText = btn.textContent;
+            btn.textContent = 'Booking...';
             try {
               var res = await fetch('/api/tobt/book', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
-                body: JSON.stringify({ slotKey: sector + '|BOOKING_ONLY', callsign: cid })
+                body: JSON.stringify(Object.assign({ slotKey: sector + '|BOOKING_ONLY' }, payload))
               });
               var data = await res.json();
               if (res.ok) {
                 msg.textContent = 'Booking confirmed!';
                 msg.style.color = '#4ade80';
                 msg.style.display = '';
-                setTimeout(function() { overlay.remove(); location.reload(); }, 1500);
+                setTimeout(function() { location.reload(); }, 1500);
               } else {
                 msg.textContent = data.error || 'Booking failed';
                 msg.style.color = '#f87171';
                 msg.style.display = '';
-                this.disabled = false;
-                this.textContent = 'Confirm';
+                btn.disabled = false;
+                btn.textContent = originalText;
               }
             } catch (err) {
               msg.textContent = 'Error. Please try again.';
               msg.style.color = '#f87171';
               msg.style.display = '';
-              this.disabled = false;
-              this.textContent = 'Confirm';
+              btn.disabled = false;
+              btn.textContent = originalText;
             }
-          });
+          }
+
+          var overlay = document.createElement('div');
+          overlay.className = 'modal';
+
+          if (teamCtx) {
+            overlay.innerHTML = '<div class="modal-backdrop"></div>'
+              + '<div class="modal-dialog" style="width:400px;padding:24px;text-align:center;">'
+              + '<h3 style="margin:0 0 8px;">Confirm Booking</h3>'
+              + '<p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Who should this booking be filed under?</p>'
+              + '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">'
+              + '<button class="modal-btn modal-btn-submit" id="sectorBookSelf" style="width:100%;">Book for Myself</button>'
+              + '<button class="modal-btn modal-btn-submit" id="sectorBookTeam" style="width:100%;background:#8b5cf6;">Book for ' + teamCtx.teamName + '</button>'
+              + '</div>'
+              + '<div id="sectorBookMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
+              + '<div class="modal-actions" style="justify-content:center;">'
+              + '<button class="modal-btn modal-btn-cancel" id="sectorBookCancel">Cancel</button>'
+              + '</div></div>';
+            document.body.appendChild(overlay);
+
+            overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+            document.getElementById('sectorBookCancel').addEventListener('click', function() { overlay.remove(); });
+            document.getElementById('sectorBookSelf').addEventListener('click', function() {
+              submitBooking(this, { callsign: String(myCid) }, document.getElementById('sectorBookMsg'));
+            });
+            document.getElementById('sectorBookTeam').addEventListener('click', function() {
+              submitBooking(
+                this,
+                { callsign: String(teamCtx.teamOwnerCid), teamBooking: true },
+                document.getElementById('sectorBookMsg')
+              );
+            });
+          } else {
+            overlay.innerHTML = '<div class="modal-backdrop"></div>'
+              + '<div class="modal-dialog" style="width:380px;padding:24px;text-align:center;">'
+              + '<h3 style="margin:0 0 8px;">Confirm Your CID</h3>'
+              + '<p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Please re-enter your VATSIM CID to confirm this booking.</p>'
+              + '<input type="text" id="sectorCidInput" placeholder="ENTER CID" style="width:100%;padding:12px;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:16px;text-align:center;font-weight:700;letter-spacing:1px;margin-bottom:12px;" />'
+              + '<p style="color:var(--muted);font-size:11px;margin-bottom:16px;">Your booking will be tied to your CID. You can connect with any callsign.</p>'
+              + '<div id="sectorBookMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
+              + '<div class="modal-actions" style="gap:8px;">'
+              + '<button class="modal-btn modal-btn-cancel" id="sectorBookCancel">Cancel</button>'
+              + '<button class="modal-btn modal-btn-submit" id="sectorBookConfirm">Confirm</button>'
+              + '</div></div>';
+            document.body.appendChild(overlay);
+
+            overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
+            document.getElementById('sectorBookCancel').addEventListener('click', function() { overlay.remove(); });
+
+            document.getElementById('sectorBookConfirm').addEventListener('click', function() {
+              var enteredCid = document.getElementById('sectorCidInput').value.trim();
+              var msg = document.getElementById('sectorBookMsg');
+              if (!enteredCid) { msg.textContent = 'Please enter your CID'; msg.style.color = '#f87171'; msg.style.display = ''; return; }
+              submitBooking(this, { callsign: enteredCid }, msg);
+            });
+          }
         });
       }
     });
@@ -7093,12 +7218,32 @@ app.get('/api/sector-traffic/:wf/:from/:to', async (req, res) => {
   res.json(pilots);
 });
 
-app.get('/schedule', requirePageEnabled('schedule'), (req, res) => {
+app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
   const isAdmin = ADMIN_CIDS.includes(cid);
   const isLoggedIn = !!cid;
   const myBookings = cid ? tobtBookingsByCid[cid] : null;
   const showBookSlot = isAdmin || isPageEnabled('book-slot');
+
+  // Team-booking context for booking-only flow (same resolution as /sector)
+  let teamBookingContext = null;
+  if (cid && isTeamMember(cid)) {
+    const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid, role: 'WF_TEAM' } }
+    }).catch(() => null);
+    if (wfTeamRow?.teamName) {
+      const mates = await prisma.officialTeam.findMany({
+        select: { teamName: true, mainCid: true, participatingWf26: true }
+      });
+      const match = mates.find(t =>
+        String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
+        t.participatingWf26 && t.mainCid
+      );
+      if (match) {
+        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid) };
+      }
+    }
+  }
 
   const content = `
   <section class="card card-full">
@@ -7313,6 +7458,9 @@ document.addEventListener('click', function(e) {
   window.location.href = '/sector/' + wf + '/' + from + '/' + to;
 });
 
+var WF_TEAM_CTX = ${teamBookingContext ? JSON.stringify(teamBookingContext) : 'null'};
+var WF_MY_CID = ${cid ? cid : 'null'};
+
 document.addEventListener('click', async (e) => {
   const btn = e.target.closest('.booking-only');
   if (!btn) return;
@@ -7320,13 +7468,50 @@ document.addEventListener('click', async (e) => {
   const sector = btn.dataset.sector;
   if (!sector) return;
 
-  openCidModal(function(enteredCid) {
-    socket.emit('createBookingOnly', {
-      sector,
-      callsign: enteredCid
+  if (WF_TEAM_CTX) {
+    openTeamBookingModal(sector);
+  } else {
+    openCidModal(function(enteredCid) {
+      socket.emit('createBookingOnly', { sector: sector, callsign: enteredCid });
     });
-  });
+  }
 });
+
+function openTeamBookingModal(sector) {
+  var overlay = document.createElement('div');
+  overlay.className = 'modal';
+  overlay.style.zIndex = '20000';
+  overlay.innerHTML = '<div class="modal-backdrop"></div>'
+    + '<div class="modal-dialog" style="width:400px;padding:24px;text-align:center;background:var(--panel);border:1px solid var(--border);border-radius:10px;">'
+    + '<h3 style="margin:0 0 8px;">Confirm Booking</h3>'
+    + '<p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Who should this booking be filed under?</p>'
+    + '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">'
+    + '<button class="modal-btn modal-btn-submit" id="sbkSelf" style="width:100%;">Book for Myself</button>'
+    + '<button class="modal-btn modal-btn-submit" id="sbkTeam" style="width:100%;background:#8b5cf6;">Book for ' + WF_TEAM_CTX.teamName + '</button>'
+    + '</div>'
+    + '<div id="sbkMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
+    + '<div class="modal-actions" style="justify-content:center;">'
+    + '<button class="modal-btn modal-btn-cancel" id="sbkCancel">Cancel</button>'
+    + '</div></div>';
+  document.body.appendChild(overlay);
+
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-backdrop').addEventListener('click', close);
+  document.getElementById('sbkCancel').addEventListener('click', close);
+
+  document.getElementById('sbkSelf').addEventListener('click', function() {
+    socket.emit('createBookingOnly', { sector: sector, callsign: String(WF_MY_CID) });
+    close();
+  });
+  document.getElementById('sbkTeam').addEventListener('click', function() {
+    socket.emit('createBookingOnly', {
+      sector: sector,
+      callsign: String(WF_TEAM_CTX.teamOwnerCid),
+      teamBooking: true
+    });
+    close();
+  });
+}
 
 function openCidModal(onSubmit) {
   const modal = document.getElementById('callsignModal');
@@ -7630,6 +7815,31 @@ app.get('/admin/access-management', requireAdmin, (req, res) => {
       <select id="masterUserSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
         <option value="disabled">Disabled</option>
         <option value="enabled">Enabled</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="additionalRolesSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+    <div style="font-weight:700;font-size:13px;margin-bottom:4px;">Additional Permissions</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Tag this user with one or more role memberships</div>
+    <div style="display:flex;flex-wrap:wrap;gap:16px;">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" class="addl-role-checkbox" data-role="WF_ATC" style="accent-color:var(--accent);cursor:pointer;" />
+        <span>WF ATC</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" class="addl-role-checkbox" data-role="WF_AFFILIATE" style="accent-color:var(--accent);cursor:pointer;" />
+        <span>WF Affiliate</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" class="addl-role-checkbox" data-role="WF_TEAM" style="accent-color:var(--accent);cursor:pointer;" />
+        <span>WF Team Member</span>
+      </label>
+    </div>
+    <div id="wfTeamPicker" style="display:none;margin-top:10px;align-items:center;gap:8px;">
+      <label style="font-size:12px;color:var(--muted);">Team:</label>
+      <select id="wfTeamSelect" style="padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:240px;">
+        <option value="">Select team...</option>
       </select>
     </div>
   </div>
@@ -8309,6 +8519,88 @@ document.addEventListener('DOMContentLoaded', function () {
             } catch (err) { this.value = enabled ? 'disabled' : 'enabled'; }
           });
 
+          // Show and configure additional roles checkboxes
+          var addlSection = document.getElementById('additionalRolesSection');
+          addlSection.style.display = '';
+          var currentRoles = data.additionalRoles || [];
+          var teamPicker = document.getElementById('wfTeamPicker');
+
+          // Clone team <select> first to drop any stale listeners from a prior search
+          var oldTeamSelect = document.getElementById('wfTeamSelect');
+          var teamSelect = oldTeamSelect.cloneNode(true);
+          oldTeamSelect.parentNode.replaceChild(teamSelect, oldTeamSelect);
+
+          async function ensureTeamsLoaded() {
+            if (teamSelect.dataset.loaded === '1') return;
+            try {
+              var r = await fetch('/admin/api/official-teams', { credentials: 'same-origin' });
+              var names = await r.json();
+              names.forEach(function(name) {
+                var opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                teamSelect.appendChild(opt);
+              });
+              teamSelect.dataset.loaded = '1';
+            } catch (e) {}
+          }
+
+          async function toggleRole(role, enabled, teamName) {
+            var body = { cid: Number(data.cid), role: role, enabled: enabled };
+            if (teamName) body.teamName = teamName;
+            var r = await fetch('/admin/api/user-additional-roles/toggle', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify(body)
+            });
+            if (!r.ok) throw new Error('toggle failed');
+          }
+
+          var boxes = addlSection.querySelectorAll('.addl-role-checkbox');
+          boxes.forEach(function(oldBox) {
+            var box = oldBox.cloneNode(true);
+            oldBox.parentNode.replaceChild(box, oldBox);
+            var role = box.getAttribute('data-role');
+            box.checked = currentRoles.indexOf(role) !== -1;
+
+            if (role === 'WF_TEAM') {
+              if (box.checked) {
+                ensureTeamsLoaded().then(function() {
+                  teamSelect.value = data.wfTeamName || '';
+                });
+                teamPicker.style.display = 'flex';
+              } else {
+                teamPicker.style.display = 'none';
+                teamSelect.value = '';
+              }
+              box.addEventListener('change', async function() {
+                if (this.checked) {
+                  // Reveal the picker; don't persist until a team is selected.
+                  await ensureTeamsLoaded();
+                  teamSelect.value = '';
+                  teamPicker.style.display = 'flex';
+                } else {
+                  teamPicker.style.display = 'none';
+                  try { await toggleRole('WF_TEAM', false); }
+                  catch (err) { this.checked = true; teamPicker.style.display = 'flex'; }
+                }
+              });
+            } else {
+              box.addEventListener('change', async function() {
+                var wasChecked = !this.checked;
+                try { await toggleRole(role, this.checked); }
+                catch (err) { this.checked = wasChecked; }
+              });
+            }
+          });
+
+          teamSelect.addEventListener('change', async function() {
+            if (!this.value) return;
+            try { await toggleRole('WF_TEAM', true, this.value); }
+            catch (err) {}
+          });
+
           if (data.globalAccess) {
             html += '<tr><td colspan="3" style="text-align:center;padding:24px;color:#4ade80;font-weight:700;font-size:14px;">Global Access Enabled</td></tr>';
           } else {
@@ -8350,6 +8642,8 @@ document.addEventListener('DOMContentLoaded', function () {
           document.getElementById('permAddCid').style.display = '';
           document.getElementById('globalAccessSection').style.display = 'none';
           document.getElementById('masterUserSection').style.display = 'none';
+          document.getElementById('additionalRolesSection').style.display = 'none';
+          document.getElementById('wfTeamPicker').style.display = 'none';
           updateAddSection('division', data.pattern);
           var docs = data.docPermissions || [];
           var firs = data.firAccess || [];
@@ -8667,16 +8961,18 @@ app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
   // Check if it's a CID (all digits)
   if (/^\d+$/.test(q)) {
     const cid = Number(q);
-    const [docPerms, staffReqs, anyStaffReq, anyDocReq] = await Promise.all([
+    const [docPerms, staffReqs, anyStaffReq, anyDocReq, addlRoles] = await Promise.all([
       prisma.documentationPermission.findMany({ where: { cid } }),
       prisma.staffAccessRequest.findMany({ where: { cid, status: 'APPROVED' } }),
       prisma.staffAccessRequest.findFirst({ where: { cid }, orderBy: { createdAt: 'desc' } }),
-      prisma.documentationAccessRequest.findFirst({ where: { cid }, orderBy: { createdAt: 'desc' } })
+      prisma.documentationAccessRequest.findFirst({ where: { cid }, orderBy: { createdAt: 'desc' } }),
+      prisma.userAdditionalRole.findMany({ where: { cid } })
     ]);
     const userName = anyStaffReq?.name || anyDocReq?.name || null;
     const userRole = anyStaffReq?.role || anyDocReq?.role || null;
     const hasGlobal = docPerms.some(r => r.pattern === '****');
     const isMaster = masterUserCids.has(cid);
+    const wfTeamRow = addlRoles.find(r => r.role === 'WF_TEAM');
     return res.json({
       _searchType: 'cid',
       cid,
@@ -8684,6 +8980,8 @@ app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
       role: userRole,
       globalAccess: hasGlobal,
       masterUser: isMaster,
+      additionalRoles: addlRoles.map(r => r.role),
+      wfTeamName: wfTeamRow?.teamName ?? null,
       docPermissions: docPerms.filter(r => r.pattern !== '****'),
       firAccess: staffReqs
     });
@@ -10891,6 +11189,42 @@ app.post('/admin/api/master-tokens/revoke-cid', requireAdmin, async (req, res) =
   res.json({ ok: true });
 });
 
+/* ===== USER ADDITIONAL ROLES ADMIN API ===== */
+const USER_ADDITIONAL_ROLES = ['WF_ATC', 'WF_AFFILIATE', 'WF_TEAM'];
+
+app.get('/admin/api/official-teams', requireAdmin, async (req, res) => {
+  const rows = await prisma.officialTeam.findMany({ select: { teamName: true } });
+  const names = [...new Set(rows.map(r => String(r.teamName || '').trim().toUpperCase()).filter(Boolean))];
+  names.sort();
+  res.json(names);
+});
+
+app.post('/admin/api/user-additional-roles/toggle', requireAdmin, async (req, res) => {
+  const cid = Number(req.body?.cid);
+  const role = String(req.body?.role || '');
+  const enabled = !!req.body?.enabled;
+  const teamName = req.body?.teamName ? String(req.body.teamName).trim().toUpperCase() : null;
+  if (!cid) return res.status(400).json({ error: 'CID required' });
+  if (!USER_ADDITIONAL_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  if (role === 'WF_TEAM' && enabled && !teamName) {
+    return res.status(400).json({ error: 'teamName required for WF_TEAM' });
+  }
+
+  if (enabled) {
+    const data = role === 'WF_TEAM' ? { teamName } : { teamName: null };
+    await prisma.userAdditionalRole.upsert({
+      where: { cid_role: { cid, role } },
+      update: data,
+      create: { cid, role, ...data }
+    });
+    if (role === 'WF_TEAM') teamMemberCids.add(cid);
+  } else {
+    await prisma.userAdditionalRole.deleteMany({ where: { cid, role } });
+    if (role === 'WF_TEAM') teamMemberCids.delete(cid);
+  }
+  res.json({ ok: true });
+});
+
 // User redeems a master token
 app.post('/api/master-token/redeem', requireLogin, async (req, res) => {
   const cid = Number(req.session.user.data.cid);
@@ -11416,7 +11750,7 @@ app.post('/api/docs/request-access', requireLogin, async (req, res) => {
 app.post('/api/tobt/book', requireLogin, async (req, res) => {
   try {
     // 1️⃣ Validate input
-    const { slotKey, callsign: enteredCid, manual } = req.body;
+    const { slotKey, callsign: enteredCid, manual, teamBooking } = req.body;
     if (!slotKey || !enteredCid) {
       return res.status(400).json({ error: 'Missing parameters' });
     }
@@ -11425,8 +11759,32 @@ app.post('/api/tobt/book', requireLogin, async (req, res) => {
     const userData = req.session.user.data;
     const cid = Number(userData.cid);
 
-    // Verify CID matches logged-in user, unless it's a manual ATC assignment
-    if (!manual && String(enteredCid).trim() !== String(cid)) {
+    // Team booking: a WF_TEAM member booking against their team owner's CID.
+    // Validate the viewer is a team member whose linked team's mainCid matches
+    // the entered CID (prevents users claiming to book for a team they don't
+    // belong to).
+    if (teamBooking) {
+      if (!isTeamMember(cid)) {
+        return res.status(403).json({ error: 'Not a team member.' });
+      }
+      const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+        where: { cid_role: { cid, role: 'WF_TEAM' } }
+      });
+      if (!wfTeamRow?.teamName) {
+        return res.status(403).json({ error: 'Your team is not linked.' });
+      }
+      const allTeams = await prisma.officialTeam.findMany({
+        select: { teamName: true, mainCid: true, participatingWf26: true }
+      });
+      const match = allTeams.find(t =>
+        String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
+        t.participatingWf26 &&
+        Number(t.mainCid) === Number(enteredCid)
+      );
+      if (!match) {
+        return res.status(403).json({ error: 'Team owner CID mismatch or team not participating.' });
+      }
+    } else if (!manual && String(enteredCid).trim() !== String(cid)) {
       return res.status(403).json({ error: 'CID does not match your logged-in account.' });
     }
 
@@ -11485,8 +11843,9 @@ const wantsManual = !isBookingOnly && manual === true;
       return res.status(409).json({ error: 'Slot already booked' });
     }
 
-    // 6️⃣ Determine target CID (pilot's CID for manual assignment, logged-in CID otherwise)
-    const targetCid = manual ? Number(enteredCid) : cid;
+    // 6️⃣ Determine target CID — the team owner for team bookings, the pilot's
+    // CID for a manual ATC assignment, otherwise the logged-in user.
+    const targetCid = (manual || teamBooking) ? Number(enteredCid) : cid;
 
     // 8️⃣ Prevent duplicate sector + callsign
     const sectorKey = parts.slice(0, 3).join('|');
@@ -11633,6 +11992,283 @@ app.post('/api/tobt/update-callsign', requireLogin, async (req, res) => {
 
 app.get('/admin', (req, res) => {
   res.redirect(301, '/admin/control-panel');
+});
+
+/* ===== TEAM MEMBER PAGES (WF_TEAM role) ===== */
+app.get('/team/management', requireLogin, requireTeamMember, (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  const isAdmin = ADMIN_CIDS.includes(cid);
+  const content = `
+    <section class="card card-full">
+      <h2>Team Management</h2>
+      <p style="color:var(--muted);font-size:13px;">Coming soon.</p>
+    </section>
+  `;
+  res.send(renderLayout({ title: 'Team Management', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  const isAdmin = ADMIN_CIDS.includes(cid);
+
+  // Resolve the user's team name → all callsigns across every aircraft row
+  // that belongs to that team (teams can have multiple OfficialTeam rows,
+  // one per a/c). Team name is stored uppercase; match case-insensitively
+  // against OfficialTeam rows in case operators used mixed case there.
+  const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid, role: 'WF_TEAM' } }
+  });
+
+  let teamName = wfTeamRow?.teamName || null;
+  let teamCallsigns = new Set();
+  let teamHasAnyRows = false;
+  const callsignAircraftType = {};
+  if (teamName) {
+    const allTeams = await prisma.officialTeam.findMany({
+      select: { teamName: true, callsign: true, aircraftType: true, participatingWf26: true }
+    });
+    allTeams.forEach(t => {
+      if (String(t.teamName || '').trim().toUpperCase() !== teamName) return;
+      teamHasAnyRows = true;
+      if (!t.participatingWf26) return;
+      const cs = String(t.callsign).toUpperCase();
+      teamCallsigns.add(cs);
+      callsignAircraftType[cs] = String(t.aircraftType || '').toUpperCase();
+    });
+  }
+  const teamParticipating = teamCallsigns.size > 0;
+
+  // Active event name (used for the "not participating" message)
+  let activeEventName = 'this event';
+  if (activeEventId) {
+    const ev = await prisma.wfEvent.findUnique({ where: { id: activeEventId } }).catch(() => null);
+    if (ev?.name) activeEventName = ev.name;
+  }
+
+  const rows = Object.values(tobtBookingsByKey)
+    .filter(b => b && b.callsign && teamCallsigns.has(String(b.callsign).toUpperCase()))
+    .map(booking => {
+      const slotKey = booking.slotKey;
+      const parts = slotKey.split('|');
+      const sectorPart = parts[0];
+      const dateUtc = parts[1];
+      const depTimeUtc = parts[2];
+      const [from, to] = sectorPart.split('-');
+      const wfRow = adminSheetCache.find(r =>
+        r.from === from && r.to === to && r.date_utc === dateUtc && r.dep_time_utc === depTimeUtc
+      );
+      const wfSector = wfRow?.number || '-';
+      const atcRoute = wfRow?.atc_route || '-';
+      const tobt = typeof booking.tobtTimeUtc === 'string' ? booking.tobtTimeUtc : null;
+      const callsign = booking.callsign;
+      const aircraftType = callsignAircraftType[String(callsign || '').toUpperCase()] || '';
+
+      // Departure window = dep ± 1h, wrapping across midnight as needed.
+      let depWindow = null;
+      if (/^\d{2}:\d{2}$/.test(depTimeUtc)) {
+        const [dh, dm] = depTimeUtc.split(':').map(Number);
+        const mid = dh * 60 + dm;
+        const shift = (mins) => {
+          const t = ((mins % 1440) + 1440) % 1440;
+          const h = String(Math.floor(t / 60)).padStart(2, '0');
+          const m = String(t % 60).padStart(2, '0');
+          return `${h}:${m}`;
+        };
+        depWindow = `${shift(mid - 60)}Z – ${shift(mid + 60)}Z`;
+      }
+
+      const pilotCid = booking.cid || null;
+      const cidPart = pilotCid ? ` - CID ${pilotCid}` : '';
+      const remark = (tobt
+        ? `WF Official Team - TOBT ${tobt}z`
+        : 'WF Official Team'
+      ) + `${cidPart} - planning.worldflight.center`;
+      const sbParams = new URLSearchParams({
+        orig: from,
+        dest: to,
+        route: atcRoute && atcRoute !== '-' ? atcRoute : '',
+        callsign: callsign || '',
+        type: aircraftType,
+        manualrmk: remark
+      });
+      if (tobt) {
+        const [hh, mm] = tobt.split(':');
+        sbParams.set('deph', hh);
+        sbParams.set('depm', mm);
+      }
+      const simbriefUrl = 'https://dispatch.simbrief.com/options/custom?' + sbParams.toString();
+
+      return {
+        wfSector,
+        callsign,
+        pilotCid,
+        from,
+        to,
+        dateUtc,
+        depTimeUtc,
+        depWindow,
+        tobt,
+        atcRoute,
+        aircraftType,
+        simbriefUrl
+      };
+    })
+    .sort((a, b) => {
+      if (a.dateUtc !== b.dateUtc) return a.dateUtc.localeCompare(b.dateUtc);
+      return a.depTimeUtc.localeCompare(b.depTimeUtc);
+    });
+
+  const content = `
+    <section class="card card-full my-slots-card">
+      <h2>Slots / Bookings</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">
+        ${!teamName
+          ? 'Your team membership is not linked to an Official Team yet. Ask an admin to set your team in Access Management.'
+          : !teamParticipating
+            ? `<strong>${teamName}</strong> is not participating in ${activeEventName}.`
+            : `Bookings for any callsign belonging to <strong>${teamName}</strong> (${[...teamCallsigns].sort().join(', ')}).`}
+      </p>
+      ${!teamName || !teamParticipating ? '' : rows.length === 0 ? `
+        <p style="color:var(--muted);"><em>No bookings yet for your team callsigns.</em></p>
+      ` : `
+        <div class="my-slots-table-wrapper">
+          <table class="my-slots-table">
+            <thead>
+              <tr>
+                <th>WF Sector</th>
+                <th>Callsign</th>
+                <th>Departure</th>
+                <th>Destination</th>
+                <th>Date</th>
+                <th>Dep Window</th>
+                <th>Flow Type</th>
+                <th>ATC Route</th>
+                <th>Plan</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => {
+                const hasRoute = r.atcRoute && r.atcRoute !== '-';
+                const routeAttr = hasRoute
+                  ? String(r.atcRoute).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+                  : '';
+                return `
+                <tr>
+                  <td>${r.wfSector}</td>
+                  <td><strong>${r.callsign}</strong></td>
+                  <td><a href="/icao/${r.from}">${r.from}</a></td>
+                  <td><a href="/icao/${r.to}">${r.to}</a></td>
+                  <td>${r.dateUtc}</td>
+                  <td>${r.depWindow || '—'}</td>
+                  <td>${r.tobt
+                    ? `Slotted - <span style="color:#4ade80;font-weight:600;">${r.tobt.replace(':','')}z</span>`
+                    : `Booking - <span style="color:#4ade80;font-weight:600;">Confirmed</span>`}</td>
+                  <td>${hasRoute
+                    ? `<button type="button" class="show-route-btn" data-route="${routeAttr}">Show Route</button>`
+                    : '<span style="color:var(--muted);">—</span>'}</td>
+                  <td>
+                    <a class="simbrief-btn" href="${r.simbriefUrl}" target="_blank" rel="noopener">
+                      <span class="simbrief-logo">SB</span>
+                      <span class="simbrief-text">Plan with SimBrief</span>
+                    </a>
+                  </td>
+                </tr>
+              `;}).join('')}
+            </tbody>
+          </table>
+        </div>
+      `}
+    </section>
+
+    <div id="routeModal" class="route-modal" hidden>
+      <div class="route-modal-backdrop"></div>
+      <div class="route-modal-card" role="dialog" aria-modal="true" aria-labelledby="routeModalTitle">
+        <div class="route-modal-header">
+          <div id="routeModalTitle" style="font-weight:700;font-size:14px;">ATC Route</div>
+          <button type="button" id="routeModalClose" class="route-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div id="routeModalBody" class="route-modal-body"></div>
+        <div class="route-modal-actions">
+          <button type="button" id="routeModalCopy" class="route-modal-copy">Copy</button>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      .show-route-btn {
+        padding: 4px 10px;
+        background: rgba(56,189,248,0.08);
+        border: 1px solid rgba(56,189,248,0.25);
+        color: var(--accent);
+        border-radius: 6px;
+        font-size: 12px;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .show-route-btn:hover { background: rgba(56,189,248,0.16); }
+      .route-modal[hidden] { display: none; }
+      .route-modal { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center; }
+      .route-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+      .route-modal-card {
+        position: relative; background: var(--panel); border: 1px solid var(--border);
+        border-radius: 10px; padding: 16px; width: min(640px, 92vw); max-height: 80vh;
+        display: flex; flex-direction: column; gap: 12px;
+      }
+      .route-modal-header { display: flex; align-items: center; justify-content: space-between; }
+      .route-modal-close {
+        background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer;
+        line-height: 1; padding: 0 4px;
+      }
+      .route-modal-close:hover { color: var(--text); }
+      .route-modal-body {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 13px; line-height: 1.5; color: var(--text);
+        background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+        border-radius: 8px; padding: 12px; overflow: auto; word-break: break-word; white-space: pre-wrap;
+      }
+      .route-modal-actions { display: flex; justify-content: flex-end; }
+      .route-modal-copy {
+        padding: 6px 14px; background: var(--accent); color: #0b1220; border: none; border-radius: 6px;
+        font-weight: 600; cursor: pointer; font-family: inherit;
+      }
+    </style>
+
+    <script>
+    (function() {
+      var modal = document.getElementById('routeModal');
+      var body = document.getElementById('routeModalBody');
+      var closeBtn = document.getElementById('routeModalClose');
+      var copyBtn = document.getElementById('routeModalCopy');
+      var backdrop = modal.querySelector('.route-modal-backdrop');
+
+      function open(route) {
+        body.textContent = route;
+        modal.hidden = false;
+      }
+      function close() { modal.hidden = true; }
+
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.show-route-btn');
+        if (btn) { open(btn.getAttribute('data-route') || ''); return; }
+      });
+      closeBtn.addEventListener('click', close);
+      backdrop.addEventListener('click', close);
+      document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
+      copyBtn.addEventListener('click', async function() {
+        try {
+          await navigator.clipboard.writeText(body.textContent || '');
+          var prev = copyBtn.textContent;
+          copyBtn.textContent = 'Copied';
+          setTimeout(function() { copyBtn.textContent = prev; }, 1200);
+        } catch (e) {}
+      });
+    })();
+    </script>
+  `;
+  const pageTitle = teamName ? `${teamName} - Bookings` : 'Our Bookings';
+  res.send(renderLayout({ title: pageTitle, user, isAdmin, content, layoutClass: 'dashboard-full' }));
 });
 
 /* ===== USER MANAGEMENT (MASTER USERS) ===== */
@@ -12130,37 +12766,39 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
         margin-bottom: 24px;
       }
       .cp-grid {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 14px;
       }
       .cp-card {
+        position: relative;
         display: flex;
-        align-items: center;
-        gap: 16px;
-        padding: 20px 24px;
-        border-radius: 10px;
+        flex-direction: column;
+        gap: 12px;
+        padding: 20px;
+        border-radius: 12px;
         background: rgba(255,255,255,0.02);
         border: 1px solid var(--border);
         text-decoration: none;
         color: inherit;
-        transition: background .15s, border-color .15s;
+        transition: background .15s, border-color .15s, transform .15s;
         cursor: pointer;
+        min-height: 150px;
       }
       .cp-card:hover {
         background: rgba(255,255,255,0.06);
         border-color: var(--accent, #3b82f6);
+        transform: translateY(-1px);
       }
       .cp-card-icon {
-        font-size: 28px;
-        width: 48px;
-        height: 48px;
+        font-size: 24px;
+        width: 44px;
+        height: 44px;
         display: flex;
         align-items: center;
         justify-content: center;
         border-radius: 10px;
         background: rgba(255,255,255,0.04);
-        flex-shrink: 0;
       }
       .cp-card-body {
         flex: 1;
@@ -12175,9 +12813,10 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
         gap: 8px;
       }
       .cp-card-desc {
-        font-size: 13px;
+        font-size: 12.5px;
         color: var(--muted);
-        margin-top: 4px;
+        margin-top: 6px;
+        line-height: 1.45;
       }
       .cp-badge {
         background: #ef4444;
@@ -12189,13 +12828,16 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
         line-height: 1.4;
       }
       .cp-card-arrow {
-        font-size: 18px;
+        position: absolute;
+        top: 16px;
+        right: 18px;
+        font-size: 16px;
         color: var(--muted);
-        flex-shrink: 0;
-        transition: color .15s;
+        transition: color .15s, transform .15s;
       }
       .cp-card:hover .cp-card-arrow {
         color: var(--accent, #3b82f6);
+        transform: translateX(2px);
       }
     </style>
   `;
@@ -12265,7 +12907,8 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
     ${t.participatingWf26 ? 'checked' : ''}
   />
 </td>
-              <td style="text-align:right;">
+              <td style="text-align:right;white-space:nowrap;">
+                <button class="action-btn edit-team-btn" data-id="${t.id}" data-record='${JSON.stringify({ teamName: t.teamName, callsign: t.callsign, mainCid: t.mainCid, aircraftType: t.aircraftType, country: t.country, participatingWf26: t.participatingWf26 }).replace(/'/g, '&#39;')}' style="margin-right:6px;">Edit</button>
                 <button class="tobt-btn cancel" data-action="delete-team" data-id="${t.id}">Delete</button>
               </td>
             </tr>
@@ -12306,7 +12949,14 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
             ${a.participatingWf26 ? 'checked' : ''}
           />
         </td>
-        <td class="col-actions col-right">
+        <td class="col-actions col-right" style="white-space:nowrap;">
+          <button
+            class="action-btn edit-affiliate-btn"
+            data-id="${a.id}"
+            data-record='${JSON.stringify({ callsign: a.callsign, simType: a.simType, cid: a.cid, participatingWf26: a.participatingWf26 }).replace(/'/g, '&#39;')}'
+            style="margin-right:6px;">
+            Edit
+          </button>
           <button
             class="tobt-btn cancel"
             data-action="delete-affiliate"
@@ -12428,12 +13078,15 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
       });
     }
 
-    function openEntryModal(type) {
+    // editingId === null means add mode; otherwise edit mode for the given id
+    let editingId = null;
+    function openEntryModal(type, record) {
       typeInput.value = type;
+      editingId = record?.id ?? null;
       form.reset();
 
       if (type === 'team') {
-        titleEl.textContent = 'Add Official Team';
+        titleEl.textContent = editingId ? 'Edit Official Team' : 'Add Official Team';
 
         teamFields.classList.remove('hidden');
         affiliateFields.classList.add('hidden');
@@ -12458,7 +13111,7 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
         if (cid) cid.required = false;
 
       } else {
-        titleEl.textContent = 'Add WF Affiliate';
+        titleEl.textContent = editingId ? 'Edit WF Affiliate' : 'Add WF Affiliate';
 
         teamFields.classList.add('hidden');
         affiliateFields.classList.remove('hidden');
@@ -12483,6 +13136,23 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
         form.querySelector('input[name="country"]').required = false;
       }
 
+      // Pre-fill fields when editing
+      if (record) {
+        if (type === 'team') {
+          form.querySelector('input[name="teamName"]').value = record.teamName || '';
+          form.querySelector('input[name="callsign"]').value = record.callsign || '';
+          form.querySelector('input[name="mainCid"]').value = record.mainCid || '';
+          form.querySelector('input[name="aircraftType"]').value = record.aircraftType || '';
+          form.querySelector('input[name="country"]').value = record.country || '';
+        } else {
+          form.querySelector('input[name="affiliateCallsign"]').value = record.callsign || '';
+          var simSel = form.querySelector('select[name="simType"]');
+          if (simSel) simSel.value = record.simType || '';
+          form.querySelector('input[name="cid"]').value = record.cid || '';
+        }
+        form.querySelector('input[name="participatingWf26"]').checked = !!record.participatingWf26;
+      }
+
       modal.classList.remove('hidden');
 
       // Focus first enabled input/select (not hidden/disabled)
@@ -12502,6 +13172,18 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
     addAffiliateBtn.addEventListener('click', (e) => {
       e.preventDefault();
       openEntryModal('affiliate');
+    });
+
+    // Edit buttons (event delegation so newly injected rows also work)
+    document.addEventListener('click', (e) => {
+      var teamEdit = e.target.closest('.edit-team-btn');
+      var affEdit = e.target.closest('.edit-affiliate-btn');
+      if (!teamEdit && !affEdit) return;
+      var btn = teamEdit || affEdit;
+      var record = {};
+      try { record = JSON.parse(btn.dataset.record || '{}'); } catch (err) { return; }
+      record.id = Number(btn.dataset.id);
+      openEntryModal(teamEdit ? 'team' : 'affiliate', record);
     });
 
     cancelBtn.addEventListener('click', (e) => {
@@ -12537,10 +13219,12 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
         payload.cid = Number(fd.get('cid'));
       }
 
-      const url = type === 'team' ? '/api/admin/official-teams' : '/api/admin/affiliates';
+      const baseUrl = type === 'team' ? '/api/admin/official-teams' : '/api/admin/affiliates';
+      const isEdit = editingId != null;
+      const url = isEdit ? baseUrl + '/' + editingId : baseUrl;
 
       const res = await fetch(url, {
-        method: 'POST',
+        method: isEdit ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify(payload)
@@ -12711,31 +13395,37 @@ app.delete('/api/admin/affiliates/:id', requireAdmin, async (req, res) => {
   return res.json({ success: true });
 });
 
-// Patch Official Team (WF26 toggle)
+// Patch Official Team (WF26 toggle or full edit)
 app.patch('/api/admin/official-teams/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
-  const { participatingWf26 } = req.body || {};
   if (!id) return res.status(400).json({ error: 'Invalid id' });
+  const body = req.body || {};
+  const data = {};
+  if (body.teamName !== undefined) data.teamName = String(body.teamName).trim();
+  if (body.callsign !== undefined) data.callsign = String(body.callsign).trim().toUpperCase();
+  if (body.mainCid !== undefined) data.mainCid = Number(body.mainCid);
+  if (body.aircraftType !== undefined) data.aircraftType = String(body.aircraftType).trim().toUpperCase();
+  if (body.country !== undefined) data.country = String(body.country).trim();
+  if (body.participatingWf26 !== undefined) data.participatingWf26 = Boolean(body.participatingWf26);
+  if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
-  await prisma.officialTeam.update({
-    where: { id },
-    data: { participatingWf26: Boolean(participatingWf26) }
-  });
-
+  await prisma.officialTeam.update({ where: { id }, data });
   return res.json({ success: true });
 });
 
-// Patch Affiliate (WF26 toggle)
+// Patch Affiliate (WF26 toggle or full edit)
 app.patch('/api/admin/affiliates/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
-  const { participatingWf26 } = req.body || {};
   if (!id) return res.status(400).json({ error: 'Invalid id' });
+  const body = req.body || {};
+  const data = {};
+  if (body.callsign !== undefined) data.callsign = String(body.callsign).trim().toUpperCase();
+  if (body.simType !== undefined) data.simType = String(body.simType).trim();
+  if (body.cid !== undefined) data.cid = Number(body.cid);
+  if (body.participatingWf26 !== undefined) data.participatingWf26 = Boolean(body.participatingWf26);
+  if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
-  await prisma.affiliate.update({
-    where: { id },
-    data: { participatingWf26: Boolean(participatingWf26) }
-  });
-
+  await prisma.affiliate.update({ where: { id }, data });
   return res.json({ success: true });
 });
 

@@ -3,6 +3,7 @@ export default function renderLayout({
   user,
   isAdmin,
   isMaster = false,
+  isTeamMember = false,
   content,
   layoutClass = '',
   pageVisibility = {},
@@ -79,6 +80,20 @@ export default function renderLayout({
           User Management
           <span id="firManagerBadge" class="nav-badge hidden"></span>
         </span>
+      </a>
+    </div>
+    ` : ''}
+
+    ${isTeamMember ? `
+    <div class="nav-section">
+      <div class="nav-title">Team Member</div>
+      <a href="/team/management" class="nav-item" data-tooltip="Team Management">
+        <span class="icon">👥</span>
+        <span class="label">Team Management</span>
+      </a>
+      <a href="/team/bookings" class="nav-item" data-tooltip="Our Bookings">
+        <span class="icon">📋</span>
+        <span class="label">Our Bookings</span>
       </a>
     </div>
     ` : ''}
