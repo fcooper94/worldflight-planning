@@ -1872,7 +1872,7 @@ app.get('/admin/visited-airports', requireAdmin, async (req, res) => {
   });
 
   const rows = visits.map(v => `
-    <tr>
+    <tr data-icao="${v.icao}">
       <td><strong>${v.icao}</strong></td>
       <td>${v.year}</td>
       <td>
@@ -1899,6 +1899,11 @@ app.get('/admin/visited-airports', requireAdmin, async (req, res) => {
         <button type="submit" class="action-btn primary" style="padding:7px 16px;">Add</button>
         <span id="visitMsg" style="font-size:13px;margin-left:8px;" class="hidden"></span>
       </form>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        <input type="search" id="visitSearchIcao" placeholder="Search ICAO..." maxlength="4" style="width:180px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:rgba(255,255,255,0.04);color:var(--text);font-size:13px;font-family:monospace;text-transform:uppercase;" />
+        <span id="visitSearchCount" style="font-size:12px;color:var(--muted);"></span>
+      </div>
 
       <div class="table-scroll">
         <table class="departures-table" id="visitedTable">
@@ -1949,6 +1954,28 @@ app.get('/admin/visited-airports', requireAdmin, async (req, res) => {
       var res = await fetch('/admin/api/visited-airports/' + btn.dataset.id, { method: 'DELETE' });
       if (res.ok) window.location.reload();
     });
+
+    // Filter table rows by ICAO
+    (function() {
+      var input = document.getElementById('visitSearchIcao');
+      var countEl = document.getElementById('visitSearchCount');
+      var tbody = document.querySelector('#visitedTable tbody');
+      if (!input || !tbody) return;
+      var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr[data-icao]'));
+      var total = rows.length;
+      function apply() {
+        var q = input.value.trim().toUpperCase();
+        var shown = 0;
+        rows.forEach(function(tr) {
+          var icao = (tr.dataset.icao || '').toUpperCase();
+          var match = !q || icao.indexOf(q) !== -1;
+          tr.style.display = match ? '' : 'none';
+          if (match) shown++;
+        });
+        countEl.textContent = q ? ('Showing ' + shown + ' of ' + total) : '';
+      }
+      input.addEventListener('input', apply);
+    })();
     </script>
   `;
 
@@ -2068,6 +2095,327 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
     return 'Visited ' + recent.length + 'x in past 5 years (' + recent.join(', ') + ')';
   }
 
+  // ===== Division grouping (ICAO → VATSIM Division / vACC / ARTCC) =====
+  // VATEUD broken down into national vACCs; VATUSA broken down into ARTCCs
+  // (per-airport lookup for K* + Hawaii + Alaska). Fallbacks roll up to the
+  // parent division name (e.g. unmapped K-airports → "VATUSA (Other)").
+  const ICAO_PREFIX_DIVISION = {
+    // VATUK
+    'EG': 'VATUK',
+
+    // VATEUD → vACC breakdown (Ireland, continental Europe, Balkans, Scandinavia, Turkey, Med islands)
+    'EB': 'Belux vACC', 'EL': 'Belux vACC', 'LX': 'Belux vACC',
+    'ED': 'Germany vACC', 'ET': 'Germany vACC',
+    'EE': 'Estonia vACC',
+    'EF': 'Finland vACC',
+    'EH': 'Netherlands vACC',
+    'EI': 'Ireland vACC',
+    'EK': 'Denmark vACC',
+    'EN': 'Norway vACC',
+    'EP': 'Poland vACC',
+    'ES': 'Sweden vACC',
+    'EV': 'Latvia vACC',
+    'EY': 'Lithuania vACC',
+    'BI': 'Iceland vACC',
+    'BK': 'Kosovo vACC',
+    'LB': 'Bulgaria vACC',
+    'LC': 'Cyprus vACC',
+    'LD': 'Croatia vACC',
+    'LE': 'Spain vACC',
+    'LF': 'France vACC',
+    'LG': 'Greece vACC',
+    'LH': 'Hungary vACC',
+    'LI': 'Italy vACC',
+    'LJ': 'Slovenia vACC',
+    'LK': 'Czech vACC',
+    'LM': 'Malta vACC',
+    'LO': 'Austria vACC',
+    'LP': 'Portugal vACC',
+    'LQ': 'Bosnia vACC',
+    'LR': 'Romania vACC',
+    'LS': 'Switzerland vACC',
+    'LT': 'Turkey vACC',
+    'LU': 'Moldova vACC',
+    'LW': 'Macedonia vACC',
+    'LY': 'Serbia vACC',
+    'LZ': 'Slovakia vACC',
+    'UK': 'Ukraine vACC', 'UR': 'Ukraine vACC',
+    // Spanish enclaves / overseas territories (politically Spain → Spain vACC)
+    'GC': 'Spain vACC', 'GE': 'Spain vACC',
+
+    // VATIL — Israel (separate division within EMEA)
+    'LL': 'VATIL',
+
+    // VATRUS — Russian Division (Russia, Belarus, Central Asia)
+    'UA': 'VATRUS', 'UB': 'VATRUS', 'UC': 'VATRUS', 'UD': 'VATRUS',
+    'UE': 'VATRUS', 'UG': 'VATRUS', 'UH': 'VATRUS', 'UI': 'VATRUS',
+    'UL': 'VATRUS', 'UM': 'VATRUS', 'UN': 'VATRUS', 'UO': 'VATRUS',
+    'US': 'VATRUS', 'UT': 'VATRUS', 'UU': 'VATRUS', 'UW': 'VATRUS',
+
+    // VATMENA (Persian Gulf, Middle East, North Africa — incl. Morocco)
+    'DA': 'VATMENA', 'DT': 'VATMENA', 'GM': 'VATMENA',
+    'HE': 'VATMENA', 'HL': 'VATMENA', 'HS': 'VATMENA',
+    'OB': 'VATMENA', 'OE': 'VATMENA', 'OI': 'VATMENA',
+    'OJ': 'VATMENA', 'OK': 'VATMENA', 'OL': 'VATMENA', 'OM': 'VATMENA',
+    'OO': 'VATMENA', 'OR': 'VATMENA', 'OS': 'VATMENA',
+    'OT': 'VATMENA', 'OY': 'VATMENA',
+
+    // VATSSA — Sub-Sahara Africa (everything African south of MENA)
+    'FA': 'VATSSA', 'FB': 'VATSSA', 'FC': 'VATSSA', 'FD': 'VATSSA',
+    'FE': 'VATSSA', 'FG': 'VATSSA', 'FH': 'VATSSA', 'FI': 'VATSSA',
+    'FJ': 'VATSSA', 'FK': 'VATSSA', 'FL': 'VATSSA', 'FM': 'VATSSA',
+    'FN': 'VATSSA', 'FO': 'VATSSA', 'FP': 'VATSSA', 'FQ': 'VATSSA',
+    'FS': 'VATSSA', 'FT': 'VATSSA', 'FV': 'VATSSA', 'FW': 'VATSSA',
+    'FX': 'VATSSA', 'FY': 'VATSSA', 'FZ': 'VATSSA',
+    'HA': 'VATSSA', 'HB': 'VATSSA', 'HC': 'VATSSA', 'HD': 'VATSSA',
+    'HF': 'VATSSA', 'HH': 'VATSSA', 'HK': 'VATSSA', 'HR': 'VATSSA',
+    'HT': 'VATSSA', 'HU': 'VATSSA',
+    'GA': 'VATSSA', 'GB': 'VATSSA', 'GF': 'VATSSA', 'GG': 'VATSSA',
+    'GL': 'VATSSA', 'GO': 'VATSSA', 'GQ': 'VATSSA', 'GS': 'VATSSA',
+    'GU': 'VATSSA', 'GV': 'VATSSA',
+    'DB': 'VATSSA', 'DF': 'VATSSA', 'DI': 'VATSSA', 'DG': 'VATSSA',
+    'DN': 'VATSSA', 'DR': 'VATSSA', 'DX': 'VATSSA',
+
+    // VATCAN
+    'CY': 'VATCAN', 'CZ': 'VATCAN', 'BG': 'VATCAN',
+
+    // VATCAR — Caribbean islands only (Bahamas, Cuba, Dom Rep, Cayman, Jamaica, Antilles, etc.)
+    'MB': 'VATCAR', 'MD': 'VATCAR', 'MK': 'VATCAR', 'MU': 'VATCAR',
+    'MW': 'VATCAR', 'MY': 'VATCAR',
+    'TA': 'VATCAR', 'TB': 'VATCAR', 'TD': 'VATCAR', 'TF': 'VATCAR',
+    'TG': 'VATCAR', 'TI': 'VATCAR', 'TJ': 'VATCAR', 'TK': 'VATCAR',
+    'TL': 'VATCAR', 'TN': 'VATCAR', 'TQ': 'VATCAR', 'TR': 'VATCAR',
+    'TT': 'VATCAR', 'TU': 'VATCAR', 'TV': 'VATCAR', 'TX': 'VATCAR',
+
+    // VATCA — Central America (Guatemala, Belize, Honduras, El Salvador, Nicaragua, Costa Rica, Panama)
+    'MG': 'VATCA',  // Guatemala
+    'MZ': 'VATCA',  // Belize
+    'MH': 'VATCA',  // Honduras
+    'MS': 'VATCA',  // El Salvador
+    'MN': 'VATCA',  // Nicaragua
+    'MR': 'VATCA',  // Costa Rica
+    'MP': 'VATCA',  // Panama
+    'MT': 'VATCA',  // Haiti (no dedicated division — closest by region)
+
+    // VATMEX
+    'MM': 'VATMEX',
+
+    // VATBRZ
+    'SB': 'VATBRZ', 'SD': 'VATBRZ', 'SI': 'VATBRZ', 'SJ': 'VATBRZ',
+    'SN': 'VATBRZ', 'SS': 'VATBRZ', 'SW': 'VATBRZ',
+
+    // VATSUR — South America (Argentina, Bolivia, Chile, Colombia, Peru, Ecuador, Uruguay, Venezuela, Paraguay)
+    'SA': 'VATSUR', 'SC': 'VATSUR', 'SE': 'VATSUR', 'SF': 'VATSUR',
+    'SG': 'VATSUR', 'SK': 'VATSUR', 'SL': 'VATSUR', 'SM': 'VATSUR',
+    'SO': 'VATSUR', 'SP': 'VATSUR', 'SU': 'VATSUR', 'SV': 'VATSUR',
+    'SY': 'VATSUR',
+
+    // VATPAC — Australia + most Pacific island nations
+    'YA': 'VATPAC', 'YB': 'VATPAC', 'YC': 'VATPAC', 'YD': 'VATPAC',
+    'YE': 'VATPAC', 'YF': 'VATPAC', 'YG': 'VATPAC', 'YH': 'VATPAC',
+    'YI': 'VATPAC', 'YJ': 'VATPAC', 'YK': 'VATPAC', 'YL': 'VATPAC',
+    'YM': 'VATPAC', 'YN': 'VATPAC', 'YO': 'VATPAC', 'YP': 'VATPAC',
+    'YQ': 'VATPAC', 'YR': 'VATPAC', 'YS': 'VATPAC', 'YT': 'VATPAC',
+    'YU': 'VATPAC', 'YV': 'VATPAC', 'YW': 'VATPAC', 'YX': 'VATPAC',
+    'YY': 'VATPAC', 'YZ': 'VATPAC',
+    'AG': 'VATPAC', 'AN': 'VATPAC', 'AY': 'VATPAC',
+    'NG': 'VATPAC',  // Kiribati
+    'NL': 'VATPAC',  // Wallis & Futuna
+    'NT': 'VATPAC',  // French Polynesia
+    'NV': 'VATPAC',  // Vanuatu
+    'NW': 'VATPAC',  // New Caledonia
+    'PB': 'VATPAC', 'PC': 'VATPAC', 'PG': 'VATPAC', 'PJ': 'VATPAC',
+    'PK': 'VATPAC', 'PL': 'VATPAC', 'PM': 'VATPAC', 'PT': 'VATPAC',
+    'PW': 'VATPAC',
+
+    // VATNZ — New Zealand, Samoa, Tonga, Cook Islands, Niue
+    'NZ': 'VATNZ',
+    'NS': 'VATNZ',  // Samoa
+    'NF': 'VATNZ',  // Fiji-Tonga (Tonga side)
+    'NC': 'VATNZ',  // Cook Islands
+    'NI': 'VATNZ',  // Niue
+
+    // VATJPN
+    'RJ': 'VATJPN', 'RO': 'VATJPN',
+    // VATKOR (covers North Korea by proximity — no separate VATSIM division)
+    'RK': 'VATKOR', 'ZK': 'VATKOR',
+    // VATROC — Republic of China (Taiwan)
+    'RC': 'VATROC',
+    // VATSEA — South East Asia
+    'RP': 'VATSEA',  // Philippines
+    'VD': 'VATSEA',  // Cambodia
+    'VL': 'VATSEA',  // Laos
+    'VT': 'VATSEA',  // Thailand
+    'VV': 'VATSEA',  // Vietnam
+    'VY': 'VATSEA',  // Myanmar
+    'WA': 'VATSEA', 'WB': 'VATSEA', 'WI': 'VATSEA', 'WQ': 'VATSEA', 'WR': 'VATSEA', // Indonesia
+    'WM': 'VATSEA',  // Malaysia
+    'WP': 'VATSEA',  // Timor-Leste
+    'WS': 'VATSEA',  // Singapore
+    // VATPRC — China including Hong Kong + Macau (no separate VATHK division)
+    'ZB': 'VATPRC', 'ZG': 'VATPRC', 'ZH': 'VATPRC', 'ZJ': 'VATPRC',
+    'ZL': 'VATPRC', 'ZP': 'VATPRC', 'ZS': 'VATPRC', 'ZU': 'VATPRC',
+    'ZW': 'VATPRC', 'ZY': 'VATPRC',
+    'VH': 'VATPRC',  // Hong Kong
+    'VM': 'VATPRC',  // Macau
+    // VATWA — West Asia (Indian subcontinent: Afghanistan, Pakistan, India, Bangladesh, Bhutan, Nepal, Sri Lanka, Maldives)
+    'OA': 'VATWA',  // Afghanistan
+    'OP': 'VATWA',  // Pakistan
+    'VA': 'VATWA', 'VE': 'VATWA', 'VI': 'VATWA', 'VO': 'VATWA',  // India
+    'VC': 'VATWA',  // Sri Lanka
+    'VG': 'VATWA',  // Bangladesh
+    'VN': 'VATWA',  // Nepal
+    'VQ': 'VATWA',  // Bhutan
+    'VR': 'VATWA',  // Maldives
+  };
+
+  // VATUSA — per-airport ARTCC lookup (top US airports). Falls back to
+  // 'VATUSA (Other)' for unmapped K-airports.
+  const US_ARTCC = {
+    // ZAB - Albuquerque
+    'KABQ': 'ZAB Albuquerque', 'KELP': 'ZAB Albuquerque', 'KLBB': 'ZAB Albuquerque',
+    'KAMA': 'ZAB Albuquerque', 'KROW': 'ZAB Albuquerque', 'KSAF': 'ZAB Albuquerque',
+    // ZAN - Anchorage (PA prefix airports also map below)
+    // ZAU - Chicago
+    'KORD': 'ZAU Chicago', 'KMDW': 'ZAU Chicago', 'KMKE': 'ZAU Chicago',
+    'KMSN': 'ZAU Chicago', 'KRFD': 'ZAU Chicago', 'KSBN': 'ZAU Chicago',
+    'KCID': 'ZAU Chicago', 'KDSM': 'ZAU Chicago', 'KFWA': 'ZAU Chicago',
+    // ZBW - Boston
+    'KBOS': 'ZBW Boston', 'KBDL': 'ZBW Boston', 'KMHT': 'ZBW Boston',
+    'KPVD': 'ZBW Boston', 'KASH': 'ZBW Boston', 'KPWM': 'ZBW Boston',
+    'KBGR': 'ZBW Boston', 'KBTV': 'ZBW Boston', 'KALB': 'ZBW Boston',
+    'KSYR': 'ZBW Boston', 'KROC': 'ZBW Boston', 'KEWB': 'ZBW Boston',
+    // ZDC - Washington
+    'KIAD': 'ZDC Washington', 'KDCA': 'ZDC Washington', 'KBWI': 'ZDC Washington',
+    'KRDU': 'ZDC Washington', 'KCHO': 'ZDC Washington', 'KORF': 'ZDC Washington',
+    'KRIC': 'ZDC Washington', 'KILM': 'ZDC Washington', 'KGSO': 'ZDC Washington',
+    'KSBY': 'ZDC Washington', 'KCRW': 'ZDC Washington',
+    // ZDV - Denver
+    'KDEN': 'ZDV Denver', 'KCOS': 'ZDV Denver', 'KCYS': 'ZDV Denver',
+    'KGJT': 'ZDV Denver', 'KASE': 'ZDV Denver', 'KEGE': 'ZDV Denver',
+    'KCPR': 'ZDV Denver', 'KBIL': 'ZDV Denver', 'KBZN': 'ZDV Denver',
+    // ZFW - Fort Worth
+    'KDFW': 'ZFW Fort Worth', 'KDAL': 'ZFW Fort Worth', 'KOKC': 'ZFW Fort Worth',
+    'KTUL': 'ZFW Fort Worth', 'KLIT': 'ZFW Fort Worth', 'KSHV': 'ZFW Fort Worth',
+    'KAFW': 'ZFW Fort Worth',
+    // ZHU - Houston
+    'KIAH': 'ZHU Houston', 'KHOU': 'ZHU Houston', 'KAUS': 'ZHU Houston',
+    'KSAT': 'ZHU Houston', 'KMSY': 'ZHU Houston', 'KCRP': 'ZHU Houston',
+    'KBPT': 'ZHU Houston', 'KGPT': 'ZHU Houston',
+    // ZID - Indianapolis
+    'KIND': 'ZID Indianapolis', 'KCMH': 'ZID Indianapolis', 'KCVG': 'ZID Indianapolis',
+    'KSDF': 'ZID Indianapolis', 'KLEX': 'ZID Indianapolis', 'KCAK': 'ZID Indianapolis',
+    'KDAY': 'ZID Indianapolis', 'KEVV': 'ZID Indianapolis',
+    // ZJX - Jacksonville
+    'KJAX': 'ZJX Jacksonville', 'KMCO': 'ZJX Jacksonville', 'KTPA': 'ZJX Jacksonville',
+    'KSAV': 'ZJX Jacksonville', 'KCHS': 'ZJX Jacksonville', 'KMYR': 'ZJX Jacksonville',
+    'KGNV': 'ZJX Jacksonville', 'KPNS': 'ZJX Jacksonville', 'KTLH': 'ZJX Jacksonville',
+    // ZKC - Kansas City
+    'KMCI': 'ZKC Kansas City', 'KSTL': 'ZKC Kansas City', 'KOMA': 'ZKC Kansas City',
+    'KICT': 'ZKC Kansas City', 'KSGF': 'ZKC Kansas City', 'KCOU': 'ZKC Kansas City',
+    'KFAR': 'ZKC Kansas City', // shared near border
+    // ZLA - Los Angeles
+    'KLAX': 'ZLA Los Angeles', 'KSAN': 'ZLA Los Angeles', 'KLAS': 'ZLA Los Angeles',
+    'KSNA': 'ZLA Los Angeles', 'KONT': 'ZLA Los Angeles', 'KBUR': 'ZLA Los Angeles',
+    'KLGB': 'ZLA Los Angeles', 'KPSP': 'ZLA Los Angeles', 'KPHX': 'ZLA Los Angeles',
+    'KTUS': 'ZLA Los Angeles',
+    // ZLC - Salt Lake City
+    'KSLC': 'ZLC Salt Lake', 'KBOI': 'ZLC Salt Lake', 'KPVU': 'ZLC Salt Lake',
+    'KIDA': 'ZLC Salt Lake', 'KFCA': 'ZLC Salt Lake',
+    // ZMA - Miami
+    'KMIA': 'ZMA Miami', 'KFLL': 'ZMA Miami', 'KPBI': 'ZMA Miami',
+    'KRSW': 'ZMA Miami', 'KEYW': 'ZMA Miami', 'KAPF': 'ZMA Miami',
+    // ZME - Memphis
+    'KMEM': 'ZME Memphis', 'KBNA': 'ZME Memphis', 'KTYS': 'ZME Memphis',
+    'KCHA': 'ZME Memphis', 'KJAN': 'ZME Memphis', 'KLIT': 'ZME Memphis',
+    // ZMP - Minneapolis
+    'KMSP': 'ZMP Minneapolis', 'KSTP': 'ZMP Minneapolis', 'KFSD': 'ZMP Minneapolis',
+    'KBIS': 'ZMP Minneapolis', 'KGFK': 'ZMP Minneapolis', 'KDLH': 'ZMP Minneapolis',
+    'KRST': 'ZMP Minneapolis', 'KMIC': 'ZMP Minneapolis', 'KFCM': 'ZMP Minneapolis',
+    // ZNY - New York
+    'KJFK': 'ZNY New York', 'KEWR': 'ZNY New York', 'KLGA': 'ZNY New York',
+    'KHPN': 'ZNY New York', 'KISP': 'ZNY New York', 'KTEB': 'ZNY New York',
+    'KSWF': 'ZNY New York', 'KACY': 'ZNY New York', 'KPHL': 'ZNY New York',
+    'KABE': 'ZNY New York', 'KMMU': 'ZNY New York',
+    // ZOA - Oakland
+    'KSFO': 'ZOA Oakland', 'KOAK': 'ZOA Oakland', 'KSJC': 'ZOA Oakland',
+    'KSMF': 'ZOA Oakland', 'KFAT': 'ZOA Oakland', 'KMRY': 'ZOA Oakland',
+    'KRNO': 'ZOA Oakland', 'KSTS': 'ZOA Oakland',
+    // ZOB - Cleveland
+    'KCLE': 'ZOB Cleveland', 'KDTW': 'ZOB Cleveland', 'KPIT': 'ZOB Cleveland',
+    'KGRR': 'ZOB Cleveland', 'KBUF': 'ZOB Cleveland', 'KTOL': 'ZOB Cleveland',
+    'KFNT': 'ZOB Cleveland', 'KLAN': 'ZOB Cleveland',
+    // ZSE - Seattle
+    'KSEA': 'ZSE Seattle', 'KPDX': 'ZSE Seattle', 'KGEG': 'ZSE Seattle',
+    'KEUG': 'ZSE Seattle', 'KBLI': 'ZSE Seattle', 'KMFR': 'ZSE Seattle',
+    // ZTL - Atlanta
+    'KATL': 'ZTL Atlanta', 'KCLT': 'ZTL Atlanta', 'KBHM': 'ZTL Atlanta',
+    'KAVL': 'ZTL Atlanta', 'KGSP': 'ZTL Atlanta', 'KCAE': 'ZTL Atlanta',
+    'KTRI': 'ZTL Atlanta', 'KMGM': 'ZTL Atlanta', 'KHSV': 'ZTL Atlanta',
+  };
+
+  function divisionForIcao(icao) {
+    if (!icao || /\*/.test(icao) || icao.length < 2) return 'Other';
+    const upper = icao.toUpperCase();
+    // K-prefix: per-airport ARTCC lookup, fallback to VATUSA bucket
+    if (upper[0] === 'K' && upper.length === 4) {
+      return US_ARTCC[upper] || 'VATUSA (Other)';
+    }
+    // PA = Alaska (ZAN), PH = Hawaii (HCF)
+    if (upper.slice(0, 2) === 'PA') return 'ZAN Anchorage';
+    if (upper.slice(0, 2) === 'PH') return 'HCF Honolulu';
+    return ICAO_PREFIX_DIVISION[upper.slice(0, 2)] || 'Other';
+  }
+
+  const divisionAgg = {}; // div -> { icao -> count }
+  for (const s of visits) {
+    if (/\*/.test(s.icao)) continue;
+    const div = divisionForIcao(s.icao);
+    if (!divisionAgg[div]) divisionAgg[div] = {};
+    divisionAgg[div][s.icao] = (divisionAgg[div][s.icao] || 0) + 1;
+  }
+  // Build per-ICAO suggester list (across both visit + avoid types) for the
+  // "who suggested this" modal that opens when any destination is clicked.
+  const suggestedIcaosForNames = [...new Set(suggestions.map(s => s.icao).filter(i => !/\*/.test(i)))];
+  const airportNameRows = suggestedIcaosForNames.length > 0
+    ? await prisma.airport.findMany({
+        where: { icao: { in: suggestedIcaosForNames } },
+        select: { icao: true, name: true }
+      })
+    : [];
+  const airportNameLookup = Object.fromEntries(airportNameRows.map(a => [a.icao, a.name]));
+
+  const suggestersByIcao = {};
+  for (const s of suggestions) {
+    if (!suggestersByIcao[s.icao]) {
+      suggestersByIcao[s.icao] = { name: airportNameLookup[s.icao] || '', suggesters: [] };
+    }
+    suggestersByIcao[s.icao].suggesters.push({
+      name: `${s.firstName} ${s.lastName}`.trim(),
+      role: s.association || '',
+      reason: s.reason || '',
+      type: s.type === 'avoid' ? 'avoid' : 'visit',
+      date: new Date(s.createdAt).toISOString().slice(0, 10)
+    });
+  }
+
+  const divisionStats = Object.entries(divisionAgg).map(([division, icaoMap]) => {
+    const top = Object.entries(icaoMap)
+      .sort((a, b) => b[1] - a[1])
+      .map(([icao, count]) => ({
+        icao,
+        count,
+        color: getVisitColor(icao),
+        tooltip: getTooltip(icao)
+      }));
+    return {
+      division,
+      totalVotes: top.reduce((acc, x) => acc + x.count, 0),
+      uniqueIcaos: top.length,
+      top
+    };
+  }).sort((a, b) => b.totalVotes - a.totalVotes);
+
   function buildRows(list) {
     if (!list.length) return '<tr><td colspan="8" class="empty">None yet</td></tr>';
     return list.map(s => {
@@ -2081,7 +2429,7 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
           <td>${s.association}</td>
           <td style="max-width:300px;font-size:12px;">
             <div class="reason-cell">${s.reason}</div>
-            ${s.reason.length > 100 ? '<button class="reason-expand">Show more</button>' : ''}
+            ${s.reason ? '<button class="reason-expand">Show more</button>' : ''}
           </td>
           <td style="font-size:12px;">${s.contact}</td>
           <td style="text-align:center;"><input type="checkbox" ${s.notify ? 'checked' : ''} disabled style="accent-color:var(--accent);" /></td>
@@ -2196,6 +2544,249 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
       </section>
     </div>
 
+    <section class="card card-full" style="margin-bottom:24px;">
+      <h2 style="color:#a78bfa;">By VATSIM Division</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">
+        Suggestions grouped by the division that covers each ICAO prefix. Click a pill to see the top airports in that division.
+      </p>
+      ${divisionStats.length ? `
+      <div class="division-pill-list">
+        ${divisionStats.map(d => `
+          <button type="button" class="division-pill" data-division="${d.division}">
+            <span class="dp-name">${d.division}</span>
+            <span class="dp-stats">${d.totalVotes} vote${d.totalVotes !== 1 ? 's' : ''} · ${d.uniqueIcaos} airport${d.uniqueIcaos !== 1 ? 's' : ''}</span>
+          </button>
+        `).join('')}
+      </div>` : '<p style="color:var(--muted);font-size:13px;">No suggestions to group yet.</p>'}
+    </section>
+
+    <div id="suggesterModal" class="modal hidden" style="z-index:10002;">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card suggester-modal-card">
+        <div class="suggester-modal-header">
+          <h3 id="suggesterModalTitle" style="margin:0;color:#93c5fd;font-size:18px;">Suggesters</h3>
+          <button type="button" id="suggesterModalClose" class="suggester-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <p id="suggesterModalSubtitle" style="margin:4px 0 14px;font-size:12px;color:var(--muted);"></p>
+        <div id="suggesterModalList" class="suggester-list"></div>
+      </div>
+    </div>
+
+    <div id="divisionModal" class="modal hidden" style="z-index:10001;">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card division-modal-card">
+        <div class="division-modal-header">
+          <h3 id="divisionModalTitle" style="margin:0;color:#93c5fd;font-size:18px;">Division</h3>
+          <button type="button" id="divisionModalClose" class="division-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <p id="divisionModalSubtitle" style="margin:0 0 16px;font-size:12px;color:var(--muted);"></p>
+        <div id="divisionModalList" class="top-list"></div>
+      </div>
+    </div>
+
+    <style>
+      .division-pill-list { display:flex; flex-wrap:wrap; gap:8px; }
+      .division-pill {
+        display:flex; flex-direction:column; align-items:flex-start; gap:2px;
+        padding:8px 14px; background:rgba(167,139,250,0.08);
+        border:1px solid rgba(167,139,250,0.3); border-radius:8px;
+        color:var(--text); font-family:inherit; font-size:13px; cursor:pointer;
+        transition:background .15s, border-color .15s, transform .1s;
+      }
+      .division-pill:hover { background:rgba(167,139,250,0.18); border-color:#a78bfa; transform:translateY(-1px); }
+      .dp-name { font-weight:700; color:#a78bfa; letter-spacing:0.5px; }
+      .dp-stats { font-size:11px; color:var(--muted); }
+      .division-modal-card {
+        position:relative; width:560px; max-width:92vw; max-height:80vh;
+        padding:20px 22px; background:#0b1220;
+        border:1px solid rgba(167,139,250,0.3); border-radius:10px;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6); overflow:hidden;
+        display:flex; flex-direction:column; text-align:left;
+      }
+      .division-modal-header { display:flex; justify-content:space-between; align-items:center; }
+      .division-modal-close {
+        background:transparent; border:1px solid transparent; color:var(--muted);
+        font-size:22px; line-height:1; width:30px; height:30px; border-radius:6px; cursor:pointer; padding:0;
+      }
+      .division-modal-close:hover { background:rgba(255,255,255,0.06); color:var(--text); border-color:rgba(255,255,255,0.12); }
+      #divisionModalList { overflow-y:auto; padding-right:4px; }
+
+      .icao-tag, .suggestion-chip { cursor: pointer; }
+      .icao-tag:hover { filter: brightness(1.15); }
+      .suggester-modal-card {
+        position:relative; width:520px; max-width:92vw; max-height:80vh;
+        padding:20px 22px; background:#0b1220;
+        border:1px solid rgba(56,189,248,0.3); border-radius:10px;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6); overflow:hidden;
+        display:flex; flex-direction:column; text-align:left;
+      }
+      .suggester-modal-header { display:flex; justify-content:space-between; align-items:center; }
+      .suggester-modal-close {
+        background:transparent; border:1px solid transparent; color:var(--muted);
+        font-size:22px; line-height:1; width:30px; height:30px; border-radius:6px; cursor:pointer; padding:0;
+      }
+      .suggester-modal-close:hover { background:rgba(255,255,255,0.06); color:var(--text); border-color:rgba(255,255,255,0.12); }
+      .suggester-list { overflow-y:auto; padding-right:4px; display:flex; flex-direction:column; gap:8px; }
+      .suggester-row {
+        padding:10px 12px; background:rgba(255,255,255,0.03);
+        border:1px solid var(--border); border-radius:8px;
+      }
+      .suggester-row.avoid { border-color:rgba(248,113,113,0.4); background:rgba(248,113,113,0.04); }
+      .suggester-row-head {
+        display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:4px;
+      }
+      .suggester-name { font-weight:600; font-size:14px; color:var(--text); }
+      .suggester-role {
+        display:inline-block; font-size:11px; padding:3px 9px; border-radius:10px;
+        border:1px solid transparent; font-weight:600; letter-spacing:0.2px;
+        margin:2px 0 8px; line-height:1.3;
+      }
+      .suggester-meta { margin-top:2px; }
+      .suggester-role.role-director { color:#fbbf24; background:rgba(251,191,36,0.12); border-color:rgba(251,191,36,0.35); }
+      .suggester-role.role-staff    { color:#f97316; background:rgba(249,115,22,0.12); border-color:rgba(249,115,22,0.3); }
+      .suggester-role.role-mentor   { color:#ec4899; background:rgba(236,72,153,0.12); border-color:rgba(236,72,153,0.3); }
+      .suggester-role.role-instructor { color:#ef4444; background:rgba(239,68,68,0.12); border-color:rgba(239,68,68,0.3); }
+      .suggester-role.role-controller { color:#38bdf8; background:rgba(56,189,248,0.12); border-color:rgba(56,189,248,0.3); }
+      .suggester-role.role-student  { color:#22d3ee; background:rgba(34,211,238,0.12); border-color:rgba(34,211,238,0.3); }
+      .suggester-role.role-pilot    { color:#4ade80; background:rgba(74,222,128,0.12); border-color:rgba(74,222,128,0.3); }
+      .suggester-role.role-member   { color:#94a3b8; background:rgba(148,163,184,0.12); border-color:rgba(148,163,184,0.3); }
+      .suggester-role.role-other    { color:#a78bfa; background:rgba(167,139,250,0.12); border-color:rgba(167,139,250,0.3); }
+      .suggester-meta { font-size:11px; color:var(--muted); }
+      .suggester-reason { font-size:12px; color:var(--muted); margin-top:4px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+      .suggester-type-pill { font-size:10px; padding:1px 6px; border-radius:8px; text-transform:uppercase; letter-spacing:0.5px; font-weight:700; }
+      .suggester-type-pill.visit { background:rgba(74,222,128,0.15); color:#4ade80; }
+      .suggester-type-pill.avoid { background:rgba(248,113,113,0.15); color:#f87171; }
+    </style>
+
+    <script>
+      window.SUGGESTIONS_BY_DIVISION = ${JSON.stringify(divisionStats.reduce((acc, d) => {
+        acc[d.division] = d;
+        return acc;
+      }, {}))};
+      window.SUGGESTERS_BY_ICAO = ${JSON.stringify(suggestersByIcao)};
+
+      // Open suggester modal whenever any destination chip / icao tag is clicked
+      (function() {
+        var sm = document.getElementById('suggesterModal');
+        if (!sm) return;
+        var titleEl = document.getElementById('suggesterModalTitle');
+        var subEl = document.getElementById('suggesterModalSubtitle');
+        var listEl = document.getElementById('suggesterModalList');
+
+        function escapeHtml(s) {
+          return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function roleClass(role) {
+          var r = (role || '').toLowerCase();
+          if (!r) return 'role-other';
+          // Most-specific first: a "vACC Director" must win over plain "vACC Staff"
+          if (/director/.test(r)) return 'role-director';
+          if (/instructor/.test(r)) return 'role-instructor';
+          if (/mentor/.test(r)) return 'role-mentor';
+          if (/staff/.test(r)) return 'role-staff';
+          if (/student|s[123]\b/.test(r)) return 'role-student';
+          if (/controller|\batc\b|c[123]\b|i[123]\b/.test(r)) return 'role-controller';
+          if (/pilot|p[0-9]\b/.test(r)) return 'role-pilot';
+          if (/member|observer|\bobs\b/.test(r)) return 'role-member';
+          return 'role-other';
+        }
+
+        function open(icao) {
+          if (!icao) return;
+          icao = icao.toUpperCase();
+          var entry = (window.SUGGESTERS_BY_ICAO || {})[icao] || { name: '', suggesters: [] };
+          var rows = entry.suggesters || [];
+          titleEl.innerHTML = escapeHtml(icao) +
+            (entry.name ? ' <span style="color:var(--muted);font-weight:400;font-size:14px;">' + escapeHtml(entry.name) + '</span>' : '') +
+            ' <span style="color:var(--muted);font-weight:400;font-size:13px;">— Who Suggested</span>';
+          var visits = rows.filter(function(r) { return r.type !== 'avoid'; }).length;
+          var avoids = rows.filter(function(r) { return r.type === 'avoid'; }).length;
+          var parts = [];
+          if (visits) parts.push(visits + ' visit suggestion' + (visits !== 1 ? 's' : ''));
+          if (avoids) parts.push(avoids + ' avoid request' + (avoids !== 1 ? 's' : ''));
+          subEl.textContent = parts.length ? parts.join(' · ') : 'No suggestions on record.';
+          if (!rows.length) {
+            listEl.innerHTML = '<div style="font-size:13px;color:var(--muted);padding:12px;text-align:center;">No suggesters for ' + escapeHtml(icao) + '.</div>';
+          } else {
+            listEl.innerHTML = rows.map(function(r) {
+              return '<div class="suggester-row ' + (r.type === 'avoid' ? 'avoid' : '') + '">' +
+                '<div class="suggester-row-head">' +
+                  '<span class="suggester-name">' + escapeHtml(r.name || 'Anonymous') + '</span>' +
+                  '<span class="suggester-type-pill ' + (r.type === 'avoid' ? 'avoid' : 'visit') + '">' + (r.type === 'avoid' ? 'Avoid' : 'Visit') + '</span>' +
+                '</div>' +
+                (r.role ? '<div><span class="suggester-role ' + roleClass(r.role) + '">' + escapeHtml(r.role) + '</span></div>' : '') +
+                '<div class="suggester-meta">' + escapeHtml(r.date) + '</div>' +
+                (r.reason ? '<div class="suggester-reason">' + escapeHtml(r.reason) + '</div>' : '') +
+              '</div>';
+            }).join('');
+          }
+          sm.classList.remove('hidden');
+        }
+        function close() { sm.classList.add('hidden'); }
+
+        document.body.addEventListener('click', function(e) {
+          // Skip clicks inside any modal so opening/closing chains work
+          if (e.target.closest('#suggesterModal')) return;
+          var tag = e.target.closest('.icao-tag');
+          if (tag) {
+            var strong = tag.querySelector('strong');
+            var icao = (strong ? strong.textContent : tag.textContent).trim();
+            if (icao) { e.preventDefault(); open(icao); return; }
+          }
+          var chip = e.target.closest('.suggestion-chip');
+          if (chip) {
+            var icaoEl = chip.querySelector('.chip-icao');
+            var icao2 = (icaoEl ? icaoEl.textContent : '').trim();
+            if (icao2) { e.preventDefault(); open(icao2); return; }
+          }
+        });
+        document.getElementById('suggesterModalClose').addEventListener('click', close);
+        sm.querySelector('.modal-backdrop').addEventListener('click', close);
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'Escape' && !sm.classList.contains('hidden')) close();
+        });
+      })();
+
+      (function() {
+        var modal = document.getElementById('divisionModal');
+        if (!modal) return;
+        var titleEl = document.getElementById('divisionModalTitle');
+        var subEl = document.getElementById('divisionModalSubtitle');
+        var listEl = document.getElementById('divisionModalList');
+
+        function open(division) {
+          var data = window.SUGGESTIONS_BY_DIVISION[division];
+          if (!data) return;
+          titleEl.textContent = division;
+          subEl.textContent = data.uniqueIcaos + ' airport' + (data.uniqueIcaos !== 1 ? 's' : '') + ' · ' + data.totalVotes + ' total vote' + (data.totalVotes !== 1 ? 's' : '');
+          var max = data.top[0] ? data.top[0].count : 1;
+          listEl.innerHTML = data.top.map(function(row, i) {
+            var pct = Math.round((row.count / max) * 100);
+            return '<div class="top-row">' +
+              '<span class="top-pos">#' + (i + 1) + '</span>' +
+              '<span class="icao-tag icao-' + row.color + '" data-tooltip="' + row.tooltip.replace(/"/g, '&quot;') + '"><strong>' + row.icao + '</strong></span>' +
+              '<div class="top-bar-wrap"><div class="top-bar visit" style="width:' + pct + '%"></div></div>' +
+              '<span class="top-count">' + row.count + '</span>' +
+              '</div>';
+          }).join('');
+          modal.classList.remove('hidden');
+        }
+        function close() { modal.classList.add('hidden'); }
+
+        document.querySelectorAll('.division-pill').forEach(function(btn) {
+          btn.addEventListener('click', function() { open(btn.dataset.division); });
+        });
+        document.getElementById('divisionModalClose').addEventListener('click', close);
+        modal.querySelector('.modal-backdrop').addEventListener('click', close);
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+        });
+      })();
+    </script>
+
     <section class="card card-full">
       <h2 style="color:var(--accent);">Never Visited — Suggested Airports</h2>
       <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">
@@ -2214,7 +2805,11 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
 
     <section class="card card-full" style="margin-top:24px;">
       <h2 style="color:#4ade80;">All Suggestions</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">${visits.length} suggestion${visits.length !== 1 ? 's' : ''} to visit</p>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">${visits.length} suggestion${visits.length !== 1 ? 's' : ''} to visit</p>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <input type="search" id="visitSearch" placeholder="Filter by ICAO or name..." style="flex:1;max-width:360px;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,0.04);color:var(--text);font-size:13px;" />
+        <span id="visitSearchCount" style="font-size:12px;color:var(--muted);"></span>
+      </div>
       <div class="admin-table-scroll">
         ${buildTable('visitTable', buildRows(visits))}
       </div>
@@ -2387,6 +2982,45 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
           rows.forEach(function(r) { tbody.appendChild(r); });
         });
       });
+
+      // Hide 'Show more' on reason cells that aren't actually clipped
+      (function() {
+        document.querySelectorAll('.reason-cell').forEach(function(cell) {
+          var btn = cell.nextElementSibling;
+          if (!btn || !btn.classList.contains('reason-expand')) return;
+          // scrollHeight > clientHeight means the 2-line clamp is actually truncating
+          if (cell.scrollHeight <= cell.clientHeight + 1) {
+            btn.style.display = 'none';
+          }
+        });
+      })();
+
+      // Filter visit table by ICAO or suggester name
+      (function() {
+        var input = document.getElementById('visitSearch');
+        var countEl = document.getElementById('visitSearchCount');
+        var tbody = document.querySelector('#visitTable tbody');
+        if (!input || !tbody) return;
+        var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr[data-icao]'));
+        var total = rows.length;
+        function apply() {
+          var q = input.value.trim().toLowerCase();
+          var shown = 0;
+          rows.forEach(function(tr) {
+            if (!q) { tr.style.display = ''; shown++; return; }
+            var icao = (tr.dataset.icao || '').toLowerCase();
+            var name = (tr.dataset.name || '').toLowerCase();
+            var assoc = (tr.dataset.assoc || '').toLowerCase();
+            var match = icao.indexOf(q) !== -1 || name.indexOf(q) !== -1 || assoc.indexOf(q) !== -1;
+            tr.style.display = match ? '' : 'none';
+            if (match) shown++;
+          });
+          countEl.textContent = q
+            ? ('Showing ' + shown + ' of ' + total)
+            : '';
+        }
+        input.addEventListener('input', apply);
+      })();
 
       document.getElementById('deleteAllSuggestionsBtn').addEventListener('click', function() {
         openConfirmModal({
@@ -2891,6 +3525,15 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       document.getElementById('suggestType').value = 'visit';
       document.getElementById('suggestAssociation').value = '';
       document.getElementById('suggestReason').value = '';
+
+      // Hide the ICAO lookup/visit-info panel that sat below the input
+      var visitInfo = document.getElementById('icaoVisitInfo');
+      if (visitInfo) {
+        visitInfo.classList.add('hidden');
+        visitInfo.className = 'icao-visit-info hidden';
+        visitInfo.innerHTML = '';
+      }
+      window._icaoValid = false;
 
       setTimeout(function() { btn.disabled = false; btn.textContent = 'Submit Suggestion'; }, 3000);
     } catch(err) {
