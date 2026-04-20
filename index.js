@@ -3249,10 +3249,14 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       gap: 24px;
       align-items: stretch;
     }
+    /* Every grid item needs min-width:0 so its min-content doesn't widen
+       the 1fr column past the viewport. The right column is a plain <div>
+       wrapping two cards, so the rule has to match all direct children,
+       not just .card. */
+    .suggest-layout > * { min-width: 0; }
     .suggest-layout > .card {
       display: flex;
       flex-direction: column;
-      min-width: 0;  /* prevent grid item from exceeding the 1fr column width */
     }
     @media (max-width: 900px) {
       .suggest-layout { grid-template-columns: 1fr; }
