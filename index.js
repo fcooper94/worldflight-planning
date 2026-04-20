@@ -2665,6 +2665,14 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
       }, {}))};
       window.SUGGESTERS_BY_ICAO = ${JSON.stringify(suggestersByIcao)};
 
+      function updateBodyScrollLock() {
+        var anyOpen = ['suggesterModal', 'divisionModal'].some(function(id) {
+          var el = document.getElementById(id);
+          return el && !el.classList.contains('hidden');
+        });
+        document.body.style.overflow = anyOpen ? 'hidden' : '';
+      }
+
       // Open suggester modal whenever any destination chip / icao tag is clicked
       (function() {
         var sm = document.getElementById('suggesterModal');
@@ -2724,8 +2732,9 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
             }).join('');
           }
           sm.classList.remove('hidden');
+          updateBodyScrollLock();
         }
-        function close() { sm.classList.add('hidden'); }
+        function close() { sm.classList.add('hidden'); updateBodyScrollLock(); }
 
         document.body.addEventListener('click', function(e) {
           // Skip clicks inside any modal so opening/closing chains work
@@ -2773,8 +2782,9 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
               '</div>';
           }).join('');
           modal.classList.remove('hidden');
+          updateBodyScrollLock();
         }
-        function close() { modal.classList.add('hidden'); }
+        function close() { modal.classList.add('hidden'); updateBodyScrollLock(); }
 
         document.querySelectorAll('.division-pill').forEach(function(btn) {
           btn.addEventListener('click', function() { open(btn.dataset.division); });
@@ -3855,77 +3865,143 @@ app.get('/privacy', (req, res) => {
     title: 'Privacy Policy',
     updated: '2026-04-20',
     body: `
-      <p>This privacy policy explains what personal data the WorldFlight Planning
-      portal (<code>planning.worldflight.center</code>) collects, how it is used,
-      and the choices available to you. The service is operated by the WorldFlight
-      volunteer team and is intended for the global VATSIM community participating
-      in the annual WorldFlight event.</p>
+      <p><em>Privacy Policy (VATSIM Compliance-Aligned)</em></p>
 
-      <h3>What we collect</h3>
+      <h3>1. Data Controller</h3>
+      <p>The WorldFlight Planning portal (<code>planning.worldflight.center</code>)
+      is operated by the WorldFlight volunteer team (&ldquo;WorldFlight&rdquo;,
+      &ldquo;we&rdquo;, &ldquo;us&rdquo;, &ldquo;our&rdquo;). For the purposes of
+      Regulation (EU) 2016/679 (General Data Protection Regulation,
+      &ldquo;GDPR&rdquo;), WorldFlight acts as the data controller.</p>
+      <p>Single point of contact for all data protection matters:<br>
+      Email: <a href="mailto:contact@worldflight.center">contact@worldflight.center</a></p>
+      <p>All data subject requests must be submitted via this address.</p>
+
+      <h3>2. Scope and Applicability</h3>
+      <p>This service is provided to members of the VATSIM network in support of the
+      WorldFlight event. Processing of personal data is limited strictly to what
+      is necessary for:</p>
       <ul>
-        <li><strong>VATSIM account data</strong> (via OAuth): VATSIM CID, full name,
-        email address, rating, and division. Returned to us by VATSIM when you
-        click <em>Login with VATSIM</em>.</li>
-        <li><strong>Session data</strong>: a signed session cookie identifying your
-        login, your callsign (if supplied), and a short-lived OAuth
-        verification value.</li>
-        <li><strong>Submissions you make</strong>: airport suggestions, slot bookings,
-        documentation uploads, mailing-list sign-ups, and anything else you
-        voluntarily enter on the site.</li>
-        <li><strong>Operational logs</strong>: request timestamps, IP addresses, and
-        error details, retained only long enough to diagnose issues.</li>
+        <li>Authentication via VATSIM Connect</li>
+        <li>Event coordination and operational planning</li>
+        <li>Compliance with VATSIM policies, including the Code of Conduct</li>
+      </ul>
+      <p>No processing is performed for commercial, advertising, or profiling
+      purposes.</p>
+
+      <h3>3. Personal Data Processed</h3>
+      <p>We process only the following categories of personal data:</p>
+      <ul>
+        <li><strong>Identity Data</strong> (via VATSIM Connect): CID, full name,
+        email address, rating, division</li>
+        <li><strong>Session Data</strong>: authenticated session identifier, login
+        state, callsign (if provided), OAuth verification data</li>
+        <li><strong>User-Provided Content</strong>: slot bookings, airport
+        suggestions, uploaded documents, and other voluntary submissions</li>
+        <li><strong>Technical Data</strong>: IP address, timestamps, request
+        metadata, and error logs</li>
+      </ul>
+      <p>No special category data (Article 9 GDPR) is collected or processed.</p>
+
+      <h3>4. Lawful Basis for Processing</h3>
+      <p>Processing is conducted in accordance with Article 6 GDPR:</p>
+      <ul>
+        <li><strong>Art. 6(1)(b) &ndash; Contractual necessity</strong>: provision
+        of authentication and event services</li>
+        <li><strong>Art. 6(1)(f) &ndash; Legitimate interests</strong>: service
+        security, abuse prevention, and operational integrity</li>
+        <li><strong>Art. 6(1)(a) &ndash; Consent</strong>: optional communications
+        and integrations explicitly initiated by the user</li>
+        <li><strong>Art. 6(1)(c) &ndash; Legal obligation</strong>: compliance with
+        applicable law and VATSIM network policies</li>
+      </ul>
+      <p>Legitimate interest processing is limited and proportionate, and does not
+      override user rights.</p>
+
+      <h3>5. Purpose of Processing</h3>
+      <p>Personal data is processed exclusively to:</p>
+      <ul>
+        <li>Authenticate users via VATSIM Connect</li>
+        <li>Associate bookings and submissions with a VATSIM identity</li>
+        <li>Facilitate planning, scheduling, and execution of the WorldFlight event</li>
+        <li>Communicate with users where explicitly requested or required</li>
+        <li>Maintain platform security and enforce VATSIM policies</li>
       </ul>
 
-      <h3>How we use it</h3>
+      <h3>6. Data Sharing and Disclosure</h3>
       <ul>
-        <li>To authenticate you and display your name/CID on bookings and
-        suggestions.</li>
-        <li>To run the event: allocate slots, publish schedules, and coordinate
-        with divisions and vACCs.</li>
-        <li>To send you the emails you explicitly opt in to (e.g. the WorldFlight
-        mailing list or route-notification emails).</li>
-        <li>To prevent abuse and comply with VATSIM Code of Conduct.</li>
+        <li>User identity (name and CID) is visible to authenticated users where
+        operationally required (e.g. bookings)</li>
+        <li>Administrative access is restricted to authorised WorldFlight personnel</li>
+        <li>Data is not sold, rented, or disclosed to third parties for commercial
+        purposes</li>
+        <li>Data sharing is limited to:
+          <ul>
+            <li>VATSIM services where required for authentication or compliance</li>
+            <li>Service providers strictly necessary for functionality</li>
+          </ul>
+        </li>
       </ul>
 
-      <h3>How we share it</h3>
-      <p>Submissions you make may be visible to other authenticated users (e.g.
-      your CID and name appear next to your booking or suggestion). Administrative
-      data is visible only to the WorldFlight admin team. We do not sell data,
-      run third-party tracking, or share personal data outside the VATSIM
-      community.</p>
-
-      <h3>Third-party services we rely on</h3>
+      <h3>7. Third-Party Services</h3>
+      <p>The service integrates with:</p>
       <ul>
-        <li><strong>VATSIM Connect</strong> — login and profile lookup.</li>
-        <li><strong>SimBrief</strong> — optional flight-plan generation at your
-        explicit request.</li>
-        <li><strong>OpenStreetMap / Overpass</strong> — airport ground-layout data
-        used to generate sector files.</li>
+        <li><strong>VATSIM Connect</strong> (authentication and identity data)</li>
+        <li><strong>SimBrief</strong> (optional, user-initiated flight planning)</li>
+        <li><strong>OpenStreetMap / Overpass API</strong> (geospatial data)</li>
       </ul>
+      <p>These services operate as independent data controllers.</p>
 
-      <h3>Retention</h3>
-      <p>Account data is kept for as long as you remain active in the WorldFlight
-      community. Event-specific data (slot bookings, suggestions, generated
-      sector files) is kept across successive events to inform future planning,
-      but is aggregated/anonymised where possible. Operational logs are rotated
-      regularly.</p>
+      <h3>8. International Data Transfers</h3>
+      <p>Due to the global nature of VATSIM, personal data may be processed outside
+      the UK/EEA. Where applicable, transfers are conducted with appropriate
+      safeguards consistent with GDPR requirements.</p>
 
-      <h3>Your rights</h3>
-      <p>You can request a copy of your personal data, correction of inaccuracies,
-      or deletion of your account. Email <a href="mailto:contact@worldflight.center">contact@worldflight.center</a>
-      and we will action reasonable requests within a reasonable time. Deleting
-      your account removes your personal details; aggregate/anonymous event
-      records may be retained.</p>
+      <h3>9. Data Retention</h3>
+      <ul>
+        <li><strong>Account-linked data</strong>: retained for the duration of user
+        participation in WorldFlight</li>
+        <li><strong>Event data</strong>: retained across events for continuity;
+        anonymised where practicable</li>
+        <li><strong>Technical logs</strong>: retained only for the minimum period
+        necessary for security and diagnostics</li>
+      </ul>
+      <p>Data is not retained longer than necessary for its stated purposes.</p>
 
-      <h3>Cookies</h3>
-      <p>We set a single session cookie (<code>worldflight.sid</code>) used solely
-      to keep you logged in. It is <em>httpOnly</em>, <em>SameSite=Lax</em>, and
-      expires when you close your browser. There are no analytics, advertising,
-      or tracking cookies on the site.</p>
+      <h3>10. Data Subject Rights</h3>
+      <p>Under GDPR, you have the right to:</p>
+      <ul>
+        <li>Access your personal data</li>
+        <li>Rectify inaccurate data</li>
+        <li>Erase personal data</li>
+        <li>Restrict processing</li>
+        <li>Object to processing</li>
+        <li>Data portability</li>
+        <li>Withdraw consent where processing is based on consent</li>
+      </ul>
+      <p>Requests will be acknowledged without undue delay and fulfilled within 30
+      days, unless legally extended.</p>
+      <p>You have the right to lodge a complaint with a supervisory authority,
+      including the UK Information Commissioner&rsquo;s Office (ICO) or your local
+      EU authority.</p>
 
-      <h3>Contact</h3>
-      <p>For questions or requests about this policy, email
-      <a href="mailto:contact@worldflight.center">contact@worldflight.center</a>.</p>
+      <h3>11. Cookies</h3>
+      <p>A single essential cookie is used:</p>
+      <ul>
+        <li><strong>Name</strong>: <code>worldflight.sid</code></li>
+        <li><strong>Purpose</strong>: authentication and session management</li>
+        <li><strong>Attributes</strong>: HttpOnly, SameSite=Lax</li>
+        <li><strong>Retention</strong>: session-only</li>
+      </ul>
+      <p>No tracking, analytics, or advertising cookies are used.</p>
+
+      <h3>12. Automated Decision-Making</h3>
+      <p>No automated decision-making or profiling as defined under Article 22 GDPR
+      is performed.</p>
+
+      <h3>13. Policy Updates</h3>
+      <p>This policy may be updated to reflect operational or regulatory changes.
+      Material changes will be clearly communicated where appropriate.</p>
     `
   });
 });

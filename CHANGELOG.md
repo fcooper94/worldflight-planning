@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-04-20 (even later)
+
+### Admin · Suggestions modal + Privacy Policy
+
+- **Scroll lock on suggestion modals.** Opening the "Who Suggested" and
+  division modals on the Admin → Suggestions page now locks the background
+  page scroll so the wheel doesn't scroll the table behind the dialog.
+  Reference-counted across both modals so stacked opens (clicking an ICAO
+  inside the division modal) keep the lock until the last one closes.
+- **Privacy Policy rewrite.** `/privacy` replaced with a VATSIM
+  compliance-aligned policy covering Data Controller, Scope, Personal Data,
+  Lawful Basis (Art. 6 GDPR), Purposes, Sharing, Third-Party Services,
+  International Transfers, Retention, Data Subject Rights, Cookies,
+  Automated Decision-Making, and Policy Updates.
+
 ## 2026-04-20 (later)
 
 ### Public policy pages
