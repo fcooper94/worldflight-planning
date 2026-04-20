@@ -3694,8 +3694,8 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       border: 1px solid var(--border); transition: background .15s;
     }
     .suggestion-rank:hover { background: rgba(255,255,255,0.04); }
-    .rank-icao { font-family: monospace; font-size: 15px; font-weight: 700; color: var(--accent); min-width: 56px; }
-    .rank-name { flex: 1; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 8px; }
+    .rank-icao { font-family: monospace; font-size: 15px; font-weight: 700; color: var(--accent); min-width: 56px; flex-shrink: 0; }
+    .rank-name { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 8px; }
     .rank-time { text-align: right; flex-shrink: 0; margin-left: 12px; font-size: 12px; color: var(--muted2); white-space: nowrap; }
   </style>
 
