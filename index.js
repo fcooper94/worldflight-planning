@@ -3252,6 +3252,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     .suggest-layout > .card {
       display: flex;
       flex-direction: column;
+      min-width: 0;  /* prevent grid item from exceeding the 1fr column width */
     }
     @media (max-width: 900px) {
       .suggest-layout { grid-template-columns: 1fr; }
