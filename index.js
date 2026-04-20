@@ -3788,10 +3788,10 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     var loopTimer = null;
     var markerTimers = [];
 
-    function buildList(v, a) {
+    function buildList(v /*, a */) {
+      // Visit suggestions only — avoids are intentionally excluded from the map.
       var pool = [];
       (v || []).forEach(function(s) { if (s.lat != null && s.lon != null) pool.push(Object.assign({}, s, { kind: 'visit' })); });
-      (a || []).forEach(function(s) { if (s.lat != null && s.lon != null) pool.push(Object.assign({}, s, { kind: 'avoid' })); });
       pool.sort(function(a, b) { return new Date(b.createdAt) - new Date(a.createdAt); });
       return pool.slice(0, 10).reverse(); // oldest-of-the-10 first, newest last
     }
