@@ -1176,9 +1176,6 @@ document.addEventListener('click', async (e) => {
   .site-policy-links a:hover { color: var(--accent); text-decoration: underline; }
   .site-policy-links .policy-sep { opacity: 0.6; }
 
-  /* Leave room for the fixed footer so content isn't hidden behind it */
-  body { padding-bottom: 32px; }
-
   @media (max-width: 900px) {
     .admin-connected-footer {
       left: 0 !important;
@@ -1192,7 +1189,8 @@ document.addEventListener('click', async (e) => {
     }
     body.sidebar-collapsed .admin-connected-footer { left: 0 !important; }
     .site-policy-links { margin-left: auto; }
-    body { padding-bottom: calc(48px + env(safe-area-inset-bottom, 0px)); }
+    /* Reserve space under content on mobile so the fixed footer doesn't cover cards */
+    body { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
   }
 </style>
 ${isAdmin ? `
