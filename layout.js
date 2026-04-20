@@ -1189,8 +1189,13 @@ document.addEventListener('click', async (e) => {
     }
     body.sidebar-collapsed .admin-connected-footer { left: 0 !important; }
     .site-policy-links { margin-left: auto; }
-    /* Reserve space under content on mobile so the fixed footer doesn't cover cards */
-    body { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+    /* Reserve space under content on mobile so the fixed footer doesn't
+       cover cards. Must live on main.dashboard, not body — body has
+       height:100dvh + box-sizing:border-box, so padding-bottom on body
+       stays inside the fixed viewport-sized box and creates no extra
+       scroll room. main grows with its content, so padding on main
+       actually extends the scrollable area. */
+    main.dashboard { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)) !important; }
   }
 </style>
 ${isAdmin ? `
