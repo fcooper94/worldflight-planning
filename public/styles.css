@@ -826,8 +826,9 @@ select{ cursor:pointer; }
   color:#cbd5f5;
 }
 @media (max-width: 900px) {
-  .connected-users-footer,
-  .admin-connected-footer { display: none !important; }
+  .connected-users-footer { display: none !important; }
+  .admin-connected-footer .admin-footer-label,
+  .admin-connected-footer .admin-footer-users { display: none !important; }
 }
 #connectedUsersList{
   color:#60a5fa;
