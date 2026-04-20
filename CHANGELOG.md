@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-04-20 (later still)
+
+### Suggest Airport · World map animation
+
+- Replaced the hand-drawn continent blobs on `/suggest-airport` with a
+  real world map rendered from Natural Earth 110m via d3-geo and
+  world-atlas (loaded from jsDelivr). Equirectangular projection keeps
+  marker coordinates matching the landmass they belong to.
+- Markers now **loop**: the last 10 suggestions (visit + avoid,
+  newest-last) drop in one-by-one, pause for ~3.5s, then restart. The
+  loop refetches and restarts as soon as a new suggestion is
+  submitted from the form on the same page.
+- Animation polish: two-`<g>` marker structure so CSS drop/ping
+  keyframes don't clobber the positioning attribute; single sky-blue
+  colour across all markers; ICAO labels with a leader line and a
+  4-corner placement picker that avoids overlapping other labels *or*
+  any dot on the current loop iteration; slower cadence (drop 0.9s,
+  ping 2.4s, stagger 750ms, dwell 3.5s).
+- `/api/suggestion-stats` returns `lat`/`lon` for each airport; the
+  map is desktop-only (hidden below 900px).
+- Left column now grows to match the right column's bottom edge
+  (flex-column + `flex: 1 1 auto` on the map card / inner box).
+- Recent Suggestions list uses `height: 138px` (not `max-height`) so
+  the card reserves its full space during load instead of popping
+  taller when the API responds.
+- Renderer was made tolerant of missing list ids so the page no longer
+  throws when `recentAvoidList` isn't present.
+- Footer body padding on mobile: scoped to the existing `<=900px`
+  media query only; no change on desktop.
+
 ## 2026-04-20 (even later)
 
 ### Admin · Suggestions modal + Privacy Policy

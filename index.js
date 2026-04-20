@@ -3140,6 +3140,23 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
         <span>📍</span>
         <span>View all previous WorldFlight destinations &rarr;</span>
       </a>
+
+      <div id="suggestionMap" class="suggestion-map" aria-hidden="true">
+        <div class="suggestion-map-inner">
+          <svg class="suggestion-map-svg" viewBox="0 0 1000 500" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <radialGradient id="smOcean" cx="50%" cy="45%" r="70%">
+                <stop offset="0%"  stop-color="rgba(30,58,96,0.35)"/>
+                <stop offset="100%" stop-color="rgba(8,15,30,0)"/>
+              </radialGradient>
+            </defs>
+            <rect x="0" y="0" width="1000" height="500" fill="url(#smOcean)"/>
+            <g class="map-land"></g>
+            <g class="map-markers"></g>
+          </svg>
+        </div>
+        <p class="suggestion-map-caption">Recent community suggestions — looping the last 10.</p>
+      </div>
     </section>
 
     <div>
@@ -3259,6 +3276,91 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       transition: background .15s, border-color .15s;
     }
     .prev-dest-banner:hover { background: rgba(56,189,248,0.12); border-color: rgba(56,189,248,0.3); }
+
+    .suggestion-map {
+      margin-top: 20px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      background: linear-gradient(180deg, rgba(15,23,42,0.6), rgba(10,16,30,0.9));
+      display: flex;
+      flex-direction: column;
+    }
+    /* Grow the map card to fill any remaining vertical space so the
+       left column's bottom edge matches the right column. */
+    .suggest-info .suggestion-map { flex: 1 1 auto; }
+    .suggestion-map-inner {
+      position: relative;
+      width: 100%;
+      flex: 1 1 auto;
+      min-height: 240px;
+      overflow: hidden;
+      border-radius: 8px;
+      background: #0b1220;
+    }
+    .suggestion-map-svg {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      overflow: visible;
+      pointer-events: none;
+    }
+    .suggestion-map-svg .map-land path {
+      fill: rgba(148,163,184,0.16);
+      stroke: rgba(148,163,184,0.38);
+      stroke-width: 0.5;
+      stroke-linejoin: round;
+    }
+    .suggestion-map-caption {
+      margin: 10px 2px 2px;
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+      letter-spacing: 0.3px;
+    }
+    .sm-anim {
+      opacity: 0;
+      transform-origin: center;
+      transform-box: fill-box;
+      animation: smDrop 0.9s cubic-bezier(.2,.9,.3,1.3) forwards;
+    }
+    .sm-ring {
+      transform-origin: center;
+      transform-box: fill-box;
+      animation: smPing 2.4s ease-out 0.9s infinite;
+    }
+    .sm-label {
+      font: 700 24px/1 'JetBrains Mono', ui-monospace, monospace;
+      fill: #e2e8f0;
+      stroke: rgba(11,18,32,0.9);
+      stroke-width: 4.5;
+      paint-order: stroke fill;
+      pointer-events: none;
+      opacity: 0;
+      animation: smLabel 0.6s ease-out 0.7s forwards;
+    }
+    .sm-leader {
+      stroke: rgba(56,189,248,0.7);
+      stroke-width: 0.9;
+      fill: none;
+      opacity: 0;
+      animation: smLabel 0.6s ease-out 0.7s forwards;
+    }
+    @keyframes smDrop {
+      0%   { opacity: 0; transform: translateY(-22px) scale(0.3); }
+      70%  { opacity: 1; transform: translateY(3px)   scale(1.25); }
+      100% { opacity: 1; transform: translateY(0)     scale(1); }
+    }
+    @keyframes smPing {
+      0%   { opacity: 0.85; transform: scale(1); }
+      100% { opacity: 0;    transform: scale(6); }
+    }
+    @keyframes smLabel {
+      0%   { opacity: 0; }
+      100% { opacity: 0.95; }
+    }
+    @media (max-width: 900px) {
+      .suggestion-map { display: none; }
+    }
 
     .suggest-form-card label { display: block; font-size: 13px; margin-top: 12px; font-weight: 600; }
     .suggest-form-card input,
@@ -3530,6 +3632,8 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
       msg.classList.remove('hidden');
       btn.textContent = 'Submitted';
 
+      if (typeof window._restartSuggestionMap === 'function') window._restartSuggestionMap();
+
       // Reset form fields (except name)
       document.getElementById('suggestIcao').value = '';
       document.getElementById('suggestType').value = 'visit';
@@ -3571,7 +3675,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
     }
     .suggestions-view .suggestion-list { flex: 1; }
     .suggestion-scroll {
-      max-height: 138px;
+      height: 138px;
       overflow-y: auto;
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.08) transparent;
@@ -3613,6 +3717,7 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
 
     function renderList(containerId, items) {
       var el = document.getElementById(containerId);
+      if (!el) return;
       if (!items || !items.length) {
         el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No suggestions yet.</div>';
         return;
@@ -3628,7 +3733,230 @@ app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) =>
 
     renderList('recentVisitList', data.recentVisit);
     renderList('recentAvoidList', data.recentAvoid);
+
+    initSuggestionMap(data.recentVisit, data.recentAvoid);
   })();
+
+  function loadScriptOnce(src) {
+    return new Promise(function(resolve, reject) {
+      if (document.querySelector('script[data-sm-src="' + src + '"]')) { resolve(); return; }
+      var s = document.createElement('script');
+      s.src = src; s.async = true;
+      s.setAttribute('data-sm-src', src);
+      s.onload = function() { resolve(); };
+      s.onerror = function() { reject(new Error('Failed: ' + src)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  async function initSuggestionMap(visit, avoid) {
+    var map = document.getElementById('suggestionMap');
+    if (!map) return;
+    if (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) return;
+
+    var svg = map.querySelector('.suggestion-map-svg');
+    var landG = svg && svg.querySelector('.map-land');
+    var markerG = svg && svg.querySelector('.map-markers');
+    if (!svg || !landG || !markerG) return;
+
+    try {
+      // d3-geo depends on d3-array's Adder — load the full d3 bundle to get both.
+      await loadScriptOnce('https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js');
+      await loadScriptOnce('https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js');
+    } catch (e) { return; }
+
+    var topoRes;
+    try {
+      topoRes = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json');
+    } catch (e) { return; }
+    if (!topoRes.ok) return;
+    var topology = await topoRes.json();
+    var land = window.topojson.feature(topology, topology.objects.land);
+
+    var W = 1000, H = 500;
+    var projection = window.d3.geoEquirectangular()
+      .scale(W / (2 * Math.PI))
+      .translate([W / 2, H / 2]);
+    var pathGen = window.d3.geoPath(projection);
+
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+    var landPath = document.createElementNS(SVG_NS, 'path');
+    landPath.setAttribute('d', pathGen(land) || '');
+    landG.appendChild(landPath);
+
+    var currentList = buildList(visit, avoid);
+    var loopTimer = null;
+    var markerTimers = [];
+
+    function buildList(v, a) {
+      var pool = [];
+      (v || []).forEach(function(s) { if (s.lat != null && s.lon != null) pool.push(Object.assign({}, s, { kind: 'visit' })); });
+      (a || []).forEach(function(s) { if (s.lat != null && s.lon != null) pool.push(Object.assign({}, s, { kind: 'avoid' })); });
+      pool.sort(function(a, b) { return new Date(b.createdAt) - new Date(a.createdAt); });
+      return pool.slice(0, 10).reverse(); // oldest-of-the-10 first, newest last
+    }
+
+    var placedBoxes = [];  // label bboxes
+    var dotBoxes = [];     // dot bboxes (+ small padding) so labels don't cover other markers
+    function clearMarkers() {
+      while (markerG.firstChild) markerG.removeChild(markerG.firstChild);
+      markerTimers.forEach(function(t) { clearTimeout(t); });
+      markerTimers = [];
+      placedBoxes = [];
+      dotBoxes = [];
+    }
+
+    function rectsOverlap(a, b) {
+      return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+    }
+
+    function addMarker(item) {
+      var xy = projection([Number(item.lon), Number(item.lat)]);
+      if (!xy || !isFinite(xy[0]) || !isFinite(xy[1])) return;
+
+      // Outer <g> = position only (via transform attribute).
+      // Inner <g> = CSS-animated (a CSS transform on the outer <g> would
+      // override its positioning attribute, so keep them separate).
+      var positioner = document.createElementNS(SVG_NS, 'g');
+      positioner.setAttribute('class', 'sm-marker');
+      positioner.setAttribute('transform', 'translate(' + xy[0].toFixed(2) + ',' + xy[1].toFixed(2) + ')');
+
+      var animator = document.createElementNS(SVG_NS, 'g');
+      animator.setAttribute('class', 'sm-anim');
+
+      var color = '#38bdf8';
+
+      var ring = document.createElementNS(SVG_NS, 'circle');
+      ring.setAttribute('class', 'sm-ring');
+      ring.setAttribute('r', '3');
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', color);
+      ring.setAttribute('stroke-width', '1.2');
+
+      var dot = document.createElementNS(SVG_NS, 'circle');
+      dot.setAttribute('r', '3.2');
+      dot.setAttribute('fill', color);
+      dot.setAttribute('stroke', 'rgba(15,23,42,0.9)');
+      dot.setAttribute('stroke-width', '0.9');
+
+      // Estimate label size in viewBox units (24px monospace, ~13u per char + padding).
+      var charW = 13.5;
+      var textW = item.icao.length * charW + 4;
+      var textH = 24;
+      var LEADER_NEAR = 4;
+      var LEADER_FAR  = 18;
+      var LABEL_GAP   = 3;
+
+      // Try four directions for the label, pick the first that doesn't collide
+      // with a previously placed label on this loop iteration.
+      var dirs = [
+        { dx:  1, dy: -1, anchor: 'start' },
+        { dx: -1, dy: -1, anchor: 'end'   },
+        { dx:  1, dy:  1, anchor: 'start' },
+        { dx: -1, dy:  1, anchor: 'end'   }
+      ];
+
+      var chosen = dirs[0];
+      var chosenBox = null;
+      for (var di = 0; di < dirs.length; di++) {
+        var d = dirs[di];
+        var anchorX = xy[0] + d.dx * (LEADER_FAR + LABEL_GAP);
+        var anchorY = xy[1] + d.dy * (LEADER_FAR + LABEL_GAP);
+        var box = {
+          x: (d.dx > 0 ? anchorX : anchorX - textW),
+          y: (d.dy > 0 ? anchorY : anchorY - textH),
+          w: textW,
+          h: textH
+        };
+        var collides = false;
+        for (var bi = 0; bi < placedBoxes.length; bi++) {
+          if (rectsOverlap(box, placedBoxes[bi])) { collides = true; break; }
+        }
+        if (!collides) {
+          for (var di2 = 0; di2 < dotBoxes.length; di2++) {
+            if (rectsOverlap(box, dotBoxes[di2])) { collides = true; break; }
+          }
+        }
+        if (!collides) { chosen = d; chosenBox = box; break; }
+      }
+      if (!chosenBox) {
+        // All directions collide — fall back to up-right.
+        var aX = xy[0] + chosen.dx * (LEADER_FAR + LABEL_GAP);
+        var aY = xy[1] + chosen.dy * (LEADER_FAR + LABEL_GAP);
+        chosenBox = { x: chosen.dx > 0 ? aX : aX - textW, y: chosen.dy > 0 ? aY : aY - textH, w: textW, h: textH };
+      }
+      placedBoxes.push(chosenBox);
+
+      var leader = document.createElementNS(SVG_NS, 'line');
+      leader.setAttribute('class', 'sm-leader');
+      leader.setAttribute('x1', (chosen.dx * LEADER_NEAR).toFixed(1));
+      leader.setAttribute('y1', (chosen.dy * LEADER_NEAR).toFixed(1));
+      leader.setAttribute('x2', (chosen.dx * LEADER_FAR).toFixed(1));
+      leader.setAttribute('y2', (chosen.dy * LEADER_FAR).toFixed(1));
+
+      var labelX = chosen.dx * (LEADER_FAR + LABEL_GAP);
+      // For down-placed labels, push y down by half textH so it doesn't collide with leader line
+      var labelY = chosen.dy < 0
+        ? chosen.dy * (LEADER_FAR + LABEL_GAP)                // above: baseline above leader end
+        : chosen.dy * (LEADER_FAR + LABEL_GAP) + textH * 0.8; // below: drop to baseline
+
+      var label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'sm-label');
+      label.setAttribute('x', labelX.toFixed(1));
+      label.setAttribute('y', labelY.toFixed(1));
+      label.setAttribute('text-anchor', chosen.anchor);
+      label.textContent = item.icao;
+
+      var title = document.createElementNS(SVG_NS, 'title');
+      title.textContent = item.icao + (item.name ? ' — ' + item.name : '');
+
+      animator.appendChild(ring);
+      animator.appendChild(dot);
+      animator.appendChild(leader);
+      animator.appendChild(label);
+      animator.appendChild(title);
+      positioner.appendChild(animator);
+      markerG.appendChild(positioner);
+    }
+
+    function runLoop() {
+      clearMarkers();
+      if (!currentList.length) {
+        // No plottable coordinates yet — check back for new ones shortly.
+        loopTimer = setTimeout(runLoop, 4000);
+        return;
+      }
+      // Pre-compute every dot's bbox for the whole loop so labels added
+      // early can steer clear of dots that will land later.
+      var DOT_PAD = 7;
+      currentList.forEach(function(item) {
+        var xy = projection([Number(item.lon), Number(item.lat)]);
+        if (!xy || !isFinite(xy[0]) || !isFinite(xy[1])) return;
+        dotBoxes.push({ x: xy[0] - DOT_PAD, y: xy[1] - DOT_PAD, w: DOT_PAD * 2, h: DOT_PAD * 2 });
+      });
+
+      var stepMs = 750;
+      currentList.forEach(function(item, i) {
+        markerTimers.push(setTimeout(function() { addMarker(item); }, i * stepMs));
+      });
+      var dwellMs = 3500;
+      var total = currentList.length * stepMs + dwellMs;
+      loopTimer = setTimeout(runLoop, total);
+    }
+
+    window._restartSuggestionMap = async function() {
+      clearTimeout(loopTimer);
+      clearMarkers();
+      try {
+        var r = await fetch('/api/suggestion-stats');
+        var d = await r.json();
+        currentList = buildList(d.recentVisit, d.recentAvoid);
+      } catch (e) { /* keep existing list */ }
+      runLoop();
+    };
+
+    runLoop();
+  }
   </script>
   `;
 
@@ -3806,13 +4134,13 @@ app.get('/api/suggestion-stats', async (req, res) => {
     })
   ]);
 
-  // Look up airport names
+  // Look up airport names + coordinates
   const allIcaos = [...new Set([...recentVisit, ...recentAvoid].map(s => s.icao))];
   let airports;
   try {
     airports = await prisma.airport.findMany({
       where: { icao: { in: allIcaos } },
-      select: { icao: true, name: true }
+      select: { icao: true, name: true, lat: true, lon: true }
     });
   } catch {
     airports = await prisma.airport.findMany({
@@ -3820,13 +4148,16 @@ app.get('/api/suggestion-stats', async (req, res) => {
       select: { icao: true }
     });
   }
-  const nameMap = Object.fromEntries(airports.map(a => [a.icao, a.name || null]));
+  const infoMap = Object.fromEntries(airports.map(a => [a.icao, a]));
 
-  const addName = s => ({ ...s, name: nameMap[s.icao] || null });
+  const addInfo = s => {
+    const info = infoMap[s.icao] || {};
+    return { ...s, name: info.name || null, lat: info.lat ?? null, lon: info.lon ?? null };
+  };
 
   res.json({
-    recentVisit: recentVisit.map(addName),
-    recentAvoid: recentAvoid.map(addName)
+    recentVisit: recentVisit.map(addInfo),
+    recentAvoid: recentAvoid.map(addInfo)
   });
 });
 
