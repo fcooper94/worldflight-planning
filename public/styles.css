@@ -2989,6 +2989,35 @@ tr:hover .row-actions {
     0 0 0 1px rgba(255,255,255,0.18),
     0 10px 10px #9a2f2f;
 }
+
+/* Compact variants for bookings tables (My Bookings / Our Bookings) */
+.my-slots-table .simbrief-btn {
+  height: 30px;
+  padding: 0 10px;
+  gap: 6px;
+  font-size: 12px;
+  border-radius: 15px;
+  box-shadow: 0 0 6px rgba(37,99,235,0.3);
+}
+.my-slots-table .simbrief-logo {
+  width: 20px;
+  height: 20px;
+  font-size: 10px;
+}
+.my-slots-table .cancel-slot-btn {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  border-radius: 15px;
+}
+.my-slots-table .show-route-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.my-slots-table .simbrief-text-long { display: none; }
+@media (min-width: 1701px) {
+  .my-slots-table .simbrief-text-long { display: inline; }
+}
 .callsign-input {
   width: 100%;
   max-width: 100%;

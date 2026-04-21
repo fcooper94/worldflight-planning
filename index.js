@@ -12711,17 +12711,17 @@ app.get('/team/management', requireLogin, requireTeamMember, async (req, res) =>
           <button type="button" id="tmPermsClose" class="route-modal-close" aria-label="Close">&times;</button>
         </div>
         <div id="tmPermsTarget" style="font-size:13px;color:var(--muted);margin-bottom:4px;"></div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" id="tmPermEdit" style="accent-color:var(--accent);cursor:pointer;" />
-          Can edit bookings
+        <label class="tm-check">
+          <input type="checkbox" id="tmPermEdit" />
+          <span>Can edit bookings</span>
         </label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" id="tmPermManage" style="accent-color:var(--accent);cursor:pointer;" />
-          Can manage team members
+        <label class="tm-check">
+          <input type="checkbox" id="tmPermManage" />
+          <span>Can manage team members</span>
         </label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" id="tmPermPart" style="accent-color:var(--accent);cursor:pointer;" />
-          Participating in ${esc(activeEventName)}
+        <label class="tm-check">
+          <input type="checkbox" id="tmPermPart" />
+          <span>Participating in ${esc(activeEventName)}</span>
         </label>
         <div id="tmPermsError" style="display:none;color:#f87171;font-size:12px;margin-top:8px;"></div>
         <div class="route-modal-actions" style="gap:8px;">
@@ -12743,17 +12743,17 @@ app.get('/team/management', requireLogin, requireTeamMember, async (req, res) =>
           <input type="text" id="tmAddCid" inputmode="numeric" maxlength="10" placeholder="e.g. 1303570"
             style="padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;" />
         </label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" id="tmAddEdit" style="accent-color:var(--accent);cursor:pointer;" />
-          Can edit bookings
+        <label class="tm-check">
+          <input type="checkbox" id="tmAddEdit" />
+          <span>Can edit bookings</span>
         </label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" id="tmAddManage" style="accent-color:var(--accent);cursor:pointer;" />
-          Can manage team members
+        <label class="tm-check">
+          <input type="checkbox" id="tmAddManage" />
+          <span>Can manage team members</span>
         </label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" id="tmAddPart" checked style="accent-color:var(--accent);cursor:pointer;" />
-          Participating in ${esc(activeEventName)}
+        <label class="tm-check">
+          <input type="checkbox" id="tmAddPart" checked />
+          <span>Participating in ${esc(activeEventName)}</span>
         </label>
         <div id="tmAddError" style="display:none;color:#f87171;font-size:12px;margin-top:8px;"></div>
         <div class="route-modal-actions" style="gap:8px;">
@@ -12821,6 +12821,62 @@ app.get('/team/management', requireLogin, requireTeamMember, async (req, res) =>
         padding: 6px 14px; background: var(--accent); color: #0b1220;
         border: none; border-radius: 6px;
         font-weight: 600; cursor: pointer; font-family: inherit;
+      }
+      .tm-check {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 13px;
+        color: var(--text);
+        cursor: pointer;
+        padding: 9px 12px;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        transition: background 0.15s ease, border-color 0.15s ease;
+        user-select: none;
+      }
+      .tm-check:hover {
+        background: rgba(56,189,248,0.06);
+        border-color: rgba(56,189,248,0.35);
+      }
+      .tm-check input[type="checkbox"] {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 18px;
+        height: 18px;
+        border: 1.5px solid var(--border);
+        border-radius: 4px;
+        background: var(--panel);
+        cursor: pointer;
+        display: grid;
+        place-content: center;
+        transition: background 0.15s ease, border-color 0.15s ease;
+        flex-shrink: 0;
+        margin: 0;
+      }
+      .tm-check input[type="checkbox"]:hover {
+        border-color: var(--accent);
+      }
+      .tm-check input[type="checkbox"]:checked {
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+      .tm-check input[type="checkbox"]:checked::after {
+        content: '';
+        width: 10px;
+        height: 5px;
+        border-left: 2px solid #020617;
+        border-bottom: 2px solid #020617;
+        transform: rotate(-45deg) translate(1px, -1px);
+      }
+      .tm-check input[type="checkbox"]:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .tm-check:has(input:checked) {
+        background: rgba(56,189,248,0.08);
+        border-color: rgba(56,189,248,0.4);
       }
     </style>
 
@@ -13265,7 +13321,7 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
                   <td>
                     <a class="simbrief-btn" href="${r.simbriefUrl}" target="_blank" rel="noopener">
                       <span class="simbrief-logo">SB</span>
-                      <span class="simbrief-text">Plan with SimBrief</span>
+                      <span class="simbrief-text">Plan<span class="simbrief-text-long"> with SimBrief</span></span>
                     </a>
                   </td>
                   <td>
@@ -23735,7 +23791,7 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
                   <td>
                     <a class="simbrief-btn" href="${r.simbriefUrl}" target="_blank" rel="noopener">
                       <span class="simbrief-logo">SB</span>
-                      <span class="simbrief-text">Plan with SimBrief</span>
+                      <span class="simbrief-text">Plan<span class="simbrief-text-long"> with SimBrief</span></span>
                     </a>
                   </td>
                   <td>
