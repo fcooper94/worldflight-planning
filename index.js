@@ -1617,6 +1617,150 @@ function requireTeamMember(req, res, next) {
   next();
 }
 
+/* ===== VATSIM NAME LOOKUP (cached) ===== */
+// Public VATSIM member endpoint returns name_first / name_last for a CID.
+// Cache aggressively (24h) since names rarely change and the endpoint is
+// rate-limited. Returns '' on any failure.
+const vatsimNameCache = new Map(); // cid -> { name, ts }
+const VATSIM_NAME_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function fetchVatsimName(cid) {
+  const id = Number(cid);
+  if (!id) return '';
+  const hit = vatsimNameCache.get(id);
+  if (hit && Date.now() - hit.ts < VATSIM_NAME_TTL_MS) return hit.name;
+  try {
+    const r = await axios.get(`https://api.vatsim.net/v2/members/${id}`, { timeout: 5000 });
+    const d = r.data || {};
+    const name = [d.name_first, d.name_last].filter(Boolean).join(' ').trim();
+    vatsimNameCache.set(id, { name, ts: Date.now() });
+    return name;
+  } catch (e) {
+    vatsimNameCache.set(id, { name: '', ts: Date.now() });
+    return '';
+  }
+}
+
+/* ===== TEAM AUTO-ASSIGNMENT ===== */
+// One booking per participating team per flow-restricted sector, filed under
+// the team owner's mainCid. SLOTTED picks the spare slot whose TOBT is
+// closest to the sector's dep_time_utc.
+async function autoAssignTeamBookings({ reason = '' } = {}) {
+  try {
+    const teamRows = await prisma.officialTeam.findMany({
+      where: { participatingWf26: true },
+      select: { teamName: true, mainCid: true, callsign: true, aircraftType: true }
+    });
+
+    // Collapse multi-callsign teams to one entry per teamName (use the first
+    // row's callsign/type as the representative aircraft for the booking).
+    const teamsByName = new Map();
+    for (const t of teamRows) {
+      const name = String(t.teamName || '').trim().toUpperCase();
+      if (!name || !t.mainCid || !t.callsign) continue;
+      if (!teamsByName.has(name)) {
+        teamsByName.set(name, {
+          teamName: name,
+          mainCid: Number(t.mainCid),
+          callsign: String(t.callsign).toUpperCase()
+        });
+      }
+    }
+    if (!teamsByName.size) return 0;
+
+    let created = 0;
+    for (const team of teamsByName.values()) {
+      const teamCid = team.mainCid;
+
+      for (const row of adminSheetCache) {
+        const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
+        if (flow === 'NONE') continue;
+
+        const sectorPrefix = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
+
+        // Skip if team already has any booking for this sector (any tobt / booking-only)
+        const alreadyBooked = Object.values(tobtBookingsByKey).some(b =>
+          b && b.cid === teamCid && typeof b.slotKey === 'string' && b.slotKey.startsWith(sectorPrefix)
+        );
+        if (alreadyBooked) continue;
+
+        let slotKey = null;
+        let tobt = null;
+
+        if (flow === 'BOOKING_ONLY') {
+          const cap = getBookingOnlyCapacity(row.from, row.to);
+          if (cap.total > 0 && cap.remaining <= 0) continue;
+          slotKey = `${sectorPrefix}|BOOKING_ONLY`;
+        } else if (flow === 'SLOTTED') {
+          // Spare slots whose tobt is closest to dep_time_utc
+          const sectorSlotPrefix = `${sectorPrefix}|`;
+          const [dh, dm] = row.dep_time_utc.split(':').map(Number);
+          const depMin = dh * 60 + dm;
+          let best = null;
+          let bestDiff = Infinity;
+          for (const [k, s] of Object.entries(allTobtSlots)) {
+            if (!k.startsWith(sectorSlotPrefix)) continue;
+            if (tobtBookingsByKey[k]) continue; // taken
+            const [th, tm] = s.tobt.split(':').map(Number);
+            const diff = Math.abs((th * 60 + tm) - depMin);
+            if (diff < bestDiff) { best = s; bestDiff = diff; }
+          }
+          if (!best) continue;
+          tobt = best.tobt;
+          slotKey = `${sectorPrefix}|${tobt}`;
+        }
+        if (!slotKey) continue;
+
+        // Persist + memory (wrap to swallow unique-constraint races)
+        try {
+          await prisma.tobtBooking.create({
+            data: {
+              slotKey,
+              cid: teamCid,
+              callsign: team.callsign,
+              from: row.from,
+              to: row.to,
+              dateUtc: row.date_utc,
+              depTimeUtc: row.dep_time_utc,
+              tobtTimeUtc: tobt
+            }
+          });
+        } catch (err) {
+          // already exists for this cid+slotKey — skip silently
+          continue;
+        }
+
+        const bookingData = {
+          slotKey,
+          cid: teamCid,
+          callsign: team.callsign,
+          from: row.from,
+          to: row.to,
+          dateUtc: row.date_utc,
+          depTimeUtc: row.dep_time_utc,
+          tobtTimeUtc: tobt,
+          createdAtISO: new Date().toISOString()
+        };
+        const bookingKey = `${teamCid}:${slotKey}`;
+        tobtBookingsByKey[bookingKey] = bookingData;
+        tobtBookingsByKey[slotKey] = bookingData;
+        if (!tobtBookingsByCid[teamCid]) tobtBookingsByCid[teamCid] = new Set();
+        tobtBookingsByCid[teamCid].add(bookingKey);
+        created++;
+      }
+    }
+
+    if (created > 0) {
+      console.log(`[AUTO-TEAM] Assigned ${created} bookings${reason ? ' (' + reason + ')' : ''}`);
+      try { io.emit('bookingCreated', { autoAssigned: created }); } catch {}
+    }
+    return created;
+  } catch (e) {
+    console.error('[AUTO-TEAM] Failed:', e);
+    return 0;
+  }
+}
+
 /* ===== BOOKING-ONLY CAPACITY ===== */
 function getBookingOnlyCapacity(fromIcao, toIcao) {
   const sectorKey = `${fromIcao}-${toIcao}`;
@@ -1854,6 +1998,10 @@ await (async () => {
 
 
   rebuildAllTobtSlots();       // 🔑 NOW WORKS
+
+  // Auto-assign bookings/slots for all participating teams. Idempotent:
+  // skips any sector+cid already booked, so safe to re-run any time.
+  autoAssignTeamBookings({ reason: 'startup' }).catch(() => {});
 
   // Pre-warm FIR analysis cache in background
   buildFirAnalysis().then(() => console.log('[AIRSPACE] FIR analysis cache warmed')).catch(() => {});
@@ -4857,6 +5005,10 @@ socket.on('updateDepFlowType', async ({ sector, flowtype, eventId: clientEventId
   });
 
   io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized, eventId: evtId });
+
+  if (isActiveEvent && (normalized === 'SLOTTED' || normalized === 'BOOKING_ONLY')) {
+    autoAssignTeamBookings({ reason: `flow ${normalized} set for ${key}` }).catch(() => {});
+  }
 });
 
 socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBooking, teamCallsign }) => {
@@ -12081,6 +12233,204 @@ tobtBookingsByCid[storedCid].add(bookingKey);
 
 
 
+// Team member: edit another member's per-user perms (same team).
+// Requires the viewer to be admin OR have canManageMembers on their WF_TEAM row.
+async function requireTeamManager(req, res, next) {
+  const cid = Number(req.session?.user?.data?.cid);
+  if (!cid) return res.status(403).json({ error: 'Forbidden' });
+  if (ADMIN_CIDS.includes(cid)) return next();
+  const row = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid, role: 'WF_TEAM' } }
+  }).catch(() => null);
+  if (!row?.canManageMembers) return res.status(403).json({ error: 'Not allowed to manage members.' });
+  req._viewerTeamName = row.teamName || null;
+  next();
+}
+
+app.post('/api/team/members', requireLogin, requireTeamManager, async (req, res) => {
+  const targetCid = Number(req.body?.cid);
+  if (!targetCid || !Number.isInteger(targetCid)) return res.status(400).json({ error: 'Invalid CID' });
+
+  const viewerCid = Number(req.session.user.data.cid);
+  const viewerTeam = req._viewerTeamName || (await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: viewerCid, role: 'WF_TEAM' } }
+  }).catch(() => null))?.teamName || null;
+  if (!viewerTeam) return res.status(403).json({ error: 'Your team is not linked.' });
+
+  // Reject if CID is already a WF_TEAM member on some team
+  const existing = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: targetCid, role: 'WF_TEAM' } }
+  });
+  if (existing) {
+    if (existing.teamName === viewerTeam) return res.status(409).json({ error: 'Already a member of this team.' });
+    return res.status(409).json({ error: 'CID is already assigned to another team.' });
+  }
+
+  const data = {
+    cid: targetCid,
+    role: 'WF_TEAM',
+    teamName: viewerTeam,
+    canEditBookings: req.body?.canEditBookings !== false,
+    canManageMembers: !!req.body?.canManageMembers,
+    participating: req.body?.participating !== false
+  };
+  await prisma.userAdditionalRole.create({ data });
+  teamMemberCids.add(targetCid);
+  return res.json({ success: true });
+});
+
+app.post('/api/team/members/:cid/perms', requireLogin, requireTeamManager, async (req, res) => {
+  const targetCid = Number(req.params.cid);
+  if (!targetCid) return res.status(400).json({ error: 'Invalid CID' });
+  const viewerTeam = req._viewerTeamName || (await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: Number(req.session.user.data.cid), role: 'WF_TEAM' } }
+  }).catch(() => null))?.teamName || null;
+
+  const target = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: targetCid, role: 'WF_TEAM' } }
+  });
+  if (!target) return res.status(404).json({ error: 'Not a team member.' });
+  if (viewerTeam && target.teamName !== viewerTeam) {
+    return res.status(403).json({ error: 'Member is not in your team.' });
+  }
+
+  // Account holders are managed via the admin's Official Teams page, not here.
+  const ownerRow = await prisma.officialTeam.findFirst({
+    where: { teamName: { equals: target.teamName || '' }, mainCid: targetCid }
+  });
+  if (ownerRow) {
+    return res.status(403).json({ error: 'Managed by Admins.' });
+  }
+
+  const data = {};
+  if (typeof req.body?.canEditBookings === 'boolean') data.canEditBookings = req.body.canEditBookings;
+  if (typeof req.body?.canManageMembers === 'boolean') data.canManageMembers = req.body.canManageMembers;
+  if (typeof req.body?.participating === 'boolean') data.participating = req.body.participating;
+  if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
+
+  await prisma.userAdditionalRole.update({ where: { id: target.id }, data });
+  return res.json({ success: true });
+});
+
+app.delete('/api/team/members/:cid', requireLogin, requireTeamManager, async (req, res) => {
+  const targetCid = Number(req.params.cid);
+  if (!targetCid) return res.status(400).json({ error: 'Invalid CID' });
+  const viewerCid = Number(req.session.user.data.cid);
+  if (targetCid === viewerCid) return res.status(400).json({ error: 'Cannot remove yourself.' });
+  const viewerTeam = req._viewerTeamName || (await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: viewerCid, role: 'WF_TEAM' } }
+  }).catch(() => null))?.teamName || null;
+
+  const target = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: targetCid, role: 'WF_TEAM' } }
+  });
+  if (!target) return res.status(404).json({ error: 'Not a team member.' });
+  if (viewerTeam && target.teamName !== viewerTeam) {
+    return res.status(403).json({ error: 'Member is not in your team.' });
+  }
+
+  // Account holders can't be removed here; use Official Teams admin.
+  const ownerRow = await prisma.officialTeam.findFirst({
+    where: { teamName: { equals: target.teamName || '' }, mainCid: targetCid }
+  });
+  if (ownerRow) {
+    return res.status(403).json({ error: 'Managed by Admins.' });
+  }
+
+  await prisma.userAdditionalRole.delete({ where: { id: target.id } });
+  teamMemberCids.delete(targetCid);
+  return res.json({ success: true });
+});
+
+// Team member: update the CID + callsign on a booking owned by their team.
+// Authorization: viewer must be a WF_TEAM member, and the booking's current
+// callsign must match one of the team's OfficialTeam callsigns (case-insensitive).
+app.post('/api/team/bookings/update', requireLogin, requireTeamMember, async (req, res) => {
+  try {
+    const sessionCid = Number(req.session.user.data.cid);
+    const { slotKey, cid: newCidRaw, callsign: newCallsignRaw } = req.body || {};
+    if (!slotKey) return res.status(400).json({ error: 'Missing slotKey' });
+    const newCid = Number(newCidRaw);
+    const newCallsign = String(newCallsignRaw || '').trim().toUpperCase();
+    if (!newCid || !Number.isInteger(newCid)) return res.status(400).json({ error: 'Invalid CID' });
+    if (!/^[A-Z0-9]{2,10}$/.test(newCallsign)) return res.status(400).json({ error: 'Invalid callsign' });
+
+    // Resolve the viewer's team + allowed callsigns + allowed assignee CIDs
+    const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid: sessionCid, role: 'WF_TEAM' } }
+    });
+    if (!wfTeamRow?.teamName) return res.status(403).json({ error: 'Your team is not linked.' });
+    if (wfTeamRow.canEditBookings === false) return res.status(403).json({ error: 'You do not have permission to edit bookings.' });
+    const [teamRows, teamMemberRoles] = await Promise.all([
+      prisma.officialTeam.findMany({
+        where: { participatingWf26: true },
+        select: { teamName: true, callsign: true, mainCid: true }
+      }),
+      prisma.userAdditionalRole.findMany({
+        where: { role: 'WF_TEAM' },
+        select: { cid: true, teamName: true }
+      })
+    ]);
+    const myTeam = teamRows.filter(t => String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName);
+    const teamCallsignSet = new Set(myTeam.map(t => String(t.callsign).toUpperCase()));
+    if (!teamCallsignSet.size) return res.status(403).json({ error: 'Team has no participating callsigns.' });
+    const allowedAssignees = new Set();
+    myTeam.forEach(t => { if (t.mainCid) allowedAssignees.add(Number(t.mainCid)); });
+    teamMemberRoles.forEach(r => {
+      if (String(r.teamName || '').trim().toUpperCase() === wfTeamRow.teamName && r.cid) {
+        allowedAssignees.add(Number(r.cid));
+      }
+    });
+    if (!allowedAssignees.has(newCid)) {
+      return res.status(403).json({ error: 'Pilot is not a member of your team.' });
+    }
+
+    // Find the booking for this slotKey owned by a team callsign
+    const dbBooking = await prisma.tobtBooking.findFirst({ where: { slotKey } });
+    if (!dbBooking) return res.status(404).json({ error: 'Booking not found' });
+    if (!teamCallsignSet.has(String(dbBooking.callsign || '').toUpperCase())) {
+      return res.status(403).json({ error: "Not your team's booking" });
+    }
+
+    const oldCid = Number(dbBooking.cid);
+
+    // Update DB by id so we can cleanly change cid without unique clashes
+    await prisma.tobtBooking.update({
+      where: { id: dbBooking.id },
+      data: { cid: newCid, callsign: newCallsign }
+    });
+
+    // Update in-memory caches
+    const oldBookingKey = `${oldCid}:${slotKey}`;
+    const newBookingKey = `${newCid}:${slotKey}`;
+    const existing = tobtBookingsByKey[oldBookingKey] || tobtBookingsByKey[slotKey];
+    const updated = {
+      ...(existing || {}),
+      slotKey,
+      cid: newCid,
+      callsign: newCallsign,
+      from: dbBooking.from,
+      to: dbBooking.to,
+      dateUtc: dbBooking.dateUtc,
+      depTimeUtc: dbBooking.depTimeUtc,
+      tobtTimeUtc: dbBooking.tobtTimeUtc
+    };
+    if (oldCid !== newCid) {
+      delete tobtBookingsByKey[oldBookingKey];
+      if (tobtBookingsByCid[oldCid]) tobtBookingsByCid[oldCid].delete(oldBookingKey);
+    }
+    tobtBookingsByKey[newBookingKey] = updated;
+    tobtBookingsByKey[slotKey] = updated;
+    if (!tobtBookingsByCid[newCid]) tobtBookingsByCid[newCid] = new Set();
+    tobtBookingsByCid[newCid].add(newBookingKey);
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[TEAM] Update booking failed:', err);
+    return res.status(500).json({ error: 'Failed to update booking' });
+  }
+});
+
 app.post('/api/tobt/update-callsign', requireLogin, async (req, res) => {
   try {
     const { slotKey, callsign } = req.body;
@@ -12140,17 +12490,517 @@ app.get('/admin', (req, res) => {
 });
 
 /* ===== TEAM MEMBER PAGES (WF_TEAM role) ===== */
-app.get('/team/management', requireLogin, requireTeamMember, (req, res) => {
+app.get('/team/management', requireLogin, requireTeamMember, async (req, res) => {
   const user = req.session.user.data;
   const cid = Number(user.cid);
   const isAdmin = ADMIN_CIDS.includes(cid);
+
+  // Resolve the viewer's team name
+  const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid, role: 'WF_TEAM' } }
+  });
+  const teamName = wfTeamRow?.teamName || null;
+
+  // Active event name (for the Participating checkbox label)
+  let activeEventName = 'this event';
+  if (activeEventId) {
+    const ev = await prisma.wfEvent.findUnique({ where: { id: activeEventId } }).catch(() => null);
+    if (ev?.name) activeEventName = ev.name;
+  }
+
+  // Fleet + team members
+  let fleet = [];
+  let anyParticipating = false;
+  let ownerCids = new Set();
+  let memberCids = new Set();
+  if (teamName) {
+    const allTeams = await prisma.officialTeam.findMany({
+      select: { callsign: true, aircraftType: true, participatingWf26: true, teamName: true, mainCid: true }
+    });
+    for (const t of allTeams) {
+      if (String(t.teamName || '').trim().toUpperCase() !== teamName) continue;
+      fleet.push({
+        callsign: String(t.callsign || '').toUpperCase(),
+        aircraftType: String(t.aircraftType || '').toUpperCase(),
+        active: !!t.participatingWf26
+      });
+      if (t.participatingWf26) anyParticipating = true;
+      if (t.mainCid) ownerCids.add(Number(t.mainCid));
+    }
+    fleet.sort((a, b) => a.callsign.localeCompare(b.callsign));
+
+    const memberRoles = await prisma.userAdditionalRole.findMany({
+      where: { role: 'WF_TEAM' },
+      select: { cid: true, teamName: true }
+    });
+    memberRoles.forEach(r => {
+      if (String(r.teamName || '').trim().toUpperCase() === teamName && r.cid) {
+        memberCids.add(Number(r.cid));
+      }
+    });
+  }
+
+  // Union of owners + members → resolve names (User → Staff/Doc reqs →
+  // mailing list → session), same cascade as /team/bookings
+  const allCids = new Set([...ownerCids, ...memberCids]);
+  const nameByCid = {};
+  if (allCids.size) {
+    const cidList = [...allCids];
+    const [users, staffReqs, docReqs, mailSubs] = await Promise.all([
+      prisma.user.findMany({ where: { cid: { in: cidList } }, select: { cid: true, name: true } }).catch(() => []),
+      prisma.staffAccessRequest.findMany({
+        where: { cid: { in: cidList }, name: { not: null } },
+        select: { cid: true, name: true, createdAt: true },
+        orderBy: { createdAt: 'desc' }
+      }).catch(() => []),
+      prisma.documentationAccessRequest.findMany({
+        where: { cid: { in: cidList }, name: { not: null } },
+        select: { cid: true, name: true, createdAt: true },
+        orderBy: { createdAt: 'desc' }
+      }).catch(() => []),
+      prisma.mailingListSubscriber.findMany({
+        where: { cid: { in: cidList } },
+        select: { cid: true, firstName: true, lastName: true }
+      }).catch(() => [])
+    ]);
+    users.forEach(u => { if (u.name) nameByCid[Number(u.cid)] = u.name; });
+    staffReqs.forEach(r => { if (r.name && !nameByCid[Number(r.cid)]) nameByCid[Number(r.cid)] = r.name; });
+    docReqs.forEach(r => { if (r.name && !nameByCid[Number(r.cid)]) nameByCid[Number(r.cid)] = r.name; });
+    mailSubs.forEach(s => {
+      const c = Number(s.cid);
+      if (nameByCid[c]) return;
+      const nm = [s.firstName, s.lastName].filter(Boolean).join(' ').trim();
+      if (nm) nameByCid[c] = nm;
+    });
+    const sessionName = req.session?.user?.data?.personal?.name_full;
+    if (sessionName && !nameByCid[cid]) nameByCid[cid] = sessionName;
+  }
+
+  // Team Members = WF_TEAM role holders for this team (owners are shown
+  // on Our Fleet; if an owner also holds WF_TEAM, they'll appear here too).
+  // Load each member's perms so the Edit Perms modal opens pre-filled.
+  const memberPermsRows = teamName ? await prisma.userAdditionalRole.findMany({
+    where: { role: 'WF_TEAM' }
+  }) : [];
+  const permsByCid = {};
+  memberPermsRows.forEach(r => {
+    if (String(r.teamName || '').trim().toUpperCase() === teamName) {
+      permsByCid[Number(r.cid)] = {
+        canEditBookings: r.canEditBookings !== false,
+        canManageMembers: !!r.canManageMembers,
+        participating: r.participating !== false
+      };
+    }
+  });
+  const teamMembers = [...memberCids].map(c => ({
+    cid: c,
+    name: nameByCid[c] || '',
+    isOwner: ownerCids.has(c),
+    perms: permsByCid[c] || { canEditBookings: true, canManageMembers: false, participating: true }
+  })).sort((a, b) => {
+    if (a.isOwner !== b.isOwner) return a.isOwner ? -1 : 1;
+    return a.cid - b.cid;
+  });
+
+  // Can the viewer manage others?
+  const viewerPerms = permsByCid[cid] || null;
+  const viewerCanManage = isAdmin || !!(viewerPerms && viewerPerms.canManageMembers);
+
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+
   const content = `
-    <section class="card card-full">
-      <h2>Team Management</h2>
-      <p style="color:var(--muted);font-size:13px;">Coming soon.</p>
+    <section class="card card-full" style="margin-bottom:20px;">
+      <h2 style="margin:0 0 4px;">${teamName ? esc(teamName) : 'Team Management'}</h2>
+      ${teamName
+        ? `<p style="color:var(--muted);font-size:13px;margin:0;">Your team's fleet and roster.</p>`
+        : `<p style="color:var(--muted);font-size:13px;margin:0;">Your team membership is not linked to an Official Team yet. Ask an admin to set your team in Access Management.</p>`}
     </section>
+
+    ${teamName ? `
+    <div class="tm-grid">
+      <section class="card my-slots-card">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;">
+          <h2 style="margin:0;">Our Team Members</h2>
+          ${viewerCanManage ? '<button type="button" class="action-btn primary" id="tmAddBtn" style="font-size:12px;padding:6px 14px;">Add Member</button>' : ''}
+        </div>
+        ${teamMembers.length === 0 ? `
+          <p style="color:var(--muted);font-size:13px;"><em>No team members yet.</em></p>
+        ` : `
+          <div class="my-slots-table-wrapper">
+            <table class="my-slots-table" style="min-width:0;table-layout:auto;">
+              <thead>
+                <tr>
+                  <th>CID</th>
+                  <th>Full Name</th>
+                  <th>Active?</th>
+                  ${viewerCanManage ? '<th style="text-align:right;">Actions</th>' : ''}
+                </tr>
+              </thead>
+              <tbody>
+                ${teamMembers.map(m => `
+                  <tr>
+                    <td>${m.cid}</td>
+                    <td>${esc(m.name) || '<span style="color:var(--muted);">Unknown</span>'}</td>
+                    <td>${(m.isOwner || m.perms.participating)
+                      ? '<span style="color:#4ade80;font-weight:600;">Yes</span>'
+                      : '<span style="color:var(--muted);">No</span>'}</td>
+                    ${viewerCanManage ? `
+                      <td style="text-align:right;white-space:nowrap;">
+                        ${m.isOwner
+                          ? '<span style="font-size:11px;color:var(--muted);font-style:italic;">Managed by Admins</span>'
+                          : `
+                            <button type="button" class="action-btn tm-edit-btn"
+                              data-cid="${m.cid}"
+                              data-name="${esc(m.name || '')}"
+                              data-edit="${m.perms.canEditBookings ? '1' : '0'}"
+                              data-manage="${m.perms.canManageMembers ? '1' : '0'}"
+                              data-part="${m.perms.participating ? '1' : '0'}"
+                              style="font-size:11px;padding:4px 10px;margin-right:4px;">Edit Perms</button>
+                            <button type="button" class="tobt-btn cancel tm-del-btn"
+                              data-cid="${m.cid}"
+                              data-name="${esc(m.name || '')}"
+                              ${m.cid === cid ? 'disabled title="You can&#39;t remove yourself"' : ''}
+                              style="font-size:11px;padding:4px 10px;">Delete</button>
+                          `}
+                      </td>
+                    ` : ''}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `}
+      </section>
+
+      <section class="card my-slots-card">
+        <h2>Our Fleet</h2>
+        ${fleet.length === 0 ? `
+          <p style="color:var(--muted);font-size:13px;"><em>No aircraft registered for this team yet.</em></p>
+        ` : `
+          <div class="my-slots-table-wrapper">
+            <table class="my-slots-table" style="min-width:0;table-layout:auto;">
+              <thead>
+                <tr><th>Callsign</th><th>A/C Type</th><th>Active?</th></tr>
+              </thead>
+              <tbody>
+                ${fleet.map(f => `
+                  <tr>
+                    <td><strong>${esc(f.callsign)}</strong></td>
+                    <td>${esc(f.aircraftType) || '—'}</td>
+                    <td>${f.active
+                      ? '<span style="color:#4ade80;font-weight:600;">Yes</span>'
+                      : '<span style="color:var(--muted);">No</span>'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `}
+      </section>
+    </div>
+    ` : ''}
+
+    ${viewerCanManage ? `
+    <div id="tmPermsModal" class="route-modal" hidden>
+      <div class="route-modal-backdrop"></div>
+      <div class="route-modal-card" role="dialog" aria-modal="true" style="max-width:420px;">
+        <div class="route-modal-header">
+          <div style="font-weight:700;font-size:14px;">Edit Team Member Perms</div>
+          <button type="button" id="tmPermsClose" class="route-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div id="tmPermsTarget" style="font-size:13px;color:var(--muted);margin-bottom:4px;"></div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="tmPermEdit" style="accent-color:var(--accent);cursor:pointer;" />
+          Can edit bookings
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="tmPermManage" style="accent-color:var(--accent);cursor:pointer;" />
+          Can manage team members
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="tmPermPart" style="accent-color:var(--accent);cursor:pointer;" />
+          Participating in ${esc(activeEventName)}
+        </label>
+        <div id="tmPermsError" style="display:none;color:#f87171;font-size:12px;margin-top:8px;"></div>
+        <div class="route-modal-actions" style="gap:8px;">
+          <button type="button" id="tmPermsCancel" class="route-modal-copy" style="background:transparent;color:var(--text);border:1px solid var(--border);">Cancel</button>
+          <button type="button" id="tmPermsSave" class="route-modal-copy">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tmAddModal" class="route-modal" hidden>
+      <div class="route-modal-backdrop"></div>
+      <div class="route-modal-card" role="dialog" aria-modal="true" style="max-width:420px;">
+        <div class="route-modal-header">
+          <div style="font-weight:700;font-size:14px;">Add Team Member</div>
+          <button type="button" id="tmAddClose" class="route-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <label style="font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px;">
+          VATSIM CID
+          <input type="text" id="tmAddCid" inputmode="numeric" maxlength="10" placeholder="e.g. 1303570"
+            style="padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;" />
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="tmAddEdit" style="accent-color:var(--accent);cursor:pointer;" />
+          Can edit bookings
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="tmAddManage" style="accent-color:var(--accent);cursor:pointer;" />
+          Can manage team members
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="tmAddPart" checked style="accent-color:var(--accent);cursor:pointer;" />
+          Participating in ${esc(activeEventName)}
+        </label>
+        <div id="tmAddError" style="display:none;color:#f87171;font-size:12px;margin-top:8px;"></div>
+        <div class="route-modal-actions" style="gap:8px;">
+          <button type="button" id="tmAddCancel" class="route-modal-copy" style="background:transparent;color:var(--text);border:1px solid var(--border);">Cancel</button>
+          <button type="button" id="tmAddSave" class="route-modal-copy">Add Member</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tmDelModal" class="route-modal" hidden>
+      <div class="route-modal-backdrop"></div>
+      <div class="route-modal-card" role="dialog" aria-modal="true" style="max-width:400px;">
+        <div class="route-modal-header">
+          <div style="font-weight:700;font-size:14px;">Remove Team Member</div>
+          <button type="button" id="tmDelClose" class="route-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <p id="tmDelBody" style="font-size:13px;color:var(--text);margin:4px 0 0;"></p>
+        <p style="font-size:12px;color:var(--muted);margin:4px 0 0;">They'll lose access to team pages and will no longer appear in your roster.</p>
+        <div id="tmDelError" style="display:none;color:#f87171;font-size:12px;margin-top:8px;"></div>
+        <div class="route-modal-actions" style="gap:8px;">
+          <button type="button" id="tmDelCancel" class="route-modal-copy" style="background:transparent;color:var(--text);border:1px solid var(--border);">Cancel</button>
+          <button type="button" id="tmDelConfirm" class="route-modal-copy" style="background:#ef4444;color:#fff;">Remove</button>
+        </div>
+      </div>
+    </div>
+    ` : ''}
+
+    <style>
+      .tm-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+        gap: 20px;
+        align-items: start;
+      }
+      .route-modal[hidden] { display: none; }
+      .route-modal {
+        position: fixed; inset: 0; z-index: 500;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .route-modal-backdrop {
+        position: absolute; inset: 0; background: rgba(0,0,0,0.6);
+      }
+      .route-modal-card {
+        position: relative;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px;
+        width: min(420px, 92vw);
+        max-height: 80vh;
+        display: flex; flex-direction: column; gap: 10px;
+      }
+      .route-modal-header {
+        display: flex; align-items: center; justify-content: space-between;
+      }
+      .route-modal-close {
+        background: none; border: none; color: var(--muted);
+        font-size: 22px; cursor: pointer; line-height: 1; padding: 0 4px;
+      }
+      .route-modal-close:hover { color: var(--text); }
+      .route-modal-actions {
+        display: flex; justify-content: flex-end; margin-top: 4px;
+      }
+      .route-modal-copy {
+        padding: 6px 14px; background: var(--accent); color: #0b1220;
+        border: none; border-radius: 6px;
+        font-weight: 600; cursor: pointer; font-family: inherit;
+      }
+    </style>
+
+    ${viewerCanManage ? `
+    <script>
+    (function() {
+      function bindModal(modal) {
+        var backdrop = modal.querySelector('.route-modal-backdrop');
+        function close() { modal.hidden = true; }
+        backdrop.addEventListener('click', close);
+        document.addEventListener('keydown', function(e) {
+          if (!modal.hidden && e.key === 'Escape') close();
+        });
+        return { close: close };
+      }
+
+      // ---- Edit Perms ----
+      var permsModal = document.getElementById('tmPermsModal');
+      var permsTarget = document.getElementById('tmPermsTarget');
+      var cbEdit = document.getElementById('tmPermEdit');
+      var cbManage = document.getElementById('tmPermManage');
+      var cbPart = document.getElementById('tmPermPart');
+      var permsErr = document.getElementById('tmPermsError');
+      var permsSave = document.getElementById('tmPermsSave');
+      var permsBind = bindModal(permsModal);
+      document.getElementById('tmPermsClose').addEventListener('click', permsBind.close);
+      document.getElementById('tmPermsCancel').addEventListener('click', permsBind.close);
+      var permsCid = null;
+
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.tm-edit-btn');
+        if (!btn) return;
+        permsCid = Number(btn.dataset.cid);
+        permsTarget.textContent = (btn.dataset.name || 'Unknown') + ' (CID ' + btn.dataset.cid + ')';
+        cbEdit.checked = btn.dataset.edit === '1';
+        cbManage.checked = btn.dataset.manage === '1';
+        cbPart.checked = btn.dataset.part === '1';
+        permsErr.style.display = 'none';
+        permsErr.textContent = '';
+        permsModal.hidden = false;
+      });
+
+      permsSave.addEventListener('click', async function() {
+        if (!permsCid) return;
+        permsSave.disabled = true; permsSave.textContent = 'Saving...';
+        try {
+          var res = await fetch('/api/team/members/' + permsCid + '/perms', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+              canEditBookings: cbEdit.checked,
+              canManageMembers: cbManage.checked,
+              participating: cbPart.checked
+            })
+          });
+          if (!res.ok) {
+            var data = await res.json().catch(function() { return {}; });
+            permsErr.textContent = data.error || 'Update failed';
+            permsErr.style.display = '';
+            permsSave.disabled = false; permsSave.textContent = 'Save';
+            return;
+          }
+          location.reload();
+        } catch (err) {
+          permsErr.textContent = 'Network error.';
+          permsErr.style.display = '';
+          permsSave.disabled = false; permsSave.textContent = 'Save';
+        }
+      });
+
+      // ---- Add Member ----
+      var addModal = document.getElementById('tmAddModal');
+      var addBtn = document.getElementById('tmAddBtn');
+      var addCid = document.getElementById('tmAddCid');
+      var addEdit = document.getElementById('tmAddEdit');
+      var addManage = document.getElementById('tmAddManage');
+      var addPart = document.getElementById('tmAddPart');
+      var addErr = document.getElementById('tmAddError');
+      var addSave = document.getElementById('tmAddSave');
+      var addBind = bindModal(addModal);
+      document.getElementById('tmAddClose').addEventListener('click', addBind.close);
+      document.getElementById('tmAddCancel').addEventListener('click', addBind.close);
+
+      if (addBtn) addBtn.addEventListener('click', function() {
+        addCid.value = '';
+        addEdit.checked = false;
+        addManage.checked = false;
+        addPart.checked = true;
+        addErr.style.display = 'none';
+        addErr.textContent = '';
+        addModal.hidden = false;
+        setTimeout(function() { addCid.focus(); }, 0);
+      });
+
+      addSave.addEventListener('click', async function() {
+        var cidVal = (addCid.value || '').trim();
+        if (!/^\\d{4,10}$/.test(cidVal)) {
+          addErr.textContent = 'Enter a valid VATSIM CID.';
+          addErr.style.display = '';
+          return;
+        }
+        addSave.disabled = true; addSave.textContent = 'Adding...';
+        try {
+          var res = await fetch('/api/team/members', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+              cid: Number(cidVal),
+              canEditBookings: addEdit.checked,
+              canManageMembers: addManage.checked,
+              participating: addPart.checked
+            })
+          });
+          if (!res.ok) {
+            var data = await res.json().catch(function() { return {}; });
+            addErr.textContent = data.error || 'Failed to add member';
+            addErr.style.display = '';
+            addSave.disabled = false; addSave.textContent = 'Add Member';
+            return;
+          }
+          location.reload();
+        } catch (err) {
+          addErr.textContent = 'Network error.';
+          addErr.style.display = '';
+          addSave.disabled = false; addSave.textContent = 'Add Member';
+        }
+      });
+
+      // ---- Delete Member ----
+      var delModal = document.getElementById('tmDelModal');
+      var delBody = document.getElementById('tmDelBody');
+      var delErr = document.getElementById('tmDelError');
+      var delConfirm = document.getElementById('tmDelConfirm');
+      var delBind = bindModal(delModal);
+      document.getElementById('tmDelClose').addEventListener('click', delBind.close);
+      document.getElementById('tmDelCancel').addEventListener('click', delBind.close);
+      var delCid = null;
+
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.tm-del-btn');
+        if (!btn || btn.disabled) return;
+        delCid = Number(btn.dataset.cid);
+        var name = btn.dataset.name || 'this member';
+        delBody.textContent = 'Remove ' + name + ' (CID ' + btn.dataset.cid + ') from the team?';
+        delErr.style.display = 'none';
+        delErr.textContent = '';
+        delModal.hidden = false;
+      });
+
+      delConfirm.addEventListener('click', async function() {
+        if (!delCid) return;
+        delConfirm.disabled = true; delConfirm.textContent = 'Removing...';
+        try {
+          var res = await fetch('/api/team/members/' + delCid, {
+            method: 'DELETE',
+            credentials: 'same-origin'
+          });
+          if (!res.ok) {
+            var data = await res.json().catch(function() { return {}; });
+            delErr.textContent = data.error || 'Delete failed';
+            delErr.style.display = '';
+            delConfirm.disabled = false; delConfirm.textContent = 'Remove';
+            return;
+          }
+          location.reload();
+        } catch (err) {
+          delErr.textContent = 'Network error.';
+          delErr.style.display = '';
+          delConfirm.disabled = false; delConfirm.textContent = 'Remove';
+        }
+      });
+    })();
+    </script>
+    ` : ''}
   `;
-  res.send(renderLayout({ title: 'Team Management', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+
+  const pageTitle = teamName ? `${teamName} - Team Management` : 'Team Management';
+  res.send(renderLayout({ title: pageTitle, user, isAdmin, content, layoutClass: 'dashboard-full' }));
 });
 
 app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
@@ -12167,6 +13017,7 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
   });
 
   let teamName = wfTeamRow?.teamName || null;
+  const canEditBookings = isAdmin || (wfTeamRow?.canEditBookings !== false);
   let teamCallsigns = new Set();
   let teamHasAnyRows = false;
   const callsignAircraftType = {};
@@ -12190,6 +13041,35 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
   if (activeEventId) {
     const ev = await prisma.wfEvent.findUnique({ where: { id: activeEventId } }).catch(() => null);
     if (ev?.name) activeEventName = ev.name;
+  }
+
+  // Build the list of possible assignees for this team's bookings:
+  //   - the team owner (every OfficialTeam row's mainCid for this team)
+  //   - every WF_TEAM member linked to this team
+  // Names come from the User table. Current booking CIDs are also added so the
+  // dropdown never loses a pre-existing selection.
+  const assigneeCids = new Set();
+  if (teamName) {
+    const [teamRowsForOwners, teamMemberRoles] = await Promise.all([
+      prisma.officialTeam.findMany({
+        where: { participatingWf26: true },
+        select: { teamName: true, mainCid: true }
+      }),
+      prisma.userAdditionalRole.findMany({
+        where: { role: 'WF_TEAM' },
+        select: { cid: true, teamName: true }
+      })
+    ]);
+    teamRowsForOwners.forEach(t => {
+      if (String(t.teamName || '').trim().toUpperCase() === teamName && t.mainCid) {
+        assigneeCids.add(Number(t.mainCid));
+      }
+    });
+    teamMemberRoles.forEach(r => {
+      if (String(r.teamName || '').trim().toUpperCase() === teamName && r.cid) {
+        assigneeCids.add(Number(r.cid));
+      }
+    });
   }
 
   const seen = new Set();
@@ -12270,9 +13150,64 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
       };
     })
     .sort((a, b) => {
-      if (a.dateUtc !== b.dateUtc) return a.dateUtc.localeCompare(b.dateUtc);
-      return a.depTimeUtc.localeCompare(b.depTimeUtc);
+      const an = parseInt(String(a.wfSector).replace(/\D/g, ''), 10);
+      const bn = parseInt(String(b.wfSector).replace(/\D/g, ''), 10);
+      if (!Number.isNaN(an) && !Number.isNaN(bn) && an !== bn) return an - bn;
+      return String(a.wfSector).localeCompare(String(b.wfSector));
     });
+
+  // Include every current bookingCid so the edit dropdown never loses a
+  // pre-existing selection, then resolve display names. The User table is
+  // authoritative — it's upserted on every login from VATSIM's
+  // personal.name_full. Fall back to local request tables / session for
+  // CIDs that have never logged in.
+  rows.forEach(r => { if (r.bookingCid) assigneeCids.add(Number(r.bookingCid)); });
+  const nameByCid = {};
+  if (assigneeCids.size) {
+    const cidList = [...assigneeCids];
+    const [users, staffReqs, docReqs, mailSubs] = await Promise.all([
+      prisma.user.findMany({ where: { cid: { in: cidList } }, select: { cid: true, name: true } }).catch(() => []),
+      prisma.staffAccessRequest.findMany({
+        where: { cid: { in: cidList }, name: { not: null } },
+        select: { cid: true, name: true, createdAt: true },
+        orderBy: { createdAt: 'desc' }
+      }).catch(() => []),
+      prisma.documentationAccessRequest.findMany({
+        where: { cid: { in: cidList }, name: { not: null } },
+        select: { cid: true, name: true, createdAt: true },
+        orderBy: { createdAt: 'desc' }
+      }).catch(() => []),
+      prisma.mailingListSubscriber.findMany({
+        where: { cid: { in: cidList } },
+        select: { cid: true, firstName: true, lastName: true }
+      }).catch(() => [])
+    ]);
+    users.forEach(u => { if (u.name) nameByCid[Number(u.cid)] = u.name; });
+    staffReqs.forEach(r => { if (r.name && !nameByCid[Number(r.cid)]) nameByCid[Number(r.cid)] = r.name; });
+    docReqs.forEach(r => { if (r.name && !nameByCid[Number(r.cid)]) nameByCid[Number(r.cid)] = r.name; });
+    mailSubs.forEach(s => {
+      const c = Number(s.cid);
+      if (nameByCid[c]) return;
+      const nm = [s.firstName, s.lastName].filter(Boolean).join(' ').trim();
+      if (nm) nameByCid[c] = nm;
+    });
+    // Session fallback — the viewer themselves (covers the first page load
+    // after login before the User upsert is visible)
+    const sessionName = req.session?.user?.data?.personal?.name_full;
+    if (sessionName && !nameByCid[cid]) {
+      nameByCid[cid] = sessionName;
+      // Opportunistically persist, in case login pre-dated the upsert change
+      prisma.user.upsert({
+        where: { cid },
+        update: { name: sessionName },
+        create: { cid, name: sessionName }
+      }).catch(() => {});
+    }
+  }
+  const teamAssignees = [...assigneeCids]
+    .map(c => ({ cid: c, name: nameByCid[c] || '' }))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || '') || a.cid - b.cid);
+  rows.forEach(r => { r.pilotName = nameByCid[Number(r.bookingCid)] || ''; });
 
   const content = `
     <section class="card my-slots-card">
@@ -12312,7 +13247,11 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
                 return `
                 <tr>
                   <td><button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.wfSector}">${r.wfSector}</button></td>
-                  <td><strong>${r.callsign}</strong></td>
+                  <td style="white-space:nowrap;">
+                    <strong>${r.callsign}</strong>
+                    <span class="tobt-help" style="margin-left:4px;">i<span class="tobt-tooltip">Callsign: <b>${r.callsign}</b><br>Pilot: <b>${r.pilotName || '—'}</b><br>CID: <b>${r.bookingCid}</b></span></span>
+                    ${canEditBookings ? `<button type="button" class="team-cs-edit-btn" data-slot-key="${r.slotKey}" data-callsign="${r.callsign}" data-cid="${r.bookingCid}" title="Edit callsign / pilot" style="margin-left:4px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.25);color:var(--accent);border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;">Edit</button>` : ''}
+                  </td>
                   <td><a href="/icao/${r.from}">${r.from}</a></td>
                   <td><a href="/icao/${r.to}">${r.to}</a></td>
                   <td>${r.dateUtc}</td>
@@ -12353,6 +13292,33 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
         <div id="routeModalBody" class="route-modal-body"></div>
         <div class="route-modal-actions">
           <button type="button" id="routeModalCopy" class="route-modal-copy">Copy</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="teamCsModal" class="route-modal" hidden>
+      <div class="route-modal-backdrop"></div>
+      <div class="route-modal-card" role="dialog" aria-modal="true" aria-labelledby="teamCsModalTitle" style="max-width:420px;">
+        <div class="route-modal-header">
+          <div id="teamCsModalTitle" style="font-weight:700;font-size:14px;">Edit Booking</div>
+          <button type="button" id="teamCsClose" class="route-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <label style="font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px;">
+            Callsign
+            <input type="text" id="teamCsCallsign" maxlength="10" style="padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;text-transform:uppercase;font-family:monospace;" />
+          </label>
+          <label style="font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px;">
+            Pilot
+            <select id="teamCsCid" style="padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;">
+              ${teamAssignees.map(a => `<option value="${a.cid}">${(a.name || 'Unknown').replace(/</g,'&lt;')} (${a.cid})</option>`).join('')}
+            </select>
+          </label>
+          <div id="teamCsError" style="display:none;color:#f87171;font-size:12px;"></div>
+        </div>
+        <div class="route-modal-actions" style="gap:8px;">
+          <button type="button" id="teamCsCancel" class="route-modal-copy" style="background:transparent;color:var(--text);border:1px solid var(--border);">Cancel</button>
+          <button type="button" id="teamCsSave" class="route-modal-copy">Save</button>
         </div>
       </div>
     </div>
@@ -12495,6 +13461,87 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
         }
       });
     });
+    </script>
+
+    <script>
+    (function() {
+      var modal = document.getElementById('teamCsModal');
+      var csInput = document.getElementById('teamCsCallsign');
+      var cidInput = document.getElementById('teamCsCid');
+      var errEl = document.getElementById('teamCsError');
+      var saveBtn = document.getElementById('teamCsSave');
+      var closeBtn = document.getElementById('teamCsClose');
+      var cancelBtn = document.getElementById('teamCsCancel');
+      var backdrop = modal.querySelector('.route-modal-backdrop');
+      var currentSlotKey = null;
+
+      function open(slotKey, callsign, cid) {
+        currentSlotKey = slotKey;
+        csInput.value = callsign || '';
+        if (cid != null && cidInput.querySelector('option[value="' + cid + '"]')) {
+          cidInput.value = String(cid);
+        } else if (cidInput.options.length) {
+          cidInput.selectedIndex = 0;
+        }
+        errEl.style.display = 'none';
+        errEl.textContent = '';
+        modal.hidden = false;
+        setTimeout(function() { csInput.focus(); csInput.select(); }, 0);
+      }
+      function close() { modal.hidden = true; currentSlotKey = null; }
+
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.team-cs-edit-btn');
+        if (!btn) return;
+        open(btn.dataset.slotKey, btn.dataset.callsign, btn.dataset.cid);
+      });
+      closeBtn.addEventListener('click', close);
+      cancelBtn.addEventListener('click', close);
+      backdrop.addEventListener('click', close);
+      document.addEventListener('keydown', function(e) {
+        if (!modal.hidden && e.key === 'Escape') close();
+      });
+
+      saveBtn.addEventListener('click', async function() {
+        if (!currentSlotKey) return;
+        var callsign = (csInput.value || '').trim().toUpperCase();
+        var cid = (cidInput.value || '').trim();
+        if (!/^[A-Z0-9]{2,10}$/.test(callsign)) {
+          errEl.textContent = 'Callsign must be 2–10 alphanumeric characters.';
+          errEl.style.display = '';
+          return;
+        }
+        if (!cid) {
+          errEl.textContent = 'Please pick a pilot.';
+          errEl.style.display = '';
+          return;
+        }
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+        try {
+          var res = await fetch('/api/team/bookings/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ slotKey: currentSlotKey, callsign: callsign, cid: Number(cid) })
+          });
+          if (!res.ok) {
+            var data = await res.json().catch(function() { return {}; });
+            errEl.textContent = data.error || 'Update failed';
+            errEl.style.display = '';
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            return;
+          }
+          location.reload();
+        } catch (err) {
+          errEl.textContent = 'Network error. Try again.';
+          errEl.style.display = '';
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Save';
+        }
+      });
+    })();
     </script>
   `;
   const pageTitle = teamName ? `${teamName} - Bookings` : 'Our Bookings';
@@ -13584,6 +14631,9 @@ app.post('/api/admin/official-teams', requireAdmin, async (req, res) => {
     }
   });
 
+  if (created.participatingWf26) {
+    autoAssignTeamBookings({ reason: `team ${created.id} created` }).catch(() => {});
+  }
   return res.json({ success: true, id: created.id });
 });
 
@@ -13640,6 +14690,7 @@ app.patch('/api/admin/official-teams/:id', requireAdmin, async (req, res) => {
   if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
   await prisma.officialTeam.update({ where: { id }, data });
+  autoAssignTeamBookings({ reason: `team ${id} patched` }).catch(() => {});
   return res.json({ success: true });
 });
 

@@ -167,11 +167,14 @@ model MasterToken {
 }
 
 model UserAdditionalRole {
-  id        Int      @id @default(autoincrement())
-  cid       Int
-  role      String
-  teamName  String?
-  createdAt DateTime @default(now())
+  id               Int      @id @default(autoincrement())
+  cid              Int
+  role             String
+  teamName         String?
+  canEditBookings  Boolean  @default(true)
+  canManageMembers Boolean  @default(false)
+  participating    Boolean  @default(true)
+  createdAt        DateTime @default(now())
 
   @@unique([cid, role])
   @@index([cid])

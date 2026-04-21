@@ -1,5 +1,8 @@
 import axios from 'axios';
 import querystring from 'querystring';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 export default async function vatsimCallback(req, res) {
   const { code, error } = req.query;
@@ -55,6 +58,24 @@ export default async function vatsimCallback(req, res) {
     delete req.session.pkce;
 
     req.session.user = userResponse.data;
+
+    // Persist the logged-in user's name so other pages (e.g. Team Bookings
+    // pilot dropdown) can resolve CID → Name without an authenticated VATSIM
+    // lookup, which is only available via the user's own OAuth session.
+    try {
+      const u = userResponse.data?.data || {};
+      const cidNum = Number(u.cid);
+      const name = (u.personal?.name_full || [u.personal?.name_first, u.personal?.name_last].filter(Boolean).join(' ')).trim();
+      if (cidNum && name) {
+        await prisma.user.upsert({
+          where: { cid: cidNum },
+          update: { name },
+          create: { cid: cidNum, name }
+        });
+      }
+    } catch (e) {
+      console.warn('[AUTH] User upsert failed:', e?.message || e);
+    }
 
     const redirectTo = req.session.returnTo || '/';
 delete req.session.returnTo;
