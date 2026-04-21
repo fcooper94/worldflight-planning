@@ -450,8 +450,12 @@ function openConfirmModalAsync({ title, message, confirmText = 'Confirm', cancel
   if (h3) h3.textContent = title || 'Confirm';
   if (help) help.textContent = message || '';
 
-  // hide input for confirmations
+  // hide input and hint for confirmations
   if (input) input.style.display = 'none';
+  const hint = card.querySelector('.modal-hint');
+  if (hint) hint.style.display = 'none';
+  const error = card.querySelector('.modal-error');
+  if (error) error.classList.add('hidden');
 
   // reset buttons
   confirm.textContent = confirmText;

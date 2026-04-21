@@ -4859,7 +4859,7 @@ socket.on('updateDepFlowType', async ({ sector, flowtype, eventId: clientEventId
   io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized, eventId: evtId });
 });
 
-socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBooking }) => {
+socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBooking, teamCallsign }) => {
 
   console.log('[BOOKING ONLY]', sector, enteredCid, teamBooking ? '(team)' : '');
 
@@ -4931,11 +4931,33 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
     return;
   }
 
+  // For team bookings, resolve the team's actual callsign
+  let bookingCallsign = String(bookingCid);
+  if (teamBooking) {
+    const bookerTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid: sessionCid, role: 'WF_TEAM' } }
+    }).catch(() => null);
+    if (bookerTeamRow?.teamName) {
+      const allTeamCs = await prisma.officialTeam.findMany({
+        where: { participatingWf26: true },
+        select: { teamName: true, callsign: true }
+      }).catch(() => []);
+      const myTeamCs = allTeamCs
+        .filter(t => String(t.teamName || '').trim().toUpperCase() === bookerTeamRow.teamName)
+        .map(t => String(t.callsign || '').toUpperCase());
+      if (teamCallsign && myTeamCs.includes(String(teamCallsign).toUpperCase())) {
+        bookingCallsign = String(teamCallsign).toUpperCase();
+      } else if (myTeamCs.length > 0) {
+        bookingCallsign = myTeamCs[0];
+      }
+    }
+  }
+
   await prisma.tobtBooking.create({
     data: {
       slotKey,
       cid: bookingCid,
-      callsign: String(bookingCid),
+      callsign: bookingCallsign,
       from,
       to,
       dateUtc: row.date_utc,
@@ -4947,7 +4969,7 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
   const bookingData = {
     slotKey,
     cid: bookingCid,
-    callsign: String(bookingCid),
+    callsign: bookingCallsign,
     from,
     to,
     dateUtc: row.date_utc,
@@ -6710,14 +6732,18 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
     if (wfTeamRow?.teamName) {
       const mates = await prisma.officialTeam.findMany({
         where: {},
-        select: { teamName: true, mainCid: true, participatingWf26: true }
+        select: { teamName: true, mainCid: true, participatingWf26: true, callsign: true }
       });
+      const teamCallsigns = mates
+        .filter(t => String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName && t.participatingWf26)
+        .map(t => String(t.callsign || '').toUpperCase())
+        .filter(Boolean);
       const match = mates.find(t =>
         String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
         t.participatingWf26 && t.mainCid
       );
       if (match) {
-        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid) };
+        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid), callsigns: teamCallsigns };
       }
     }
   }
@@ -6799,7 +6825,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
         <div class="sector-banner sector-banner-flow-full" style="width:calc(40% - 8px);min-width:250px;flex-direction:column;justify-content:center;padding:16px;box-sizing:border-box;">
           <div style="display:flex;flex-direction:column;align-items:center;gap:8px;">
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
-            <div class="sector-banner-text" style="align-items:center;"><span class="sector-banner-label">Flow Restrictions</span><span class="sector-banner-icao" style="color:#64748b;">No flow information available yet</span></div>
+            <div class="sector-banner-text" style="align-items:center;"><span class="sector-banner-label">Flow Restrictions</span><span class="sector-banner-icao" style="color:#64748b;">No flow info yet</span></div>
           </div>
         </div>
         ` : `
@@ -7106,17 +7132,17 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
 
           if (teamCtx) {
             overlay.innerHTML = '<div class="modal-backdrop"></div>'
-              + '<div class="modal-dialog" style="width:400px;padding:24px;text-align:center;">'
-              + '<h3 style="margin:0 0 8px;">Confirm Booking</h3>'
-              + '<p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Who should this booking be filed under?</p>'
-              + '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">'
-              + '<button class="modal-btn modal-btn-submit" id="sectorBookSelf" style="width:100%;">Book for Myself</button>'
-              + '<button class="modal-btn modal-btn-submit" id="sectorBookTeam" style="width:100%;background:#8b5cf6;">Book for ' + teamCtx.teamName + '</button>'
+              + '<div class="modal-dialog booking-confirm-dialog">'
+              + '<div class="booking-confirm-icon">\u2708</div>'
+              + '<h3 class="booking-confirm-title">Confirm Booking</h3>'
+              + '<p class="booking-confirm-sub">Who should this booking be filed under?</p>'
+              + '<div class="booking-confirm-btns">'
+              + '<button class="booking-confirm-btn booking-confirm-self" id="sectorBookSelf">\ud83d\udc64 Book for Myself</button>'
+              + '<button class="booking-confirm-btn booking-confirm-team" id="sectorBookTeam">\ud83d\udc65 Book for ' + teamCtx.teamName + '</button>'
               + '</div>'
               + '<div id="sectorBookMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
-              + '<div class="modal-actions" style="justify-content:center;">'
-              + '<button class="modal-btn modal-btn-cancel" id="sectorBookCancel">Cancel</button>'
-              + '</div></div>';
+              + '<button class="booking-confirm-cancel" id="sectorBookCancel">Cancel</button>'
+              + '</div>';
             document.body.appendChild(overlay);
 
             overlay.querySelector('.modal-backdrop').addEventListener('click', function() { overlay.remove(); });
@@ -7125,11 +7151,22 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
               submitBooking(this, { callsign: String(myCid) }, document.getElementById('sectorBookMsg'));
             });
             document.getElementById('sectorBookTeam').addEventListener('click', function() {
-              submitBooking(
-                this,
-                { callsign: String(teamCtx.teamOwnerCid), teamBooking: true },
-                document.getElementById('sectorBookMsg')
-              );
+              var cs = teamCtx.callsigns || [];
+              var msg = document.getElementById('sectorBookMsg');
+              if (cs.length > 1) {
+                var btnsDiv = overlay.querySelector('.booking-confirm-btns');
+                btnsDiv.innerHTML = cs.map(function(c) {
+                  return '<button class="booking-confirm-btn booking-confirm-team sector-cs-pick" data-cs="' + c + '">' + c + '</button>';
+                }).join('');
+                overlay.querySelector('.booking-confirm-sub').textContent = 'Which callsign should this booking be for?';
+                btnsDiv.addEventListener('click', function(ev) {
+                  var pickBtn = ev.target.closest('.sector-cs-pick');
+                  if (!pickBtn) return;
+                  submitBooking(pickBtn, { callsign: String(teamCtx.teamOwnerCid), teamBooking: true, teamCallsign: pickBtn.dataset.cs }, msg);
+                });
+              } else {
+                submitBooking(this, { callsign: String(teamCtx.teamOwnerCid), teamBooking: true, teamCallsign: cs[0] || null }, msg);
+              }
             });
           } else {
             overlay.innerHTML = '<div class="modal-backdrop"></div>'
@@ -7233,14 +7270,18 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
     }).catch(() => null);
     if (wfTeamRow?.teamName) {
       const mates = await prisma.officialTeam.findMany({
-        select: { teamName: true, mainCid: true, participatingWf26: true }
+        select: { teamName: true, mainCid: true, participatingWf26: true, callsign: true }
       });
+      const teamCallsigns = mates
+        .filter(t => String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName && t.participatingWf26)
+        .map(t => String(t.callsign || '').toUpperCase())
+        .filter(Boolean);
       const match = mates.find(t =>
         String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
         t.participatingWf26 && t.mainCid
       );
       if (match) {
-        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid) };
+        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid), callsigns: teamCallsigns };
       }
     }
   }
@@ -7482,17 +7523,17 @@ function openTeamBookingModal(sector) {
   overlay.className = 'modal';
   overlay.style.zIndex = '20000';
   overlay.innerHTML = '<div class="modal-backdrop"></div>'
-    + '<div class="modal-dialog" style="width:400px;padding:24px;text-align:center;background:var(--panel);border:1px solid var(--border);border-radius:10px;">'
-    + '<h3 style="margin:0 0 8px;">Confirm Booking</h3>'
-    + '<p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Who should this booking be filed under?</p>'
-    + '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">'
-    + '<button class="modal-btn modal-btn-submit" id="sbkSelf" style="width:100%;">Book for Myself</button>'
-    + '<button class="modal-btn modal-btn-submit" id="sbkTeam" style="width:100%;background:#8b5cf6;">Book for ' + WF_TEAM_CTX.teamName + '</button>'
+    + '<div class="modal-dialog booking-confirm-dialog">'
+    + '<div class="booking-confirm-icon">\u2708</div>'
+    + '<h3 class="booking-confirm-title">Confirm Booking</h3>'
+    + '<p class="booking-confirm-sub">Who should this booking be filed under?</p>'
+    + '<div class="booking-confirm-btns">'
+    + '<button class="booking-confirm-btn booking-confirm-self" id="sbkSelf">\ud83d\udc64 Book for Myself</button>'
+    + '<button class="booking-confirm-btn booking-confirm-team" id="sbkTeam">\ud83d\udc65 Book for ' + WF_TEAM_CTX.teamName + '</button>'
     + '</div>'
     + '<div id="sbkMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
-    + '<div class="modal-actions" style="justify-content:center;">'
-    + '<button class="modal-btn modal-btn-cancel" id="sbkCancel">Cancel</button>'
-    + '</div></div>';
+    + '<button class="booking-confirm-cancel" id="sbkCancel">Cancel</button>'
+    + '</div>';
   document.body.appendChild(overlay);
 
   function close() { overlay.remove(); }
@@ -7504,12 +7545,33 @@ function openTeamBookingModal(sector) {
     close();
   });
   document.getElementById('sbkTeam').addEventListener('click', function() {
-    socket.emit('createBookingOnly', {
-      sector: sector,
-      callsign: String(WF_TEAM_CTX.teamOwnerCid),
-      teamBooking: true
-    });
-    close();
+    var cs = WF_TEAM_CTX.callsigns || [];
+    if (cs.length > 1) {
+      var btnsDiv = overlay.querySelector('.booking-confirm-btns');
+      btnsDiv.innerHTML = cs.map(function(c) {
+        return '<button class="booking-confirm-btn booking-confirm-team sbk-cs-pick" data-cs="' + c + '">' + c + '</button>';
+      }).join('');
+      overlay.querySelector('.booking-confirm-sub').textContent = 'Which callsign should this booking be for?';
+      btnsDiv.addEventListener('click', function(ev) {
+        var pickBtn = ev.target.closest('.sbk-cs-pick');
+        if (!pickBtn) return;
+        socket.emit('createBookingOnly', {
+          sector: sector,
+          callsign: String(WF_TEAM_CTX.teamOwnerCid),
+          teamBooking: true,
+          teamCallsign: pickBtn.dataset.cs
+        });
+        close();
+      });
+    } else {
+      socket.emit('createBookingOnly', {
+        sector: sector,
+        callsign: String(WF_TEAM_CTX.teamOwnerCid),
+        teamBooking: true,
+        teamCallsign: cs[0] || null
+      });
+      close();
+    }
   });
 }
 
@@ -7672,7 +7734,7 @@ document.addEventListener('click', async (e) => {
   if (!slotKey) return;
 
   const ok = await openConfirmModal({
-    title: 'Cancel TOBT Slot',
+    title: 'Cancel Booking',
     message: 'Are you sure you want to cancel this booking?'
   });
 
@@ -11564,13 +11626,14 @@ app.get('/api/tobt/slots', (req, res) => {
 
     const myBookingKey = `${cid}:${slotKey}`;
     const myBooking = tobtBookingsByKey[myBookingKey];
+    const anyBooking = tobtBookingsByKey[slotKey];
 
     results.push({
       tobt,
       slotKey,
-      booked: !!myBooking, // booked-by-me only
+      booked: !!anyBooking,
       byMe: !!myBooking,
-      callsign: myBooking?.callsign || null
+      callsign: myBooking?.callsign || anyBooking?.callsign || null
     });
   });
 
@@ -11642,6 +11705,67 @@ app.post('/api/tobt/cancel', requireLogin, async (req, res) => {
 
   } catch (err) {
     console.error('[TOBT] Cancel failed:', err);
+    return res.status(500).json({ error: 'Failed to cancel booking' });
+  }
+});
+
+app.post('/api/tobt/team-cancel', requireLogin, requireTeamMember, async (req, res) => {
+  try {
+    const { slotKey, bookingCid } = req.body;
+    if (!slotKey || !bookingCid) {
+      return res.status(400).json({ error: 'Missing slotKey or bookingCid' });
+    }
+
+    const targetCid = Number(bookingCid);
+    const bookingKey = `${targetCid}:${slotKey}`;
+    const booking = tobtBookingsByKey[bookingKey];
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found or already cancelled.' });
+    }
+
+    // Verify the booking's callsign belongs to the requesting user's team
+    const myCid = Number(req.session.user.data.cid);
+    const myTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid: myCid, role: 'WF_TEAM' } }
+    }).catch(() => null);
+    if (!myTeamRow?.teamName) {
+      return res.status(403).json({ error: 'You are not assigned to a team.' });
+    }
+    const myTeamCallsigns = new Set();
+    const teamRows = await prisma.officialTeam.findMany({
+      where: { participatingWf26: true },
+      select: { teamName: true, callsign: true }
+    });
+    teamRows.forEach(t => {
+      if (String(t.teamName || '').trim().toUpperCase() === myTeamRow.teamName)
+        myTeamCallsigns.add(String(t.callsign).toUpperCase());
+    });
+
+    if (!myTeamCallsigns.has(String(booking.callsign).toUpperCase())) {
+      return res.status(403).json({ error: 'This booking does not belong to your team.' });
+    }
+
+    // Delete from DB
+    await prisma.tobtBooking.deleteMany({ where: { cid: targetCid, slotKey } });
+
+    // Delete from memory
+    delete tobtBookingsByKey[bookingKey];
+    delete tobtBookingsByKey[slotKey];
+
+    if (tobtBookingsByCid[targetCid]) {
+      tobtBookingsByCid[targetCid].delete(bookingKey);
+      if (tobtBookingsByCid[targetCid].size === 0) {
+        delete tobtBookingsByCid[targetCid];
+      }
+    }
+
+    // Notify clients
+    emitToIcao(booking.from, 'departures:update');
+    emitToIcao(booking.from, 'unassignedTobtUpdate', buildUnassignedTobtsForICAO(booking.from));
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[TOBT] Team cancel failed:', err);
     return res.status(500).json({ error: 'Failed to cancel booking' });
   }
 });
@@ -11750,7 +11874,7 @@ app.post('/api/docs/request-access', requireLogin, async (req, res) => {
 app.post('/api/tobt/book', requireLogin, async (req, res) => {
   try {
     // 1️⃣ Validate input
-    const { slotKey, callsign: enteredCid, manual, teamBooking } = req.body;
+    const { slotKey, callsign: enteredCid, manual, teamBooking, teamCallsign } = req.body;
     if (!slotKey || !enteredCid) {
       return res.status(400).json({ error: 'Missing parameters' });
     }
@@ -11838,8 +11962,8 @@ const wantsManual = !isBookingOnly && manual === true;
       return res.status(400).json({ error: 'Invalid pilot booking' });
     }
 
-    // 5️⃣ Prevent double booking
-    if (tobtBookingsByKey[slotKey]) {
+    // 5️⃣ Prevent double booking (TOBT slots only — booking-only allows multiple users)
+    if (!isBookingOnly && tobtBookingsByKey[slotKey]) {
       return res.status(409).json({ error: 'Slot already booked' });
     }
 
@@ -11866,8 +11990,29 @@ for (const existing of Object.values(tobtBookingsByKey)) {
     // 9️⃣ Persist to DB — always store the target pilot's CID
     const storedCid = targetCid;
 
-
-    const normalizedCallsign = String(targetCid);
+    // For team bookings, store the team's callsign so it appears
+    // on the Our Bookings page (which filters by team callsigns).
+    let normalizedCallsign = String(targetCid);
+    if (teamBooking) {
+      const bookerTeamRow = await prisma.userAdditionalRole.findUnique({
+        where: { cid_role: { cid, role: 'WF_TEAM' } }
+      }).catch(() => null);
+      if (bookerTeamRow?.teamName) {
+        const allTeamCs = await prisma.officialTeam.findMany({
+          where: { participatingWf26: true },
+          select: { teamName: true, callsign: true }
+        }).catch(() => []);
+        const myTeamCs = allTeamCs
+          .filter(t => String(t.teamName || '').trim().toUpperCase() === bookerTeamRow.teamName)
+          .map(t => String(t.callsign || '').toUpperCase());
+        // Use client-provided callsign if valid, otherwise fall back to first
+        if (teamCallsign && myTeamCs.includes(String(teamCallsign).toUpperCase())) {
+          normalizedCallsign = String(teamCallsign).toUpperCase();
+        } else if (myTeamCs.length > 0) {
+          normalizedCallsign = myTeamCs[0];
+        }
+      }
+    }
 
     await prisma.tobtBooking.create({
       data: {
@@ -12047,8 +12192,15 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
     if (ev?.name) activeEventName = ev.name;
   }
 
+  const seen = new Set();
   const rows = Object.values(tobtBookingsByKey)
-    .filter(b => b && b.callsign && teamCallsigns.has(String(b.callsign).toUpperCase()))
+    .filter(b => {
+      if (!b || !b.callsign || !teamCallsigns.has(String(b.callsign).toUpperCase())) return false;
+      const key = `${b.cid}:${b.slotKey}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .map(booking => {
       const slotKey = booking.slotKey;
       const parts = slotKey.split('|');
@@ -12112,7 +12264,9 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
         tobt,
         atcRoute,
         aircraftType,
-        simbriefUrl
+        simbriefUrl,
+        slotKey,
+        bookingCid: booking.cid
       };
     })
     .sort((a, b) => {
@@ -12121,7 +12275,7 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
     });
 
   const content = `
-    <section class="card card-full my-slots-card">
+    <section class="card my-slots-card">
       <h2>Slots / Bookings</h2>
       <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">
         ${!teamName
@@ -12134,18 +12288,19 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
         <p style="color:var(--muted);"><em>No bookings yet for your team callsigns.</em></p>
       ` : `
         <div class="my-slots-table-wrapper">
-          <table class="my-slots-table">
+          <table class="my-slots-table" style="min-width:0;table-layout:auto;">
             <thead>
               <tr>
                 <th>WF Sector</th>
                 <th>Callsign</th>
-                <th>Departure</th>
-                <th>Destination</th>
-                <th>Date</th>
+                <th>Dep</th>
+                <th>Arr</th>
+                <th class="col-tobt">Date</th>
                 <th>Dep Window</th>
                 <th>Flow Type</th>
                 <th>ATC Route</th>
                 <th>Plan</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -12156,15 +12311,15 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
                   : '';
                 return `
                 <tr>
-                  <td>${r.wfSector}</td>
+                  <td><button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.wfSector}">${r.wfSector}</button></td>
                   <td><strong>${r.callsign}</strong></td>
                   <td><a href="/icao/${r.from}">${r.from}</a></td>
                   <td><a href="/icao/${r.to}">${r.to}</a></td>
                   <td>${r.dateUtc}</td>
                   <td>${r.depWindow || '—'}</td>
                   <td>${r.tobt
-                    ? `Slotted - <span style="color:#4ade80;font-weight:600;">${r.tobt.replace(':','')}z</span>`
-                    : `Booking - <span style="color:#4ade80;font-weight:600;">Confirmed</span>`}</td>
+                    ? `Slotted - <span style="color:#4ade80;font-weight:600;">${r.tobt.replace(':','')}z</span> <span class="tobt-help">?<span class="tobt-tooltip">This is a TOBT (Target Off-Blocks Time).<br>Please connect at least 30 minutes before this time.<br>You should be ready to push at this time.<br><b>The actual push time may differ depending on<br>ramp and airfield congestion.</b></span></span>`
+                    : `<span style="color:#4ade80;font-weight:600;">Booking Confirmed</span> <span class="tobt-help">?<span class="tobt-tooltip">You have a booking for this sector. Slots are not required.<br><b>Plan to depart within the Dep Window.</b></span></span>`}</td>
                   <td>${hasRoute
                     ? `<button type="button" class="show-route-btn" data-route="${routeAttr}">Show Route</button>`
                     : '<span style="color:var(--muted);">—</span>'}</td>
@@ -12173,6 +12328,12 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
                       <span class="simbrief-logo">SB</span>
                       <span class="simbrief-text">Plan with SimBrief</span>
                     </a>
+                  </td>
+                  <td>
+                    <button type="button" class="tobt-btn cancel cancel-slot-btn"
+                      data-slot-key="${r.slotKey}" data-booking-cid="${r.bookingCid}" data-callsign="${r.callsign}">
+                      Cancel
+                    </button>
                   </td>
                 </tr>
               `;}).join('')}
@@ -12265,6 +12426,75 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
         } catch (e) {}
       });
     })();
+    </script>
+
+    <script>
+    document.addEventListener('click', function(e) {
+      var btn = e.target.closest('.sector-details-btn');
+      if (!btn) return;
+      e.preventDefault();
+      var wf = btn.dataset.wf;
+      var from = btn.dataset.from;
+      var to = btn.dataset.to;
+      window.location.href = '/sector/' + wf + '/' + from + '/' + to;
+    });
+    </script>
+
+    <script>
+    document.querySelectorAll('.tobt-help').forEach(function(el) {
+      var tip = el.querySelector('.tobt-tooltip');
+      if (!tip) return;
+      el.addEventListener('mouseenter', function() {
+        var r = el.getBoundingClientRect();
+        tip.style.display = 'block';
+        var tw = tip.offsetWidth;
+        var th = tip.offsetHeight;
+        var left = r.left + r.width / 2 - tw / 2;
+        var top = r.bottom + 8;
+        if (top + th > window.innerHeight) top = r.top - th - 8;
+        if (left < 4) left = 4;
+        if (left + tw > window.innerWidth - 4) left = window.innerWidth - tw - 4;
+        tip.style.left = left + 'px';
+        tip.style.top = top + 'px';
+      });
+      el.addEventListener('mouseleave', function() {
+        tip.style.display = 'none';
+      });
+    });
+    </script>
+
+    <script>
+    document.addEventListener('click', function(e) {
+      var btn = e.target.closest('.cancel-slot-btn');
+      if (!btn) return;
+      e.preventDefault();
+
+      var slotKey = btn.dataset.slotKey;
+      var bookingCid = btn.dataset.bookingCid;
+      var callsign = btn.dataset.callsign || '';
+      if (!slotKey || !bookingCid) return;
+
+      openConfirmModalAsync({
+        title: 'Cancel Team Booking',
+        message: 'You are about to cancel a booking for ' + callsign + '. This will remove it for the whole team. Are you sure?',
+        confirmText: 'Yes, Cancel Booking',
+        cancelText: 'Go Back',
+        onConfirm: async function(ctx) {
+          var res = await fetch('/api/tobt/team-cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slotKey: slotKey, bookingCid: bookingCid })
+          });
+          if (!res.ok) {
+            var err = await res.json().catch(function() { return {}; });
+            ctx.set('Cancel failed', err.error || 'Unable to cancel booking');
+            return false;
+          }
+          setTimeout(function() { location.reload(); }, 500);
+          return true;
+        }
+      });
+    });
     </script>
   `;
   const pageTitle = teamName ? `${teamName} - Bookings` : 'Our Bookings';
@@ -21746,7 +21976,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
   );
 });
 
-app.get('/book', (req, res) => {
+app.get('/book', async (req, res) => {
   if (!req.session.user || !req.session.user.data) {
     return res.redirect('/auth/login');
   }
@@ -21764,7 +21994,32 @@ app.get('/book', (req, res) => {
 
 
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const cid = Number(user.cid);
+  const isAdmin = ADMIN_CIDS.includes(cid);
+
+  // Team booking context
+  let teamBookingContext = null;
+  if (cid && isTeamMember(cid)) {
+    const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid, role: 'WF_TEAM' } }
+    }).catch(() => null);
+    if (wfTeamRow?.teamName) {
+      const allTeams = await prisma.officialTeam.findMany({
+        select: { teamName: true, mainCid: true, participatingWf26: true, callsign: true }
+      });
+      const teamCallsigns = allTeams
+        .filter(t => String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName && t.participatingWf26)
+        .map(t => String(t.callsign || '').toUpperCase())
+        .filter(Boolean);
+      const match = allTeams.find(t =>
+        String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
+        t.participatingWf26 && t.mainCid
+      );
+      if (match) {
+        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid), callsigns: teamCallsigns };
+      }
+    }
+  }
 
   const content = `
   <div id="bookingSuccessBanner" class="booking-banner success hidden">
@@ -21835,6 +22090,8 @@ const selected = value === preselectedKey ? 'selected' : '';
       </table>
     </section>
     <script>
+  var BOOK_TEAM_CTX = ${teamBookingContext ? JSON.stringify(teamBookingContext) : 'null'};
+  var BOOK_MY_CID = ${cid ? cid : 'null'};
   const select = document.getElementById('depSelect');
   const body = document.getElementById('tobtBody');
 
@@ -21983,55 +22240,155 @@ if (slot.byMe) {
 
     let callsign;
     if (action === 'book') {
-      callsign = await new Promise(resolve => {
-        const modal = document.getElementById('callsignModal');
-        const input = document.getElementById('callsignModalInput');
-        const confirmBtn = document.getElementById('callsignConfirm');
-        const cancelBtn = document.getElementById('callsignCancel');
-        const errorEl = document.getElementById('modalError');
+      if (BOOK_TEAM_CTX) {
+        // Team member — show team/self choice modal
+        callsign = await new Promise(resolve => {
+          const overlay = document.createElement('div');
+          overlay.className = 'modal';
+          overlay.style.zIndex = '20000';
+          overlay.innerHTML = '<div class="modal-backdrop"></div>'
+            + '<div class="modal-dialog booking-confirm-dialog">'
+            + '<div class="booking-confirm-icon">\u2708</div>'
+            + '<h3 class="booking-confirm-title">Confirm Booking</h3>'
+            + '<p class="booking-confirm-sub">Who should this booking be filed under?</p>'
+            + '<div class="booking-confirm-btns">'
+            + '<button class="booking-confirm-btn booking-confirm-self" id="tobtBookSelf">\ud83d\udc64 Book for Myself</button>'
+            + '<button class="booking-confirm-btn booking-confirm-team" id="tobtBookTeam">\ud83d\udc65 Book for ' + BOOK_TEAM_CTX.teamName + '</button>'
+            + '</div>'
+            + '<div id="tobtBookMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
+            + '<button class="booking-confirm-cancel" id="tobtBookCancel">Cancel</button>'
+            + '</div>';
+          document.body.appendChild(overlay);
 
-        modal.classList.remove('hidden');
-        input.value = '';
-        input.focus();
-        if (errorEl) { errorEl.classList.add('hidden'); errorEl.textContent = ''; }
+          function close(val) { overlay.remove(); resolve(val); }
+          overlay.querySelector('.modal-backdrop').addEventListener('click', function() { close(null); });
+          document.getElementById('tobtBookCancel').addEventListener('click', function() { close(null); });
 
-        function cleanup() {
-          confirmBtn.removeEventListener('click', onConfirm);
-          cancelBtn.removeEventListener('click', onCancel);
-          input.removeEventListener('keydown', onKey);
-        }
-        function closeModal() { modal.classList.add('hidden'); if (errorEl) errorEl.classList.add('hidden'); cleanup(); }
-        function showErr(msg) { if (errorEl) { errorEl.textContent = msg; errorEl.classList.remove('hidden'); } input.focus(); }
-
-        async function onConfirm() {
-          const value = input.value.trim();
-          if (!value) return;
-          if (!/^[0-9]+$/.test(value)) { showErr('Please enter a valid numeric CID.'); return; }
-
-          const r = await fetch('/api/tobt/book', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ slotKey, callsign: value })
+          document.getElementById('tobtBookSelf').addEventListener('click', async function() {
+            this.disabled = true;
+            this.textContent = 'Booking...';
+            const msg = document.getElementById('tobtBookMsg');
+            const r = await fetch('/api/tobt/book', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ slotKey, callsign: String(BOOK_MY_CID) })
+            });
+            if (!r.ok) {
+              const err = await r.json().catch(() => ({}));
+              msg.textContent = err.error || 'Booking failed.';
+              msg.style.color = '#f87171';
+              msg.style.display = '';
+              this.disabled = false;
+              this.textContent = '\ud83d\udc64 Book for Myself';
+              return;
+            }
+            close(String(BOOK_MY_CID));
           });
 
-          if (!r.ok) {
-            const err = await r.json();
-            showErr(err.error || 'Booking failed. Please try again.');
-            return;
+          document.getElementById('tobtBookTeam').addEventListener('click', async function() {
+            const msg = document.getElementById('tobtBookMsg');
+            const cs = BOOK_TEAM_CTX.callsigns || [];
+
+            async function doTeamBook(chosenCallsign) {
+              const r = await fetch('/api/tobt/book', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ slotKey, callsign: String(BOOK_TEAM_CTX.teamOwnerCid), teamBooking: true, teamCallsign: chosenCallsign })
+              });
+              if (!r.ok) {
+                const err = await r.json().catch(() => ({}));
+                msg.textContent = err.error || 'Booking failed.';
+                msg.style.color = '#f87171';
+                msg.style.display = '';
+                return false;
+              }
+              return true;
+            }
+
+            if (cs.length > 1) {
+              // Show callsign picker
+              const btnsDiv = overlay.querySelector('.booking-confirm-btns');
+              btnsDiv.innerHTML = cs.map(function(c) {
+                return '<button class="booking-confirm-btn booking-confirm-team tobt-cs-pick" data-cs="' + c + '">' + c + '</button>';
+              }).join('');
+              overlay.querySelector('.booking-confirm-sub').textContent = 'Which callsign should this booking be for?';
+              btnsDiv.addEventListener('click', async function(ev) {
+                const pickBtn = ev.target.closest('.tobt-cs-pick');
+                if (!pickBtn) return;
+                pickBtn.disabled = true;
+                pickBtn.textContent = 'Booking...';
+                if (await doTeamBook(pickBtn.dataset.cs)) {
+                  close(String(BOOK_TEAM_CTX.teamOwnerCid));
+                } else {
+                  pickBtn.disabled = false;
+                  pickBtn.textContent = pickBtn.dataset.cs;
+                }
+              });
+            } else {
+              this.disabled = true;
+              this.textContent = 'Booking...';
+              if (await doTeamBook(cs[0] || null)) {
+                close(String(BOOK_TEAM_CTX.teamOwnerCid));
+              } else {
+                this.disabled = false;
+                this.textContent = '\ud83d\udc65 Book for ' + BOOK_TEAM_CTX.teamName;
+              }
+            }
+          });
+        });
+        if (!callsign) return;
+      } else {
+        // Non-team member — show CID input modal
+        callsign = await new Promise(resolve => {
+          const modal = document.getElementById('callsignModal');
+          const input = document.getElementById('callsignModalInput');
+          const confirmBtn = document.getElementById('callsignConfirm');
+          const cancelBtn = document.getElementById('callsignCancel');
+          const errorEl = document.getElementById('modalError');
+
+          modal.classList.remove('hidden');
+          input.value = '';
+          input.focus();
+          if (errorEl) { errorEl.classList.add('hidden'); errorEl.textContent = ''; }
+
+          function cleanup() {
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+            input.removeEventListener('keydown', onKey);
+          }
+          function closeModal() { modal.classList.add('hidden'); if (errorEl) errorEl.classList.add('hidden'); cleanup(); }
+          function showErr(msg) { if (errorEl) { errorEl.textContent = msg; errorEl.classList.remove('hidden'); } input.focus(); }
+
+          async function onConfirm() {
+            const value = input.value.trim();
+            if (!value) return;
+            if (!/^[0-9]+$/.test(value)) { showErr('Please enter a valid numeric CID.'); return; }
+
+            const r = await fetch('/api/tobt/book', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ slotKey, callsign: value })
+            });
+
+            if (!r.ok) {
+              const err = await r.json();
+              showErr(err.error || 'Booking failed. Please try again.');
+              return;
+            }
+
+            closeModal();
+            resolve(value);
           }
 
-          closeModal();
-          resolve(value);
-        }
+          function onCancel() { closeModal(); resolve(null); }
+          function onKey(e) { if (e.key === 'Enter') onConfirm(); if (e.key === 'Escape') onCancel(); }
 
-        function onCancel() { closeModal(); resolve(null); }
-        function onKey(e) { if (e.key === 'Enter') onConfirm(); if (e.key === 'Escape') onCancel(); }
-
-        confirmBtn.addEventListener('click', onConfirm);
-        cancelBtn.addEventListener('click', onCancel);
-        input.addEventListener('keydown', onKey);
-      });
-      if (!callsign) return;
+          confirmBtn.addEventListener('click', onConfirm);
+          cancelBtn.addEventListener('click', onCancel);
+          input.addEventListener('keydown', onKey);
+        });
+        if (!callsign) return;
+      }
     } else {
       const res = await fetch('/api/tobt/' + action, {
         method: 'POST',
@@ -22240,6 +22597,31 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
           );
       }
 
+      // Departure window = dep ± 1h
+      let depWindow = null;
+      if (/^\d{2}:\d{2}$/.test(depTimeUtc)) {
+        const [dh, dm] = depTimeUtc.split(':').map(Number);
+        const mid = dh * 60 + dm;
+        const shift = (mins) => {
+          const t = ((mins % 1440) + 1440) % 1440;
+          const hx = String(Math.floor(t / 60)).padStart(2, '0');
+          const mx = String(t % 60).padStart(2, '0');
+          return `${hx}:${mx}`;
+        };
+        depWindow = `${shift(mid - 60)}Z \u2013 ${shift(mid + 60)}Z`;
+      }
+
+      // Friendly date from dateUtc (e.g. "2026-11-03" → "Tue 3rd Nov")
+      let dateDisplay = dateUtc;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateUtc)) {
+        const d = new Date(dateUtc + 'T00:00:00Z');
+        const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const day = d.getUTCDate();
+        const suf = [,'st','nd','rd'][day % 10 > 3 ? 0 : (day % 100 - day % 10 !== 10) * (day % 10)] || 'th';
+        dateDisplay = `${days[d.getUTCDay()]} ${day}${suf} ${months[d.getUTCMonth()]}`;
+      }
+
       return {
         bookingKey,
         slotKey,
@@ -22250,90 +22632,196 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
         tobt: tobtDisplay,
         connectBy,
         atcRoute,
-        simbriefUrl
+        simbriefUrl,
+        dateUtc,
+        dateDisplay,
+        depWindow
       };
     })
     .filter(Boolean);
 
   const content = `
- <section class="card card-full my-slots-card">
+ <section class="card my-slots-card">
       <h2>My Slots</h2>
 
       ${rows.length === 0 ? `
         <p><em>You have no booked slots.</em></p>
       ` : `
-        <div class="table-scroll my-slots-table-wrapper">
-          <table class="my-slots-table">
-           <thead>
+        <div class="my-slots-table-wrapper">
+          <table class="my-slots-table" style="min-width:0;table-layout:auto;">
+            <thead>
               <tr>
-                <th class="col-wf-sector">WF Sector</th>
-                <th class="col-callsign">CID</th>
-                <th class="col-departure">Departure</th>
-                <th class="col-destination">Destination</th>
-                <th class="col-tobt">TOBT</th>
-                <th class="col-connect">Connect by</th>
-                <th class="col-route">ATC Route</th>
-                <th class="col-plan">Plan with SimBrief</th>
-                <th class="col-actions">Actions</th>
+                <th>WF Sector</th>
+                <th>Dep</th>
+                <th>Arr</th>
+                <th>Date</th>
+                <th>Dep Window</th>
+                <th>Flow Type</th>
+                <th>ATC Route</th>
+                <th>Plan</th>
+                <th></th>
               </tr>
-          </thead>
-
+            </thead>
             <tbody>
-  ${rows.map(r => `
-    <tr>
-  <td class="col-wf-sector">${r.wfSector}</td>
-
-  <td class="col-callsign">${r.cid || cid}</td>
-
-  <td class="col-departure"><a href="/icao/${r.from}">${r.from}</a></td>
-  <td class="col-destination"><a href="/icao/${r.to}">${r.to}</a></td>
-
-  <td class="col-tobt ${r.tobt && r.tobt !== '—' && r.tobt !== 'N/A' ? 'tobt-primary' : ''}">
-  ${r.tobt && r.tobt !== '—' && r.tobt !== 'N/A' ? (r.tobt + 'Z') : 'N/A'}
-</td>
-
-<td class="col-connect">
-  ${r.connectBy && r.connectBy !== '—' && r.connectBy !== 'N/A' ? (r.connectBy + 'Z') : 'N/A'}
-</td>
-
-
-  <td class="col-route">
-    <div class="route-box">
-      ${r.atcRoute}
-    </div>
-  </td>
-
-  <td class="col-plan">
-    <a class="simbrief-btn"
-       href="${r.simbriefUrl}"
-       target="_blank"
-       rel="noopener">
-      <span class="simbrief-logo">SB</span>
-      <span class="simbrief-text">Plan with SimBrief</span>
-    </a>
-  </td>
-
-  <td class="col-actions">
-    <button
-      type="button"
-      class="tobt-btn cancel cancel-slot-btn"
-      data-slot-key="${r.slotKey}"
-      data-callsign="${r.callsign}">
-      Cancel
-    </button>
-  </td>
-</tr>
-
-
-
-  `).join('')}
-</tbody>
-
+              ${rows.map(r => {
+                const hasRoute = r.atcRoute && r.atcRoute !== '-';
+                const routeAttr = hasRoute
+                  ? String(r.atcRoute).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+                  : '';
+                return `
+                <tr>
+                  <td><button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.wfSector}">${r.wfSector}</button></td>
+                  <td><a href="/icao/${r.from}">${r.from}</a></td>
+                  <td><a href="/icao/${r.to}">${r.to}</a></td>
+                  <td>${r.dateDisplay}</td>
+                  <td>${r.depWindow || '—'}</td>
+                  <td>${r.tobt && r.tobt !== '—' && r.tobt !== 'N/A'
+                    ? `Slotted - <span style="color:#4ade80;font-weight:600;">${r.tobt.replace(':','')}z</span> <span class="tobt-help">?<span class="tobt-tooltip">This is a TOBT (Target Off-Blocks Time).<br>Please connect at least 30 minutes before this time.<br>You should be ready to push at this time.<br><b>The actual push time may differ depending on<br>ramp and airfield congestion.</b></span></span>`
+                    : `<span style="color:#4ade80;font-weight:600;">Booking Confirmed</span> <span class="tobt-help">?<span class="tobt-tooltip">You have a booking for this sector. Slots are not required.<br><b>Plan to depart within the Dep Window.</b></span></span>`}</td>
+                  <td>${hasRoute
+                    ? `<button type="button" class="show-route-btn" data-route="${routeAttr}">Show Route</button>`
+                    : '<span style="color:var(--muted);">—</span>'}</td>
+                  <td>
+                    <a class="simbrief-btn" href="${r.simbriefUrl}" target="_blank" rel="noopener">
+                      <span class="simbrief-logo">SB</span>
+                      <span class="simbrief-text">Plan with SimBrief</span>
+                    </a>
+                  </td>
+                  <td>
+                    <button type="button" class="tobt-btn cancel cancel-slot-btn"
+                      data-slot-key="${r.slotKey}" data-callsign="${r.callsign}">
+                      Cancel
+                    </button>
+                  </td>
+                </tr>
+              `;}).join('')}
+            </tbody>
           </table>
         </div>
       `}
-      
+
     </section>
+
+    <div id="routeModal" class="route-modal" hidden>
+      <div class="route-modal-backdrop"></div>
+      <div class="route-modal-card" role="dialog" aria-modal="true" aria-labelledby="routeModalTitle">
+        <div class="route-modal-header">
+          <div id="routeModalTitle" style="font-weight:700;font-size:14px;">ATC Route</div>
+          <button type="button" id="routeModalClose" class="route-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div id="routeModalBody" class="route-modal-body"></div>
+        <div class="route-modal-actions">
+          <button type="button" id="routeModalCopy" class="route-modal-copy">Copy</button>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      .show-route-btn {
+        padding: 4px 10px;
+        background: rgba(56,189,248,0.08);
+        border: 1px solid rgba(56,189,248,0.25);
+        color: var(--accent);
+        border-radius: 6px;
+        font-size: 12px;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .show-route-btn:hover { background: rgba(56,189,248,0.16); }
+      .route-modal[hidden] { display: none; }
+      .route-modal { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center; }
+      .route-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+      .route-modal-card {
+        position: relative; background: var(--panel); border: 1px solid var(--border);
+        border-radius: 10px; padding: 16px; width: min(640px, 92vw); max-height: 80vh;
+        display: flex; flex-direction: column; gap: 12px;
+      }
+      .route-modal-header { display: flex; align-items: center; justify-content: space-between; }
+      .route-modal-close {
+        background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer;
+        line-height: 1; padding: 0 4px;
+      }
+      .route-modal-close:hover { color: var(--text); }
+      .route-modal-body {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 13px; line-height: 1.5; color: var(--text);
+        background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+        border-radius: 8px; padding: 12px; overflow: auto; word-break: break-word; white-space: pre-wrap;
+      }
+      .route-modal-actions { display: flex; justify-content: flex-end; }
+      .route-modal-copy {
+        padding: 6px 14px; background: var(--accent); color: #0b1220; border: none; border-radius: 6px;
+        font-weight: 600; cursor: pointer; font-family: inherit;
+      }
+    </style>
+
+    <script>
+    (function() {
+      var modal = document.getElementById('routeModal');
+      var body = document.getElementById('routeModalBody');
+      var closeBtn = document.getElementById('routeModalClose');
+      var copyBtn = document.getElementById('routeModalCopy');
+      var backdrop = modal.querySelector('.route-modal-backdrop');
+
+      function open(route) {
+        body.textContent = route;
+        modal.hidden = false;
+      }
+      function close() { modal.hidden = true; }
+
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.show-route-btn');
+        if (btn) { open(btn.getAttribute('data-route') || ''); return; }
+      });
+      closeBtn.addEventListener('click', close);
+      backdrop.addEventListener('click', close);
+      document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
+      copyBtn.addEventListener('click', async function() {
+        try {
+          await navigator.clipboard.writeText(body.textContent || '');
+          var prev = copyBtn.textContent;
+          copyBtn.textContent = 'Copied';
+          setTimeout(function() { copyBtn.textContent = prev; }, 1200);
+        } catch (e) {}
+      });
+    })();
+    </script>
+
+    <script>
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.sector-details-btn');
+  if (!btn) return;
+  e.preventDefault();
+  var wf = btn.dataset.wf;
+  var from = btn.dataset.from;
+  var to = btn.dataset.to;
+  window.location.href = '/sector/' + wf + '/' + from + '/' + to;
+});
+</script>
+
+    <script>
+document.querySelectorAll('.tobt-help').forEach(function(el) {
+  var tip = el.querySelector('.tobt-tooltip');
+  if (!tip) return;
+  el.addEventListener('mouseenter', function() {
+    var r = el.getBoundingClientRect();
+    tip.style.display = 'block';
+    var tw = tip.offsetWidth;
+    var th = tip.offsetHeight;
+    var left = r.left + r.width / 2 - tw / 2;
+    var top = r.bottom + 8;
+    if (top + th > window.innerHeight) top = r.top - th - 8;
+    if (left < 4) left = 4;
+    if (left + tw > window.innerWidth - 4) left = window.innerWidth - tw - 4;
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+  });
+  el.addEventListener('mouseleave', function() {
+    tip.style.display = 'none';
+  });
+});
+</script>
+
     <script>
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.cancel-slot-btn');
@@ -22345,7 +22833,7 @@ document.addEventListener('click', (e) => {
   if (!slotKey) return;
 
   openConfirmModalAsync({
-    title: 'Cancel TOBT Slot',
+    title: 'Cancel Booking',
     message: 'Are you sure you want to cancel this booking?',
     confirmText: 'Confirm',
     cancelText: 'Cancel',
