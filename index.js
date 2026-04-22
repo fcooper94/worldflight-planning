@@ -6839,10 +6839,8 @@ if (process.env.DEV_MODE === 'true') {
 }
 
 app.get('/auth/login', requireSiteGate, (req, res, next) => {
-  // In dev mode, skip VATSIM and use dev login
-  if (process.env.DEV_MODE === 'true') {
-    return res.redirect('/dev-login');
-  }
+  // Always use live VATSIM Connect (the /dev-login route still exists for
+  // manual use when DEV_MODE=true, but we no longer auto-redirect there).
 
   if (!req.session.returnTo) {
     const referer = req.headers.referer || '';

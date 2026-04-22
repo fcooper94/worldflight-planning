@@ -47,4 +47,5 @@ npx prisma db push --schema=prisma/schema.dev.prisma
 
 echo ""
 echo "Dev mode ready! Start with: node index.js"
-echo "Login: click 'Login with VATSIM' — auto-logs in as Dev Admin (no internet needed)"
+echo "Login: click 'Login with VATSIM' — goes to live VATSIM Connect (internet required)."
+echo "       For offline testing you can still hit /dev-login manually when DEV_MODE=true."

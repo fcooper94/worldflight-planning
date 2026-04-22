@@ -20,7 +20,7 @@ export default async function vatsimCallback(req, res) {
     return res.status(400).send('Missing PKCE verifier');
   }
 
-  const baseAuthUrl = 'https://auth-dev.vatsim.net';
+  const baseAuthUrl = process.env.VATSIM_AUTH_BASE_URL || 'https://auth.vatsim.net';
 
   try {
     const tokenPayload = {

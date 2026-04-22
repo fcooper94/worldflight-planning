@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import querystring from 'querystring';
 
 export default function vatsimLogin(req, res) {
-  const baseAuthUrl = 'https://auth-dev.vatsim.net';
+  const baseAuthUrl = process.env.VATSIM_AUTH_BASE_URL || 'https://auth.vatsim.net';
 
   const codeVerifier = crypto.randomBytes(32).toString('hex');
 
