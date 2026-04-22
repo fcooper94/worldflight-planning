@@ -1565,7 +1565,7 @@ function hasOutboundFlow(icao) {
 
 
 /* ===== ADMIN CID WHITELIST ===== */
-const ADMIN_CIDS = [10000010, 1303570, 10000005];
+const ADMIN_CIDS = [1303570];
 
 // DEV: CID alias for VATSIM controller lookups (test user → real VATSIM CID)
 const CID_CONTROLLER_ALIASES = { 10000002: 1303570 };
