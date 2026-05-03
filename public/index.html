@@ -16,15 +16,24 @@
     <h1>WorldFlight</h1>
     <h2>Planning Portal</h2>
 
-    <p class="login-subtitle">
+    <p class="login-subtitle" id="login-subtitle">
       Login using VATSIM Single Sign-On
     </p>
 
-     <a href="/auth/login" class="login-btn">
-  Login with VATSIM
-</a>
+    <a href="/auth/login" class="login-btn" id="login-btn">
+      Login with VATSIM
+    </a>
 
   </div>
+
+  <script>
+    fetch('/api/dev-mode').then(r => r.json()).then(d => {
+      if (d.devMode) {
+        document.getElementById('login-subtitle').textContent = 'Offline Development Mode';
+        document.getElementById('login-btn').textContent = 'Login Offline';
+      }
+    });
+  </script>
 
 </body>
 </html>

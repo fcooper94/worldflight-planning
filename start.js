@@ -50,10 +50,19 @@ function switchToDev() {
 
   copyFileSync('.env.dev', '.env');
 
+  // Sync production data into local SQLite before starting
+  console.log('  Pulling latest production data...');
+  try {
+    execSync('node sync-prod.mjs', { stdio: 'inherit' });
+  } catch (e) {
+    console.error('  WARN: Sync failed — continuing with local data.');
+  }
+  console.log('');
+
   console.log('  Generating Prisma client (dev schema)...');
-  execSync('npx prisma generate --schema=prisma/schema.dev.prisma', { stdio: 'inherit' });
+  execSync('npx --package=prisma@5 prisma generate --schema=prisma/schema.dev.prisma', { stdio: 'inherit' });
   console.log('  Pushing schema to SQLite...');
-  execSync('npx prisma db push --schema=prisma/schema.dev.prisma', { stdio: 'inherit' });
+  execSync('npx --package=prisma@5 prisma db push --schema=prisma/schema.dev.prisma', { stdio: 'inherit' });
 
   console.log('');
   console.log('  Offline mode ready. Login auto-bypasses VATSIM.');
@@ -61,9 +70,21 @@ function switchToDev() {
   startServer();
 }
 
-function switchToProd() {
+async function switchToProd() {
   console.log('');
   console.log('  Switching to Production mode...');
+
+  // Sync local dev data → production before switching
+  if (currentMode === 'offline' && existsSync('prisma/dev.db')) {
+    console.log('');
+    console.log('  Syncing offline changes with production...');
+    try {
+      execSync('node sync-prod.mjs', { stdio: 'inherit' });
+    } catch (e) {
+      console.error('  WARN: Sync failed — continuing without sync.');
+    }
+    console.log('');
+  }
 
   if (existsSync('.env.prod.bak')) {
     copyFileSync('.env.prod.bak', '.env');
@@ -74,7 +95,7 @@ function switchToProd() {
   }
 
   console.log('  Generating Prisma client...');
-  execSync('npx prisma generate', { stdio: 'inherit' });
+  execSync('npx --package=prisma@5 prisma generate', { stdio: 'inherit' });
 
   console.log('');
   startServer();

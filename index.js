@@ -6811,6 +6811,11 @@ app.get('/previous-destinations', (req, res) => {
 
 
 
+// ===== DEV MODE API =====
+app.get('/api/dev-mode', (req, res) => {
+  res.json({ devMode: process.env.DEV_MODE === 'true' });
+});
+
 // ===== DEV LOGIN (only when DEV_MODE=true) =====
 if (process.env.DEV_MODE === 'true') {
   app.get('/dev-login', requireSiteGate, (req, res) => {
@@ -6818,9 +6823,9 @@ if (process.env.DEV_MODE === 'true') {
       data: {
         cid: 1303570,
         personal: {
-          name_first: 'Dev',
-          name_last: 'Admin',
-          name_full: 'Dev Admin'
+          name_first: 'Fraser',
+          name_last: 'Cooper',
+          name_full: 'Fraser Cooper'
         },
         vatsim: {
           rating: { id: 1, short: 'OBS', long: 'Observer' },
@@ -6839,9 +6844,6 @@ if (process.env.DEV_MODE === 'true') {
 }
 
 app.get('/auth/login', requireSiteGate, (req, res, next) => {
-  // Always use live VATSIM Connect (the /dev-login route still exists for
-  // manual use when DEV_MODE=true, but we no longer auto-redirect there).
-
   if (!req.session.returnTo) {
     const referer = req.headers.referer || '';
     try {
@@ -6852,6 +6854,12 @@ app.get('/auth/login', requireSiteGate, (req, res, next) => {
       }
     } catch (e) {}
   }
+
+  // In offline/dev mode, skip VATSIM and use the dev-login route
+  if (process.env.DEV_MODE === 'true') {
+    return res.redirect('/dev-login' + (req.session.returnTo ? '?next=' + encodeURIComponent(req.session.returnTo) : ''));
+  }
+
   next();
 }, vatsimLogin);
 // Note: /auth/callback is deliberately NOT gated. It's only reached via a

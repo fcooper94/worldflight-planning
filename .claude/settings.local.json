@@ -171,7 +171,14 @@
       "Bash(grep -A8 \"MAP:CYYZ 05$\" c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Plugin/TopSky/TopSkyMaps.txt)",
       "Bash(grep -i \"alias\" \"D:/Documents/Euroscope/UK/Area/London AC/\"*.prf)",
       "Bash(cp 'c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Datafiles/*' c:/dev/WorldFlight-Planning/templates/Datafiles/)",
-      "Bash(cp -r 'c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Plugin/TopSky/*' c:/dev/WorldFlight-Planning/templates/Plugin/TopSky/)"
+      "Bash(cp -r 'c:/dev/WorldFlight-Planning/Euroscope_Files/WorldFlight/Data/Plugin/TopSky/*' c:/dev/WorldFlight-Planning/templates/Plugin/TopSky/)",
+      "Bash(npx --package=prisma@5 prisma db execute --schema=prisma/schema.prisma --stdin)",
+      "Bash(npm ls:*)",
+      "Bash(npx --yes --package=pg -e ':*)",
+      "Bash(node _fetch-prod.mjs)",
+      "Bash(node _seed-local.mjs)",
+      "Bash(npm uninstall:*)",
+      "Bash(node sync-prod.mjs)"
     ]
   }
 }

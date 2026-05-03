@@ -214,7 +214,7 @@ export default function renderLayout({
     </div>
   ` : `
     <a href="/auth/login" class="login-btn">
-      <span class="login-full">Login with VATSIM</span>
+      <span class="login-full">${process.env.DEV_MODE === 'true' ? 'Login Offline' : 'Login with VATSIM'}</span>
       <span class="login-short">Login</span>
     </a>
   `}

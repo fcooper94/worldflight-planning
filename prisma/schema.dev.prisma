@@ -29,10 +29,14 @@ model Affiliate {
 
 model DepFlow {
   id        Int      @id @default(autoincrement())
-  sector    String   @unique
+  eventId   Int
+  sector    String
   rate      Int
   flowtype  String   @default("NONE")
   updatedAt DateTime @updatedAt
+
+  @@unique([eventId, sector])
+  @@index([eventId])
 }
 
 model TobtBooking {
@@ -45,6 +49,7 @@ model TobtBooking {
   dateUtc      String
   depTimeUtc   String
   tobtTimeUtc  String?
+  manual       Boolean  @default(false)
   createdAt    DateTime @default(now())
 
   @@unique([cid, slotKey])
@@ -57,6 +62,7 @@ model User {
 
 model Airport {
   icao    String   @id
+  name    String?
   lat     Float
   lon     Float
   elev    Int?
@@ -131,6 +137,49 @@ model DocumentationAccessRequest {
   @@index([status])
 }
 
+model StaffAccessRequest {
+  id          Int       @id @default(autoincrement())
+  cid         Int
+  division    String
+  name        String?
+  email       String?
+  role        String?
+  rating      String?
+  status      String    @default("PENDING")
+  reviewedBy  Int?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([cid])
+  @@index([status])
+}
+
+model MasterToken {
+  id        Int      @id @default(autoincrement())
+  token     String   @unique
+  cid       Int?
+  label     String?
+  createdAt DateTime @default(now())
+  usedAt    DateTime?
+
+  @@index([token])
+  @@index([cid])
+}
+
+model UserAdditionalRole {
+  id               Int      @id @default(autoincrement())
+  cid              Int
+  role             String
+  teamName         String?
+  canEditBookings  Boolean  @default(true)
+  canManageMembers Boolean  @default(false)
+  participating    Boolean  @default(true)
+  createdAt        DateTime @default(now())
+
+  @@unique([cid, role])
+  @@index([cid])
+}
+
 model WfVisitedAirport {
   id        Int      @id @default(autoincrement())
   icao      String
@@ -150,6 +199,7 @@ model AirportSuggestion {
   association String
   reason      String
   contact     String
+  notify      Boolean  @default(false)
   cid         Int?
   createdAt   DateTime @default(now())
 
@@ -157,26 +207,81 @@ model AirportSuggestion {
   @@index([type])
 }
 
+model TobtBookingBackup {
+  id           Int      @id @default(autoincrement())
+  eventId      Int
+  slotKey      String
+  cid          Int
+  callsign     String
+  from         String
+  to           String
+  dateUtc      String
+  depTimeUtc   String
+  tobtTimeUtc  String?
+  originalId   Int
+  backedUpAt   DateTime @default(now())
+
+  @@index([eventId])
+}
+
+model WfScheduleRow {
+  id          Int    @id @default(autoincrement())
+  eventId     Int
+  sortOrder   Int    @default(0)
+  number      String
+  from        String
+  to          String
+  dateUtc     String @default("")
+  depTimeUtc  String @default("")
+  arrTimeUtc  String @default("")
+  blockTime   String @default("")
+  flightTime  String @default("")
+  atcRoute    String @default("")
+
+  @@unique([eventId, number])
+  @@index([eventId])
+}
+
+model WfEvent {
+  id             Int      @id @default(autoincrement())
+  name           String
+  year           Int
+  sheetUrl       String   @default("")
+  mode           String   @default("csv")
+  isActive       Boolean  @default(false)
+  turnaroundMins Int      @default(45)
+  isWorldFlight  Boolean  @default(true)
+  flightSuffix   String   @default("")
+  flightStartNumber Int   @default(1)
+  aircraftType   String   @default("B738")
+  costIndex      Int      @default(30)
+  startDateUtc   String   @default("")
+  startTimeUtc   String   @default("")
+  nextSectorAfter String  @default("BLOCK")
+  cruiseAltitude Int      @default(0)
+  cruiseMode     String   @default("CI")
+  createdAt      DateTime @default(now())
+
+  @@unique([year])
+}
+
 model PageVisibility {
   key     String  @id
   enabled Boolean @default(true)
 }
 
+model MailingListSubscriber {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  firstName String?
+  lastName  String?
+  cid       Int?
+  createdAt DateTime @default(now())
+
+  @@index([email])
+}
+
 model SiteSetting {
   key   String @id
   value String
-}
-
-model UserAdditionalRole {
-  id               Int      @id @default(autoincrement())
-  cid              Int
-  role             String
-  teamName         String?
-  canEditBookings  Boolean  @default(true)
-  canManageMembers Boolean  @default(false)
-  participating    Boolean  @default(true)
-  createdAt        DateTime @default(now())
-
-  @@unique([cid, role])
-  @@index([cid])
 }
