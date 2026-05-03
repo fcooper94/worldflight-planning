@@ -1,19 +1,19 @@
 /**
- * Two-way sync for CID 1303570 between local SQLite (dev) and production Postgres.
+ * Full sync from production Postgres → local SQLite (dev).
  *
- * Rules:
- *   - Production is master by default.
- *   - If a local record is newer (by createdAt), push it to production.
- *   - New records that only exist locally get pushed to production.
- *   - Everything from production is then pulled into local.
+ * Strategy: clear each local table and re-insert from prod, preserving
+ * exact IDs so foreign key references (e.g. eventId) stay consistent.
+ *
+ * Production is NEVER written to unless you pass --push.
+ * Skips Airport + Runway tables (huge, loaded from CSV/dat files).
  */
 
 import { readFileSync, existsSync } from 'fs';
 import Database from 'better-sqlite3';
 import pkg from 'pg';
 
-const CID = 1303570;
 const { Client } = pkg;
+const PUSH_ENABLED = process.argv.includes('--push');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -29,8 +29,9 @@ function loadEnvFile(path) {
   return env;
 }
 
-function ts(v) { return v ? new Date(v).getTime() : 0; }
-function newer(localTs, prodTs) { return ts(localTs) > ts(prodTs) + 1000; } // 1s tolerance
+function isoDate(v) { return v ? new Date(v).toISOString() : null; }
+function bool2int(v) { return v ? 1 : 0; }
+const q = c => `"${c}"`;
 
 // ---------------------------------------------------------------------------
 // Connect
@@ -53,177 +54,208 @@ const pg = new Client({ connectionString: prodUrl });
 await pg.connect();
 const lite = new Database(dbPath);
 
-console.log('  Syncing CID', CID, '...');
+console.log(`  Syncing all data... (${PUSH_ENABLED ? 'pull + push' : 'pull only'})`);
 
 // ---------------------------------------------------------------------------
-// User
+// Pull table: clear local → re-insert from prod with exact IDs
 // ---------------------------------------------------------------------------
 
-const localUser = lite.prepare('SELECT * FROM User WHERE cid = ?').get(CID);
-const prodUser = (await pg.query('SELECT * FROM "User" WHERE cid = $1', [CID])).rows[0];
+async function pullTable(opts) {
+  const { table, cols, boolCols = [], dateCols = [] } = opts;
 
-if (localUser && !prodUser) {
-  await pg.query('INSERT INTO "User" (cid, name) VALUES ($1, $2)', [CID, localUser.name]);
-  console.log('    User → pushed to production');
-} else if (prodUser) {
-  lite.prepare('INSERT INTO User (cid, name) VALUES (?, ?) ON CONFLICT(cid) DO UPDATE SET name = ?')
-    .run(CID, prodUser.name, prodUser.name);
-  console.log('    User ✓');
-}
+  const prodRows = (await pg.query(`SELECT * FROM "${table}"`)).rows;
 
-// ---------------------------------------------------------------------------
-// UserAdditionalRole  (keyed by cid + role)
-// ---------------------------------------------------------------------------
+  // Clear local table
+  lite.prepare(`DELETE FROM "${table}"`).run();
 
-const localRoles = lite.prepare('SELECT * FROM UserAdditionalRole WHERE cid = ?').all(CID);
-const prodRoles = (await pg.query('SELECT * FROM "UserAdditionalRole" WHERE cid = $1', [CID])).rows;
-
-const prodRoleMap = Object.fromEntries(prodRoles.map(r => [r.role, r]));
-const localRoleMap = Object.fromEntries(localRoles.map(r => [r.role, r]));
-
-// Push local-only or newer-local roles to prod
-for (const lr of localRoles) {
-  const pr = prodRoleMap[lr.role];
-  if (!pr) {
-    await pg.query(
-      `INSERT INTO "UserAdditionalRole" (cid, role, "teamName", "canEditBookings", "canManageMembers", participating)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [CID, lr.role, lr.teamName, lr.canEditBookings, lr.canManageMembers, lr.participating]
-    );
-    console.log(`    Role ${lr.role} → pushed to production (new)`);
-  } else if (newer(lr.createdAt, pr.createdAt)) {
-    await pg.query(
-      `UPDATE "UserAdditionalRole"
-       SET "teamName"=$1, "canEditBookings"=$2, "canManageMembers"=$3, participating=$4
-       WHERE cid=$5 AND role=$6`,
-      [lr.teamName, lr.canEditBookings, lr.canManageMembers, lr.participating, CID, lr.role]
-    );
-    console.log(`    Role ${lr.role} → pushed to production (newer)`);
+  // Re-insert with exact prod values (including id)
+  if (prodRows.length === 0) {
+    console.log(`    ${table} ✓ 0 rows`);
+    return;
   }
-}
 
-// Pull all prod roles to local (prod is master)
-for (const pr of prodRoles) {
-  lite.prepare(
-    `INSERT INTO UserAdditionalRole (cid, role, teamName, canEditBookings, canManageMembers, participating, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(cid, role) DO UPDATE SET
-       teamName=excluded.teamName,
-       canEditBookings=excluded.canEditBookings,
-       canManageMembers=excluded.canManageMembers,
-       participating=excluded.participating,
-       createdAt=excluded.createdAt`
-  ).run(CID, pr.role, pr.teamName, pr.canEditBookings ? 1 : 0, pr.canManageMembers ? 1 : 0,
-        pr.participating ? 1 : 0, new Date(pr.createdAt).toISOString());
-}
+  const placeholders = cols.map(() => '?').join(',');
+  const insertSql = `INSERT INTO "${table}" (${cols.map(q).join(',')}) VALUES (${placeholders})`;
+  const stmt = lite.prepare(insertSql);
 
-// Remove local roles that no longer exist in prod
-for (const lr of localRoles) {
-  if (!prodRoleMap[lr.role]) {
-    lite.prepare('DELETE FROM UserAdditionalRole WHERE cid = ? AND role = ?').run(CID, lr.role);
-    console.log(`    Role ${lr.role} → removed locally (deleted in prod)`);
-  }
+  const insertMany = lite.transaction((rows) => {
+    for (const pr of rows) {
+      const values = cols.map(c => {
+        const v = pr[c];
+        if (v === undefined || v === null) return null;
+        if (boolCols.includes(c)) return bool2int(v);
+        if (dateCols.includes(c)) return isoDate(v);
+        return v;
+      });
+      stmt.run(...values);
+    }
+  });
+
+  insertMany(prodRows);
+  console.log(`    ${table} ✓ ${prodRows.length} rows`);
 }
-console.log(`    Roles ✓ (${prodRoles.length} synced)`);
 
 // ---------------------------------------------------------------------------
-// DocumentationPermission  (keyed by cid + pattern)
+// Sync all tables (order matters — referenced tables first)
 // ---------------------------------------------------------------------------
 
-const localPerms = lite.prepare('SELECT * FROM DocumentationPermission WHERE cid = ?').all(CID);
-const prodPerms = (await pg.query('SELECT * FROM "DocumentationPermission" WHERE cid = $1', [CID])).rows;
+await pullTable({
+  table: 'User',
+  cols: ['cid', 'name']
+});
 
-const prodPermSet = new Set(prodPerms.map(p => p.pattern));
-const localPermSet = new Set(localPerms.map(p => p.pattern));
+await pullTable({
+  table: 'WfEvent',
+  cols: ['id', 'name', 'year', 'sheetUrl', 'mode', 'isActive', 'turnaroundMins',
+         'isWorldFlight', 'flightSuffix', 'flightStartNumber', 'aircraftType',
+         'costIndex', 'startDateUtc', 'startTimeUtc', 'nextSectorAfter',
+         'cruiseAltitude', 'cruiseMode', 'createdAt'],
+  boolCols: ['isActive', 'isWorldFlight'],
+  dateCols: ['createdAt']
+});
 
-// Push local-only perms to prod
-for (const lp of localPerms) {
-  if (!prodPermSet.has(lp.pattern)) {
-    await pg.query(
-      'INSERT INTO "DocumentationPermission" (cid, pattern) VALUES ($1, $2)',
-      [CID, lp.pattern]
-    );
-    console.log(`    DocPerm "${lp.pattern}" → pushed to production`);
-  }
-}
+await pullTable({
+  table: 'WfScheduleRow',
+  cols: ['id', 'eventId', 'sortOrder', 'number', 'from', 'to', 'dateUtc',
+         'depTimeUtc', 'arrTimeUtc', 'blockTime', 'flightTime', 'atcRoute']
+});
 
-// Pull prod perms to local
-for (const pp of prodPerms) {
-  if (!localPermSet.has(pp.pattern)) {
-    lite.prepare('INSERT INTO DocumentationPermission (cid, pattern, createdAt) VALUES (?, ?, ?)')
-      .run(CID, pp.pattern, new Date(pp.createdAt).toISOString());
-  }
-}
+await pullTable({
+  table: 'OfficialTeam',
+  cols: ['id', 'teamName', 'callsign', 'mainCid', 'aircraftType', 'country',
+         'participatingWf26', 'createdAt'],
+  boolCols: ['participatingWf26'],
+  dateCols: ['createdAt']
+});
 
-// Remove local perms deleted in prod
-for (const lp of localPerms) {
-  if (!prodPermSet.has(lp.pattern)) {
-    // Already pushed above, don't remove
-  }
-}
-console.log(`    DocPerms ✓ (${prodPerms.length} in prod)`);
+await pullTable({
+  table: 'Affiliate',
+  cols: ['id', 'callsign', 'simType', 'cid', 'participatingWf26', 'createdAt'],
+  boolCols: ['participatingWf26'],
+  dateCols: ['createdAt']
+});
 
-// ---------------------------------------------------------------------------
-// TobtBooking  (keyed by cid + slotKey)
-// ---------------------------------------------------------------------------
+await pullTable({
+  table: 'DepFlow',
+  cols: ['id', 'eventId', 'sector', 'rate', 'flowtype', 'updatedAt'],
+  dateCols: ['updatedAt']
+});
 
-const localBookings = lite.prepare('SELECT * FROM TobtBooking WHERE cid = ?').all(CID);
-const prodBookings = (await pg.query('SELECT * FROM "TobtBooking" WHERE cid = $1', [CID])).rows;
+await pullTable({
+  table: 'TobtBooking',
+  cols: ['id', 'slotKey', 'cid', 'callsign', 'from', 'to', 'dateUtc',
+         'depTimeUtc', 'tobtTimeUtc', 'manual', 'createdAt'],
+  boolCols: ['manual'],
+  dateCols: ['createdAt']
+});
 
-const prodBookMap = Object.fromEntries(prodBookings.map(b => [b.slotKey, b]));
-const localBookMap = Object.fromEntries(localBookings.map(b => [b.slotKey, b]));
+await pullTable({
+  table: 'TobtBookingBackup',
+  cols: ['id', 'eventId', 'slotKey', 'cid', 'callsign', 'from', 'to',
+         'dateUtc', 'depTimeUtc', 'tobtTimeUtc', 'originalId', 'backedUpAt'],
+  dateCols: ['backedUpAt']
+});
 
-// Push local-only or newer bookings to prod
-for (const lb of localBookings) {
-  const pb = prodBookMap[lb.slotKey];
-  if (!pb) {
-    await pg.query(
-      `INSERT INTO "TobtBooking" ("slotKey", cid, callsign, "from", "to", "dateUtc", "depTimeUtc", "tobtTimeUtc", manual)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [lb.slotKey, CID, lb.callsign, lb.from, lb.to, lb.dateUtc, lb.depTimeUtc, lb.tobtTimeUtc, lb.manual || false]
-    );
-    console.log(`    Booking ${lb.slotKey} → pushed to production (new)`);
-  } else if (newer(lb.createdAt, pb.createdAt)) {
-    await pg.query(
-      `UPDATE "TobtBooking"
-       SET callsign=$1, "from"=$2, "to"=$3, "dateUtc"=$4, "depTimeUtc"=$5, "tobtTimeUtc"=$6, manual=$7
-       WHERE cid=$8 AND "slotKey"=$9`,
-      [lb.callsign, lb.from, lb.to, lb.dateUtc, lb.depTimeUtc, lb.tobtTimeUtc, lb.manual || false, CID, lb.slotKey]
-    );
-    console.log(`    Booking ${lb.slotKey} → pushed to production (newer)`);
-  }
-}
+await pullTable({
+  table: 'UserAdditionalRole',
+  cols: ['id', 'cid', 'role', 'teamName', 'canEditBookings', 'canManageMembers',
+         'participating', 'createdAt'],
+  boolCols: ['canEditBookings', 'canManageMembers', 'participating'],
+  dateCols: ['createdAt']
+});
 
-// Pull all prod bookings to local
-for (const pb of prodBookings) {
-  lite.prepare(
-    `INSERT INTO TobtBooking (slotKey, cid, callsign, "from", "to", dateUtc, depTimeUtc, tobtTimeUtc, manual, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(cid, slotKey) DO UPDATE SET
-       callsign=excluded.callsign,
-       "from"=excluded."from",
-       "to"=excluded."to",
-       dateUtc=excluded.dateUtc,
-       depTimeUtc=excluded.depTimeUtc,
-       tobtTimeUtc=excluded.tobtTimeUtc,
-       manual=excluded.manual,
-       createdAt=excluded.createdAt`
-  ).run(pb.slotKey, CID, pb.callsign, pb.from, pb.to, pb.dateUtc, pb.depTimeUtc, pb.tobtTimeUtc,
-        pb.manual ? 1 : 0, new Date(pb.createdAt).toISOString());
-}
+await pullTable({
+  table: 'DocumentationPermission',
+  cols: ['id', 'cid', 'pattern', 'createdAt'],
+  dateCols: ['createdAt']
+});
 
-// Remove local bookings deleted in prod
-for (const lb of localBookings) {
-  if (!prodBookMap[lb.slotKey]) {
-    lite.prepare('DELETE FROM TobtBooking WHERE cid = ? AND slotKey = ?').run(CID, lb.slotKey);
-    console.log(`    Booking ${lb.slotKey} → removed locally (deleted in prod)`);
-  }
-}
-console.log(`    Bookings ✓ (${prodBookings.length} in prod)`);
+await pullTable({
+  table: 'AirportScenery',
+  cols: ['id', 'icao', 'sim', 'name', 'developer', 'store', 'url', 'type',
+         'submittedBy', 'submittedAt', 'approved', 'approvedBy', 'approvedAt'],
+  boolCols: ['approved'],
+  dateCols: ['submittedAt', 'approvedAt']
+});
+
+await pullTable({
+  table: 'AirportDocument',
+  cols: ['id', 'icao', 'filename', 'uploadedBy', 'uploadedAt'],
+  dateCols: ['uploadedAt']
+});
+
+await pullTable({
+  table: 'DocumentationAccessRequest',
+  cols: ['id', 'cid', 'pattern', 'name', 'email', 'role', 'requestedAt',
+         'status', 'reviewedBy', 'reviewedAt', 'createdAt'],
+  dateCols: ['requestedAt', 'reviewedAt', 'createdAt']
+});
+
+await pullTable({
+  table: 'StaffAccessRequest',
+  cols: ['id', 'cid', 'division', 'name', 'email', 'role', 'rating',
+         'status', 'reviewedBy', 'reviewedAt', 'createdAt'],
+  dateCols: ['reviewedAt', 'createdAt']
+});
+
+await pullTable({
+  table: 'MasterToken',
+  cols: ['id', 'token', 'cid', 'label', 'createdAt', 'usedAt'],
+  dateCols: ['createdAt', 'usedAt']
+});
+
+await pullTable({
+  table: 'WfVisitedAirport',
+  cols: ['id', 'icao', 'year', 'eventName']
+});
+
+await pullTable({
+  table: 'AirportSuggestion',
+  cols: ['id', 'firstName', 'lastName', 'icao', 'type', 'association',
+         'reason', 'contact', 'notify', 'cid', 'createdAt'],
+  boolCols: ['notify'],
+  dateCols: ['createdAt']
+});
+
+await pullTable({
+  table: 'PageVisibility',
+  cols: ['key', 'enabled'],
+  boolCols: ['enabled']
+});
+
+await pullTable({
+  table: 'MailingListSubscriber',
+  cols: ['id', 'email', 'firstName', 'lastName', 'cid', 'createdAt'],
+  dateCols: ['createdAt']
+});
+
+await pullTable({
+  table: 'SiteSetting',
+  cols: ['key', 'value']
+});
 
 // ---------------------------------------------------------------------------
 // Done
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Airport + Runway (large tables — only sync if row count differs)
+// ---------------------------------------------------------------------------
+
+for (const { table, cols } of [
+  { table: 'Airport', cols: ['icao', 'name', 'lat', 'lon', 'elev'] },
+  { table: 'Runway', cols: ['id', 'airportIcao', 'ident1', 'ident2', 'lat1', 'lon1', 'lat2', 'lon2'] },
+]) {
+  const prodCount = (await pg.query(`SELECT COUNT(*) as c FROM "${table}"`)).rows[0].c;
+  let localCount = 0;
+  try { localCount = lite.prepare(`SELECT COUNT(*) as c FROM "${table}"`).get().c; } catch {}
+
+  if (Number(prodCount) === localCount) {
+    console.log(`    ${table} ✓ ${localCount} rows (unchanged, skipped)`);
+  } else {
+    await pullTable({ table, cols });
+  }
+}
 
 lite.close();
 await pg.end();

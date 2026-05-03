@@ -8,10 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
   /* ---- Map ---- */
   const map = L.map(el, { zoomControl: true, preferCanvas: true });
 
-  L.tileLayer(
-    'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    { subdomains: 'abcd', maxZoom: 19 }
-  ).addTo(map);
+  wfAddTileLayer(map, { maxZoom: 19 });
 
   map.setView([20, 0], 3);
   requestAnimationFrame(() => map.invalidateSize(true));
@@ -50,35 +47,86 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  /* ---- Popup ---- */
-  function popupHtml(icao, data) {
+  /* ---- Info panel (bottom-right corner) ---- */
+  const infoPanel = document.createElement('div');
+  infoPanel.className = 'prev-dest-info-panel';
+  infoPanel.style.display = 'none';
+  el.appendChild(infoPanel);
+
+  function showInfoPanel(icao, data) {
     const visitLines = data.visits
       .map(v => `<div class="wf-airport-leg">${v.year}${v.eventName ? ' — ' + v.eventName : ''}</div>`)
       .join('');
 
-    return `
-      <div class="wf-airport-popup">
-        <div class="wf-airport-popup-header">${icao}${data.name ? ' — ' + data.name : ''}</div>
-        <div class="wf-airport-section">
-          <div class="wf-airport-section-title">Visited ${data.visits.length} time${data.visits.length !== 1 ? 's' : ''}</div>
-          ${visitLines}
-        </div>
-        <div class="wf-airport-popup-actions">
-          <button class="wf-airport-action-btn" data-icao="${icao}">
-            View Airport Details
-          </button>
-        </div>
+    infoPanel.innerHTML = `
+      <button class="prev-dest-info-close">&times;</button>
+      <div class="wf-airport-popup-header">${icao}${data.name ? ' — ' + data.name : ''}</div>
+      <div class="wf-airport-section">
+        <div class="wf-airport-section-title">Visited ${data.visits.length} time${data.visits.length !== 1 ? 's' : ''}</div>
+        ${visitLines}
+      </div>
+      <div class="wf-airport-popup-actions">
+        <button class="wf-airport-action-btn" data-icao="${icao}">
+          View Airport Details
+        </button>
       </div>
     `;
+    infoPanel.style.display = 'block';
   }
 
-  /* ---- Click handler for popup buttons ---- */
-  document.addEventListener('click', e => {
+  function hideInfoPanel() {
+    infoPanel.style.display = 'none';
+  }
+
+  infoPanel.addEventListener('click', e => {
+    if (e.target.closest('.prev-dest-info-close')) { hideInfoPanel(); return; }
     const btn = e.target.closest('.wf-airport-action-btn');
-    if (!btn) return;
-    const icao = btn.getAttribute('data-icao');
-    if (icao) window.location.href = `/icao/${icao}`;
+    if (btn) window.location.href = `/icao/${btn.getAttribute('data-icao')}`;
   });
+
+  // Inject styles for the panel
+  const panelStyle = document.createElement('style');
+  panelStyle.textContent = `
+    .prev-dest-info-panel {
+      position: absolute;
+      bottom: 60px;
+      right: 120px;
+      z-index: 1000;
+      width: 300px;
+      max-height: 60vh;
+      overflow-y: auto;
+      border-radius: 14px;
+      background: var(--panel, rgba(14,22,40,0.92));
+      border: 1px solid var(--border, rgba(255,255,255,0.08));
+      box-shadow: 0 16px 40px rgba(0,0,0,0.25);
+      pointer-events: auto;
+    }
+    [data-theme="light"] .prev-dest-info-panel {
+      background: rgba(255,255,255,0.96);
+      box-shadow: 0 16px 40px rgba(0,0,0,0.12);
+    }
+    .prev-dest-info-close {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      background: none;
+      border: none;
+      color: var(--muted, #94a3b8);
+      font-size: 20px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 4px;
+    }
+    .prev-dest-info-close:hover { color: var(--text, #e2e8f0); }
+    @media (max-width: 600px) {
+      .prev-dest-info-panel {
+        width: calc(100% - 20px);
+        right: 10px;
+        bottom: 10px;
+      }
+    }
+  `;
+  document.head.appendChild(panelStyle);
 
   /* ---- Sidebar toggle ---- */
   window.addEventListener('sidebar:toggle', () => {
@@ -197,12 +245,7 @@ document.addEventListener('DOMContentLoaded', () => {
           weight: 1
         })
           .addTo(dotLayer)
-          .bindPopup(popupHtml(ap.icao, ap.data), {
-            closeButton: true,
-            autoPan: true,
-            maxWidth: 320,
-            className: 'wf-airport-leaflet-popup'
-          });
+          .on('click', () => showInfoPanel(ap.icao, ap.data));
         // Only keep a reference to the centre copy for the search "fly to"
         if (shift === 0) ap.marker = m;
       });
@@ -216,12 +259,7 @@ document.addEventListener('DOMContentLoaded', () => {
       for (const ap of airportList) {
         WORLD_SHIFTS.forEach(shift => {
           L.marker(L.latLng(ap.data.lat, ap.data.lon + shift), { icon: airportIcon(ap.icao) })
-            .bindPopup(popupHtml(ap.icao, ap.data), {
-              closeButton: true,
-              autoPan: true,
-              maxWidth: 320,
-              className: 'wf-airport-leaflet-popup'
-            })
+            .on('click', () => showInfoPanel(ap.icao, ap.data))
             .addTo(labelLayer);
         });
       }

@@ -928,13 +928,13 @@ function phoneticOrLetter(token) {
   if (token.length === 1) return token;
 
   const map = {
-    ALFA: 'A', BRAVO: 'B', CHARLIE: 'C', DELTA: 'D',
+    ALFA: 'A', ALPHA: 'A', BRAVO: 'B', CHARLIE: 'C', DELTA: 'D',
     ECHO: 'E', FOXTROT: 'F', GOLF: 'G', HOTEL: 'H',
     INDIA: 'I', JULIET: 'J', KILO: 'K', LIMA: 'L',
     MIKE: 'M', NOVEMBER: 'N', OSCAR: 'O', PAPA: 'P',
     QUEBEC: 'Q', ROMEO: 'R', SIERRA: 'S', TANGO: 'T',
     UNIFORM: 'U', VICTOR: 'V', WHISKEY: 'W',
-    XRAY: 'X', YANKEE: 'Y', ZULU: 'Z'
+    XRAY: 'X', 'X-RAY': 'X', YANKEE: 'Y', ZULU: 'Z'
   };
 
   return map[token] || '';
@@ -6120,184 +6120,271 @@ if (!flow || flow <= 0) {
 function makeTobtSlotKey({ from, to, dateUtc, depTimeUtc, tobtTimeUtc }) {
   return `${from}-${to}|${dateUtc}|${depTimeUtc}|${tobtTimeUtc}`;
 }
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = user ? Number(user.cid) : null;
   const isAdmin = cid ? ADMIN_CIDS.includes(cid) : false;
-
-  const allPages = [
-    { title: '2026 Schedule',      desc: 'View the full WorldFlight 2026 event schedule with departure flows and times.', icon: '🗓️', href: '/schedule',           public: true,  visKey: 'schedule' },
-    { title: 'Route Map',          desc: 'Interactive map showing all WorldFlight routes and airports.',                   icon: '🗺️', href: '/wf/world-map',        public: false, visKey: 'world-map' },
-    { title: 'Airport Portal',     desc: 'Look up airport information, charts, scenery, and documentation.',              icon: '🛫', href: '/airport-portal',      public: true },
-    { title: 'Suggest Airport',    desc: 'Submit your airport suggestions for upcoming WorldFlight events.',              icon: '💡', href: '/suggest-airport',     public: true,  visKey: 'suggest-airport' },
-    { title: 'Previous Destinations', desc: 'Explore every airport WorldFlight has visited over the years.',                icon: '📍', href: '/previous-destinations', public: true },
-    { title: 'Airspace Management', desc: 'View FIR staffing requirements and timelines for the active schedule.',        icon: '🌐', href: '/airspace',             public: true, visKey: 'airspace' },
-    { title: 'My Slots / Bookings',desc: 'Manage your booked departure and arrival slots.',                               icon: '✈️', href: '/my-slots',            public: false, visKey: 'my-slots' },
-    { title: 'WF Flow Control', desc: 'Controller tools for managing WorldFlight ATC slots.',                          icon: '🎧', href: '/atc',                 public: false, visKey: 'atc' },
-    { title: 'User Management',    desc: 'Manage user permissions and access for your division.',                        icon: '👥', href: '/user-management',     public: false, masterOnly: true },
-    { title: 'Admin Panel',        desc: 'Manage settings, page visibility, and site configuration.',                    icon: '🛠️', href: '/admin/control-panel', public: false, adminOnly: true },
-  ];
-
   const isMaster = cid ? isMasterUser(cid) : false;
-  const pages = allPages.filter(p => {
-    if (p.adminOnly) return isAdmin;
-    if (p.masterOnly) return isMaster;
-    return !p.visKey || isAdmin || isPageEnabled(p.visKey);
-  });
+  const _isTeamMember = cid ? isTeamMember(cid) : false;
 
-  const cards = pages.map(p => {
-    const needsLogin = !p.public && !user;
-    const href = needsLogin ? '/auth/login' : p.href;
-    const lockClass = needsLogin ? ' dash-card--locked' : '';
+  // Active event info
+  const activeEvent = wfEvents.find(e => e.id === activeEventId) || wfEvents[0] || {};
+  const airports = getWfAirportsSet();
+  const totalBookings = Object.keys(tobtBookingsByKey).filter(k => !tobtBookingsByKey[k]._fake).length;
+  const userBookings = cid && tobtBookingsByCid[cid] ? tobtBookingsByCid[cid].size : 0;
+  let firCount = 0;
+  try { firCount = (await buildFirAnalysis()).length; } catch {};
 
-    return `
-      <a href="${href}" class="dash-card${lockClass}">
-        <div class="dash-card-icon">${p.icon}</div>
-        <div class="dash-card-title">${p.title}</div>
-        <div class="dash-card-desc">${p.desc}</div>
-        ${needsLogin
-          ? `<div class="dash-card-badge">Login →</div>`
-          : ''}
-      </a>`;
-  }).join('');
+  // Next 8 upcoming legs from schedule with ±1h windows
+  function timeWindow(hhmm) {
+    if (!hhmm) return '';
+    const m = hhmm.match(/^(\d{1,2}):?(\d{2})$/);
+    if (!m) return hhmm;
+    let mins = parseInt(m[1]) * 60 + parseInt(m[2]);
+    const lo = (mins - 60 + 1440) % 1440;
+    const hi = (mins + 60) % 1440;
+    const fmt = v => `${String(Math.floor(v / 60)).padStart(2, '0')}${String(v % 60).padStart(2, '0')}`;
+    return `${fmt(lo)}-${fmt(hi)}z`;
+  }
+  const upcomingLegs = adminSheetCache.slice(0, 8).map(r => `
+    <tr>
+      <td class="db-cell db-cell--num">${r.number || ''}</td>
+      <td class="db-cell"><a href="/icao/${r.from}">${r.from || ''}</a></td>
+      <td class="db-cell"><a href="/icao/${r.to}">${r.to || ''}</a></td>
+      <td class="db-cell db-cell--muted">${r.date_utc || ''}</td>
+      <td class="db-cell db-cell--muted">${timeWindow(r.dep_time_utc)}</td>
+      <td class="db-cell db-cell--muted">${timeWindow(r.arr_time_utc)}</td>
+    </tr>
+  `).join('');
+
+  const greeting = user ? `Welcome back, ${user.personal?.name_first || 'Pilot'}` : 'Welcome to WorldFlight';
 
   const content = `
-    <section class="dash-wrapper">
-      <section class="dash-grid">
-        ${cards}
-      </section>
-    </section>
+    <div class="db-page">
+
+      <div class="db-hero">
+        <div class="db-hero-text">
+          <h1 class="db-greeting">${greeting}</h1>
+          <p class="db-subtitle">${activeEvent.name || 'No active event'}</p>
+        </div>
+        ${activeEvent.startDateUtc ? `<div class="db-hero-date">${activeEvent.startDateUtc}</div>` : ''}
+      </div>
+
+      <div class="db-stats">
+        <div class="db-stat">
+          <div class="db-stat-value">${airports.size}</div>
+          <div class="db-stat-label">Airports</div>
+        </div>
+        <div class="db-stat">
+          <div class="db-stat-value">${firCount}</div>
+          <div class="db-stat-label">FIRs Transited</div>
+        </div>
+        <div class="db-stat">
+          <div class="db-stat-value">${totalBookings}</div>
+          <div class="db-stat-label">Bookings</div>
+        </div>
+        ${user ? `<div class="db-stat">
+          <div class="db-stat-value">${userBookings}</div>
+          <div class="db-stat-label">Your Slots</div>
+        </div>` : ''}
+      </div>
+
+      ${adminSheetCache.length > 0 && (isAdmin || isPageEnabled('schedule')) ? `
+      <div class="db-section">
+        <div class="db-section-header">
+          <h2 class="db-section-title">Schedule Preview</h2>
+          <a href="/schedule" class="db-section-link">View full schedule</a>
+        </div>
+        <div class="db-table-wrap">
+          <table class="db-table">
+            <thead>
+              <tr>
+                <th class="db-th">Flight</th>
+                <th class="db-th">From</th>
+                <th class="db-th">To</th>
+                <th class="db-th">Date</th>
+                <th class="db-th">Dep Window</th>
+                <th class="db-th">Arr Window</th>
+              </tr>
+            </thead>
+            <tbody>${upcomingLegs}</tbody>
+          </table>
+        </div>
+      </div>` : ''}
+
+      ${!user ? `
+      <div class="db-cta">
+        <p class="db-cta-text">Log in to book slots, view the route map, and manage your flights.</p>
+        <a href="/auth/login" class="db-cta-btn">Login</a>
+      </div>` : ''}
+
+    </div>
 
     <style>
       .dashboard.dashboard-home {
         display: block;
         max-width: none;
         padding: 0;
+        grid-template-columns: none;
       }
-      .dash-wrapper {
-        display: flex;
-        align-items: flex-start;
-        justify-content: center;
+      .db-page {
+        max-width: 1200px;
+        margin: 0 auto;
         padding: 32px 40px;
-      }
-
-      .header-brand {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding-left: 20px;
-        position: absolute;
-        left: 0;
-        text-decoration: none;
-        color: inherit;
-      }
-      .header-brand-logo {
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-      }
-      .header-brand-text {
         display: flex;
         flex-direction: column;
-        line-height: 1.2;
-      }
-      .header-brand-name {
-        font-size: 16px;
-        font-weight: 700;
-        color: var(--text, #e2e8f0);
-      }
-      .header-brand-sub {
-        font-size: 11px;
-        color: var(--muted, #94a3b8);
-      }
-
-      .dash-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 16px;
-        max-width: 1400px;
+        gap: 28px;
         width: 100%;
       }
 
-      .dash-card {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        text-align: center;
-        gap: 12px;
-        padding: 28px 24px;
-        border-radius: 14px;
-        border: 1px solid rgba(255,255,255,0.07);
-        background: rgba(255,255,255,0.03);
-        text-decoration: none;
-        color: inherit;
-        transition: background .15s, border-color .15s, transform .15s;
-        cursor: pointer;
-      }
-      .dash-card:hover {
-        background: rgba(255,255,255,0.06);
-        border-color: var(--accent, #3b82f6);
-        transform: translateY(-2px);
-      }
-
-      .dash-card--locked {
-        opacity: 0.45;
-      }
-      .dash-card--locked:hover {
-        opacity: 0.8;
-        border-color: var(--accent, #3b82f6);
-      }
-
-      .dash-card-icon {
-        font-size: 30px;
-        width: 52px;
-        height: 52px;
+      .db-hero {
         display: flex;
         align-items: center;
-        justify-content: center;
-        border-radius: 14px;
-        background: rgba(255,255,255,0.05);
+        justify-content: space-between;
+        gap: 16px;
       }
-      .dash-card-title {
+      .db-greeting {
+        font-size: 24px;
         font-weight: 700;
-        font-size: 16px;
         color: var(--text, #e2e8f0);
+        margin: 0;
       }
-      .dash-card-desc {
+      .db-subtitle {
+        font-size: 14px;
+        color: var(--muted, #94a3b8);
+        margin: 4px 0 0;
+      }
+      .db-hero-date {
         font-size: 13px;
         color: var(--muted, #94a3b8);
-        line-height: 1.5;
-        max-width: 260px;
-      }
-      .dash-card-badge {
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--accent, #3b82f6);
-        margin-top: 4px;
+        white-space: nowrap;
+        padding: 6px 14px;
+        border-radius: 8px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.06);
       }
 
-      @media (max-width: 1000px) {
-        .dash-grid {
-          grid-template-columns: repeat(2, 1fr);
-        }
+      .db-stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
       }
-      @media (max-width: 900px) {
-        .header-brand {
-          display: none;
-        }
-        .dash-wrapper {
-          padding: 16px;
-        }
+      .db-stat {
+        padding: 24px 20px;
+        border-radius: 12px;
+        border: 1px solid var(--border, rgba(255,255,255,0.07));
+        background: var(--panel2, rgba(255,255,255,0.03));
+        text-align: center;
       }
+      .db-stat-value {
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--text, #e2e8f0);
+        line-height: 1;
+      }
+      .db-stat-label {
+        font-size: 12px;
+        color: var(--muted, #94a3b8);
+        margin-top: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 600;
+      }
+
+      .db-section {
+        border-radius: 12px;
+        border: 1px solid var(--border, rgba(255,255,255,0.07));
+        background: var(--panel2, rgba(255,255,255,0.02));
+        overflow: hidden;
+      }
+      .db-section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+      }
+      .db-section-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text, #e2e8f0);
+        margin: 0;
+      }
+      .db-section-link {
+        font-size: 13px;
+        color: var(--accent, #3b82f6);
+        text-decoration: none;
+        font-weight: 500;
+      }
+      .db-section-link:hover {
+        text-decoration: underline;
+      }
+
+      .db-table-wrap {
+        overflow-x: auto;
+      }
+      .db-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      .db-th {
+        text-align: left;
+        padding: 10px 16px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--muted, #94a3b8);
+        border-bottom: 1px solid var(--border, rgba(255,255,255,0.04));
+      }
+      .db-cell {
+        padding: 10px 16px;
+        color: var(--text, #e2e8f0);
+        border-bottom: 1px solid var(--border, rgba(255,255,255,0.03));
+      }
+      .db-cell--num {
+        font-weight: 600;
+        color: var(--accent, #3b82f6);
+      }
+      .db-cell--muted {
+        color: var(--muted, #94a3b8);
+      }
+
+      .db-cta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 24px;
+        border-radius: 12px;
+        border: 1px solid rgba(59,130,246,0.2);
+        background: rgba(59,130,246,0.06);
+      }
+      .db-cta-text {
+        font-size: 14px;
+        color: var(--text, #e2e8f0);
+        margin: 0;
+      }
+      .db-cta-btn {
+        padding: 8px 20px;
+        border-radius: 8px;
+        background: var(--accent, #3b82f6);
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      .db-cta-btn:hover {
+        filter: brightness(1.1);
+      }
+
       @media (max-width: 600px) {
-        .dash-grid {
-          grid-template-columns: 1fr;
-        }
-        .dash-card {
-          aspect-ratio: auto;
-          padding: 24px 20px;
-        }
+        .db-hero { flex-direction: column; align-items: flex-start; }
+        .db-greeting { font-size: 20px; }
+        .db-page { padding: 24px 16px; }
+        .db-stats { grid-template-columns: repeat(2, 1fr); }
+        .db-cta { flex-direction: column; gap: 12px; text-align: center; }
       }
     </style>`;
 
@@ -6305,9 +6392,11 @@ app.get('/', (req, res) => {
     title: 'WorldFlight Planning',
     user,
     isAdmin,
+    isMaster,
+    isTeamMember: _isTeamMember,
     content,
-    hideSidebar: true,
-    layoutClass: 'dashboard-home'
+    layoutClass: 'dashboard-home',
+    pageVisibility
   }));
 });
 
@@ -7041,7 +7130,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
       var route = ${leg ? JSON.stringify(leg.atc_route || '') : "''"};
 
       var map = L.map('sectorMap', { zoomControl: true, worldCopyJump: false, maxZoom: 7 }).setView([30, 0], 3);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 7 }).addTo(map);
+      wfAddTileLayer(map, { maxZoom: 7 });
 
       // Resolve and render route
       fetch('/api/resolve-route?from=' + fromIcao + '&to=' + toIcao + '&route=' + encodeURIComponent(route) + '&depTime=&blockTime=')
@@ -10867,7 +10956,7 @@ if (!window.IS_LOGGED_IN && hint) {
 
 
   res.send(renderLayout({
-    title: `${icao} <span class="hide-mobile">Airport </span>Portal`,
+    title: `${icao} Airport Portal`,
     user: req.session?.user?.data,
     isAdmin: ADMIN_CIDS.includes(Number(req.session?.user?.data?.cid)),
     content,
@@ -15899,10 +15988,7 @@ firstRowInputs.forEach(function(input) {
 
     if (!leafletMap) {
       leafletMap = L.map('suggestMap', { zoomControl: true }).setView([20, 0], 2);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '',
-        maxZoom: 18
-      }).addTo(leafletMap);
+      wfAddTileLayer(leafletMap, { maxZoom: 18 });
 
       var colorMap = { green: '#22c55e', amber: '#f59e0b', red: '#ef4444' };
 
@@ -16033,7 +16119,7 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
 
         if (!legMap) {
           legMap = L.map('addLegMap', { zoomControl: false, attributionControl: false }).setView([0, 0], 2);
-          L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 18 }).addTo(legMap);
+          wfAddTileLayer(legMap, { maxZoom: 18 });
 
           // Load FIR boundaries
           fetch('/api/fir-merged.geojson').then(function(r) { return r.json(); }).then(function(geojson) {
@@ -22088,9 +22174,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
 
     // Init map
     map = L.map('airspaceFirMap', { zoomControl: true }).setView([30, 0], 2);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd', maxZoom: 8, noWrap: true
-    }).addTo(map);
+    wfAddTileLayer(map, { maxZoom: 8, noWrap: true });
     setTimeout(function() { map.invalidateSize(); }, 200);
 
     // FIR metadata lookup (populated from geojson)
@@ -22588,35 +22672,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
       setTimeout(function() {
         var modalMap = L.map('firRouteModalMap', { zoomControl: true, worldCopyJump: true }).setView([30, 0], 3);
 
-        var darkTile = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 10 });
-        var lightTile = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 10 });
-        darkTile.addTo(modalMap);
-        var isDark = true;
-
-        // Add toggle button
-        var toggleDiv = document.createElement('div');
-        toggleDiv.style.cssText = 'position:absolute;top:10px;right:10px;z-index:1000;';
-        toggleDiv.innerHTML = '<button style="background:#0b1220;border:1px solid rgba(255,255,255,0.2);color:#e5e7eb;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;" id="mapThemeToggle">☀️ Light</button>';
-        document.getElementById('firRouteModalMap').appendChild(toggleDiv);
-
-        document.getElementById('mapThemeToggle').addEventListener('click', function() {
-          if (isDark) {
-            modalMap.removeLayer(darkTile);
-            lightTile.addTo(modalMap);
-            this.innerHTML = '🌙 Dark';
-            this.style.background = '#fff';
-            this.style.color = '#333';
-            this.style.borderColor = '#ccc';
-          } else {
-            modalMap.removeLayer(lightTile);
-            darkTile.addTo(modalMap);
-            this.innerHTML = '☀️ Light';
-            this.style.background = '#0b1220';
-            this.style.color = '#e5e7eb';
-            this.style.borderColor = 'rgba(255,255,255,0.2)';
-          }
-          isDark = !isDark;
-        });
+        wfAddTileLayer(modalMap, { maxZoom: 10 });
 
         // Draw FIR boundary
         fetch('/api/fir-merged.geojson')
@@ -22751,7 +22807,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
       container.style.display = '';
 
       divisionMap = L.map('divisionRouteMap', { zoomControl: true, worldCopyJump: true }).setView([30, 0], 3);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 10 }).addTo(divisionMap);
+      wfAddTileLayer(divisionMap, { maxZoom: 10 });
 
       // Draw FIR boundaries
       fetch('/fir-boundaries.geojson')

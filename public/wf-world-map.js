@@ -41,14 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maxBoundsViscosity: 1.0
   });
 
-  const baseLayer = L.tileLayer(
-    'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    {
-      subdomains: 'abcd',
-      maxZoom: 19,
-      noWrap: true
-    }
-  ).addTo(map);
+  const baseLayer = wfAddTileLayer(map, { maxZoom: 19, noWrap: true });
 
   map.setView([20, 0], 2);
   requestAnimationFrame(() => map.invalidateSize(true));
@@ -426,10 +419,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => {
       if (!modalMap) {
         modalMap = L.map('wfMapModalMap', { zoomControl: true });
-        modalMap._wfBaseTileLayer = L.tileLayer(
-          'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-          { subdomains: 'abcd', maxZoom: 19, noWrap: true }
-        ).addTo(modalMap);
+        modalMap._wfBaseTileLayer = wfAddTileLayer(modalMap, { maxZoom: 19, noWrap: true });
       }
 
       clearLeafletLayers(modalMap);

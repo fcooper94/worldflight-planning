@@ -178,7 +178,9 @@
       "Bash(node _fetch-prod.mjs)",
       "Bash(node _seed-local.mjs)",
       "Bash(npm uninstall:*)",
-      "Bash(node sync-prod.mjs)"
+      "Bash(node sync-prod.mjs)",
+      "Bash(node _check-prod.mjs)",
+      "Bash(grep -E \"\\\\.\\(js|json\\)$\")"
     ]
   }
 }

@@ -49,15 +49,11 @@ export default function renderLayout({
         <span class="icon">✈️</span>
         <span class="label">My Slots / Bookings</span>
       </a>` : ''}
-    </div>
-
-    ${pv('suggest-airport') ? `<div class="nav-section">
-      <div class="nav-title">Suggestions</div>
-      <a href="/suggest-airport" class="nav-item" data-tooltip="Suggest Airport">
+      ${pv('suggest-airport') ? `<a href="/suggest-airport" class="nav-item" data-tooltip="Suggest Airport">
         <span class="icon">💡</span>
         <span class="label">Suggest Airport</span>
-      </a>
-    </div>` : ''}
+      </a>` : ''}
+    </div>
 
     ${pv('atc') || pv('airspace') ? `<div class="nav-section">
       <div class="nav-title">Controllers</div>
@@ -117,6 +113,7 @@ export default function renderLayout({
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('wf-theme') || 'dark');</script>
   <meta charset="UTF-8" />
   <title>${title}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -241,6 +238,8 @@ export default function renderLayout({
       <span id="connectedUsersList" class="admin-footer-users">Loading...</span>
     ` : ''}
     <div class="site-policy-links">
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme"></button>
+      <span class="policy-sep" aria-hidden="true">·</span>
       <a href="/privacy">Privacy Policy</a>
       <span class="policy-sep" aria-hidden="true">·</span>
       <a href="/data-handling">Data Handling</a>
@@ -1244,6 +1243,57 @@ ${isAdmin ? `
 })();
 </script>
 ` : ''}
+
+<script>
+(function() {
+  const saved = localStorage.getItem('wf-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+
+  // Global tile URL helper for Leaflet maps
+  window.wfTileUrl = function() {
+    var t = document.documentElement.getAttribute('data-theme') || 'dark';
+    return t === 'light'
+      ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+      : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  };
+
+  // Track all tile layers so we can swap them on theme change
+  window._wfTileLayers = [];
+  window.wfAddTileLayer = function(map, opts) {
+    var layer = L.tileLayer(window.wfTileUrl(), Object.assign({ subdomains: 'abcd' }, opts || {}));
+    layer.addTo(map);
+    window._wfTileLayers.push({ map: map, layer: layer, opts: opts || {} });
+    return layer;
+  };
+
+  function updateLabel() {
+    const btn = document.getElementById('themeToggle');
+    if (!btn) return;
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    btn.textContent = current === 'dark' ? 'Light Mode' : 'Dark Mode';
+  }
+  updateLabel();
+
+  function swapTiles() {
+    var url = window.wfTileUrl();
+    (window._wfTileLayers || []).forEach(function(entry) {
+      entry.map.removeLayer(entry.layer);
+      entry.layer = L.tileLayer(url, Object.assign({ subdomains: 'abcd' }, entry.opts));
+      entry.layer.addTo(entry.map);
+    });
+  }
+
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.addEventListener('click', function() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('wf-theme', next);
+    updateLabel();
+    swapTiles();
+  });
+})();
+</script>
 
 </body>
 </html>`;

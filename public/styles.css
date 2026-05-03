@@ -39,6 +39,259 @@
   --wf-green-glow: rgba(24,199,126,0.5);
 }
 
+/* ===== Light theme ===== */
+[data-theme="light"] {
+  --bg0:#f8fafc;
+  --bg1:#ffffff;
+  --panel:#ffffff;
+  --panel2:#f1f5f9;
+
+  --text:#0f172a;
+  --muted:#64748b;
+  --muted2:#94a3b8;
+
+  --border:#e2e8f0;
+
+  --accent:#2563eb;
+  --accent2:#1d4ed8;
+
+  --danger:#dc2626;
+  --warning:#d97706;
+  --success:#16a34a;
+
+  --shadow:0 20px 40px rgba(0,0,0,.08);
+
+  --wf-green: #dcfce7;
+  --wf-green-dark: #16a34a;
+  --wf-green-glow: rgba(22,163,74,0.2);
+}
+
+[data-theme="light"] body {
+  background: var(--bg0);
+  color: var(--text);
+}
+[data-theme="light"] .sidebar {
+  background: var(--panel);
+  border-right-color: var(--border);
+  box-shadow: 1px 0 0 var(--border);
+}
+[data-theme="light"] .nav-item { color: var(--muted); }
+[data-theme="light"] .nav-item:hover { background: rgba(0,0,0,0.04); color: var(--text); }
+[data-theme="light"] .nav-item.active {
+  background: rgba(37,99,235,0.08);
+  color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+[data-theme="light"] .topbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+[data-theme="light"] .card,
+[data-theme="light"] .db-stat,
+[data-theme="light"] .db-section {
+  background: var(--panel);
+  border-color: var(--border);
+}
+[data-theme="light"] .admin-connected-footer {
+  background: var(--panel);
+  border-top-color: var(--border);
+}
+[data-theme="light"] .login-overlay { background: var(--bg0); }
+[data-theme="light"] .login-page { background: var(--bg0); }
+[data-theme="light"] ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
+[data-theme="light"] * { scrollbar-color: rgba(0,0,0,0.15) transparent; }
+[data-theme="light"] header.topbar {
+  background: var(--panel) !important;
+  border-bottom: 1px solid var(--border);
+}
+[data-theme="light"] .sidebar .nav-title { color: var(--muted2); }
+[data-theme="light"] .sidebar-header { border-bottom-color: var(--border); }
+[data-theme="light"] .nav-item.active {
+  background: rgba(37,99,235,0.08) !important;
+  box-shadow: inset 3px 0 0 var(--accent) !important;
+}
+[data-theme="light"] .stat { background: var(--panel); border-color: var(--border); }
+[data-theme="light"] .modal-card { background: var(--panel); border-color: var(--border); }
+[data-theme="light"] .login-btn { background: var(--accent); }
+[data-theme="light"] input,
+[data-theme="light"] select,
+[data-theme="light"] textarea {
+  background: #ffffff !important;
+  border-color: #d1d5db !important;
+  color: var(--text) !important;
+}
+[data-theme="light"] table th { color: var(--muted); }
+[data-theme="light"] table td { border-bottom-color: var(--border); }
+
+/* ATC controller list items */
+[data-theme="light"] .atc-item {
+  background: var(--panel) !important;
+  border-color: var(--border) !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
+}
+[data-theme="light"] .icao-top-row .atc-callsign { color: #8b8b8b !important; }
+[data-theme="light"] .atc-freq { color: var(--accent); }
+
+/* ATIS cards */
+[data-theme="light"] .atis-text { color: var(--text); }
+[data-theme="light"] .atis-title { color: var(--accent); }
+[data-theme="light"] .atis-title.faa { color: var(--muted); }
+[data-theme="light"] .atis-meta { color: var(--muted); }
+[data-theme="light"] .atis-letter.faa,
+[data-theme="light"] .faa-atis .atis-letter {
+  background: linear-gradient(135deg, #e2e8f0, #cbd5e1) !important;
+  color: #334155 !important;
+}
+[data-theme="light"] .atis-letter.arrival {
+  background: linear-gradient(160deg, #c7d2fe, #a5b4fc) !important;
+  color: #312e81 !important;
+  box-shadow: 0 0 10px rgba(99,102,241,.15) !important;
+}
+[data-theme="light"] .atis-letter.departure {
+  background: linear-gradient(160deg, #a7f3d0, #6ee7b7) !important;
+  color: #064e3b !important;
+  box-shadow: 0 0 10px rgba(16,185,129,.15) !important;
+}
+
+/* Controllers card fade */
+[data-theme="light"] .controllers-card::after {
+  background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0.85)) !important;
+}
+
+/* Cards and panels on ICAO page */
+[data-theme="light"] .atis-container { color: var(--text); }
+[data-theme="light"] .sim-badge {
+  background: #e2e8f0;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+
+/* Action buttons (Request access, Submit scenery, etc.) */
+[data-theme="light"] .action-btn,
+[data-theme="light"] .book-slot-btn,
+[data-theme="light"] .plan-btn {
+  background: #ffffff !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+[data-theme="light"] .action-btn:hover,
+[data-theme="light"] .book-slot-btn:hover,
+[data-theme="light"] .plan-btn:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+
+/* Modals */
+[data-theme="light"] .modal-card,
+[data-theme="light"] .modal-dialog {
+  background: #ffffff !important;
+  border-color: var(--border) !important;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15) !important;
+}
+[data-theme="light"] .modal-card h3,
+[data-theme="light"] .modal-dialog h3 { color: var(--text); }
+[data-theme="light"] .modal-card label,
+[data-theme="light"] .modal-dialog label { color: var(--text); }
+[data-theme="light"] .modal-card input,
+[data-theme="light"] .modal-card select,
+[data-theme="light"] .modal-card textarea,
+[data-theme="light"] .modal-dialog input,
+[data-theme="light"] .modal-dialog select,
+[data-theme="light"] .modal-dialog textarea {
+  background: var(--bg0) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+}
+[data-theme="light"] .modal-backdrop {
+  background: rgba(0,0,0,0.3) !important;
+}
+
+/* Map layout pages (previous destinations, world map, etc.) */
+[data-theme="light"] .leaflet-container { background: #dce5ef !important; }
+[data-theme="light"] .wf-map-page::before,
+[data-theme="light"] .wf-map-page::after {
+  background: rgba(248,250,252,0.25) !important;
+}
+[data-theme="light"] header.topbar {
+  background: rgba(255,255,255,0.95) !important;
+}
+
+[data-theme="light"] .wf-map-page { background: var(--bg0) !important; }
+[data-theme="light"] .site-banner {
+  background: linear-gradient(135deg, #e0e7ff, #ede9fe) !important;
+  border-bottom-color: rgba(59,130,246,0.2);
+}
+[data-theme="light"] footer { background: var(--bg0); }
+
+/* Search box on map pages (previous destinations) */
+[data-theme="light"] .wf-search-inner {
+  background: rgba(255,255,255,0.95) !important;
+  border-color: var(--border) !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important;
+}
+[data-theme="light"] .wf-search-input { color: var(--text) !important; }
+[data-theme="light"] .wf-search-results {
+  background: rgba(255,255,255,0.98) !important;
+  border-color: var(--border) !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.1) !important;
+}
+[data-theme="light"] .wf-search-item:hover,
+[data-theme="light"] .wf-search-item.active { background: rgba(37,99,235,0.06) !important; }
+[data-theme="light"] .wf-search-item { border-bottom-color: var(--border) !important; }
+[data-theme="light"] .wf-search-name { color: var(--text) !important; }
+
+/* Map popups (world map, previous destinations) */
+[data-theme="light"] .wf-airport-popup {
+  background: rgba(255,255,255,0.96) !important;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06) !important;
+}
+[data-theme="light"] .wf-airport-popup-header {
+  color: var(--accent) !important;
+  border-bottom-color: var(--border) !important;
+}
+[data-theme="light"] .wf-airport-section {
+  background: rgba(0,0,0,0.03) !important;
+}
+[data-theme="light"] .wf-airport-section-title { color: var(--muted) !important; }
+[data-theme="light"] .wf-airport-leg { color: var(--text) !important; }
+[data-theme="light"] .wf-airport-meta { color: var(--muted) !important; }
+[data-theme="light"] .wf-airport-action-btn {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+[data-theme="light"] .wf-airport-text {
+  background: rgba(255,255,255,0.85) !important;
+  border-color: rgba(0,0,0,0.1) !important;
+  color: #334155 !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+[data-theme="light"] .wf-airport-text:hover {
+  background: rgba(255,255,255,0.95) !important;
+  border-color: var(--accent) !important;
+}
+[data-theme="light"] .wf-airport-pin {
+  border-color: rgba(0,0,0,0.2) !important;
+}
+
+/* ===== Theme toggle ===== */
+.theme-toggle {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: color .15s;
+}
+.theme-toggle:hover {
+  color: var(--text);
+}
+
 /* ===== Reset / base ===== */
 *{ box-sizing:border-box; }
 
@@ -74,9 +327,10 @@ a:hover{ text-decoration:none; }
 
 /* Site Banner */
 .site-banner {
-  position: relative;
-  z-index: 1;
-  background: linear-gradient(135deg, rgba(59,130,246,0.15), rgba(139,92,246,0.15));
+  position: sticky;
+  top: 0;
+  z-index: 1100;
+  background: linear-gradient(135deg, #1a2744, #1f1a3a);
   border-bottom: 1px solid rgba(59,130,246,0.25);
   padding: 10px 20px;
   text-align: center;
@@ -5255,10 +5509,15 @@ body.sidebar-collapsed {
 }
 
 .leaflet-control-zoom a {
-  background: #ffffff;
-  color: #000;
+  background: rgba(30,41,59,0.85) !important;
+  color: #e2e8f0 !important;
   border-radius: 6px;
   box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}
+[data-theme="light"] .leaflet-control-zoom a {
+  background: #ffffff !important;
+  color: #1e293b !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15);
 }
 
 /* Remove attribution clutter if desired */

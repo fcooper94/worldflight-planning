@@ -17,7 +17,7 @@ const TILE_LAYERS = {
 };
 
 function getMapTheme() {
-  return localStorage.getItem('icaoMapTheme') || 'dark';
+  return document.documentElement.getAttribute('data-theme') || 'dark';
 }
 
 function setMapTheme(theme) {
@@ -94,17 +94,8 @@ document.addEventListener('DOMContentLoaded', () => {
         attributionControl: false
       });
 
-      const baseLayer = L.tileLayer(
-        TILE_LAYERS[getMapTheme()].url,
-        TILE_LAYERS[getMapTheme()].options
-      ).addTo(map);
-
-      map._baseTileLayer = baseLayer;
+      wfAddTileLayer(map, TILE_LAYERS[getMapTheme()].options);
       window._icaoMapInstance = map;
-
-      document
-        .getElementById('toggleMapThemeBtn')
-        ?.addEventListener('click', toggleMapTheme);
 
       const bounds = L.latLngBounds([[airport.lat, airport.lon]]);
 
@@ -144,19 +135,8 @@ document.addEventListener('DOMContentLoaded', () => {
             attributionControl: false
           });
 
-          const baseLayer = L.tileLayer(
-            TILE_LAYERS[getMapTheme()].url,
-            TILE_LAYERS[getMapTheme()].options
-          ).addTo(modalMap);
-
-          modalMap._baseTileLayer = baseLayer;
+          wfAddTileLayer(modalMap, TILE_LAYERS[getMapTheme()].options);
           window._modalMapInstance = modalMap;
-
-          const modalToggle = document.getElementById('toggleMapThemeBtnModal');
-          if (modalToggle && !modalThemeBound) {
-            modalToggle.addEventListener('click', toggleMapTheme);
-            modalThemeBound = true;
-          }
         } else {
           modalMap.eachLayer(l => l instanceof L.Marker && modalMap.removeLayer(l));
         }
