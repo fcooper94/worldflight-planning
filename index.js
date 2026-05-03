@@ -6171,22 +6171,21 @@ app.get('/', async (req, res) => {
       </div>
 
       <div class="db-stats">
-        <div class="db-stat">
-          <div class="db-stat-value">${airports.size}</div>
-          <div class="db-stat-label">Airports</div>
-        </div>
-        <div class="db-stat">
-          <div class="db-stat-value">${firCount}</div>
-          <div class="db-stat-label">FIRs Transited</div>
-        </div>
-        <div class="db-stat">
-          <div class="db-stat-value">${totalBookings}</div>
-          <div class="db-stat-label">Bookings</div>
-        </div>
-        ${user ? `<div class="db-stat">
-          <div class="db-stat-value">${userBookings}</div>
-          <div class="db-stat-label">Your Slots</div>
-        </div>` : ''}
+        <a href="/suggest-airport" class="db-stat db-stat-link">
+          <div class="db-stat-icon">💡</div>
+          <div class="db-stat-label">Suggest Airport</div>
+          <div class="db-stat-desc">Tell us where you'd like to see WorldFlight 2026 visit</div>
+        </a>
+        <a href="/previous-destinations" class="db-stat db-stat-link">
+          <div class="db-stat-icon">🗺️</div>
+          <div class="db-stat-label">Past Destinations</div>
+          <div class="db-stat-desc">Explore every airport WorldFlight has visited over the years</div>
+        </a>
+        <a href="/airport-portal" class="db-stat db-stat-link">
+          <div class="db-stat-icon">✈️</div>
+          <div class="db-stat-label">Airport Portal</div>
+          <div class="db-stat-desc">View details, charts and info for airports on this year's route</div>
+        </a>
       </div>
 
       ${adminSheetCache.length > 0 && (isAdmin || isPageEnabled('schedule')) ? `
@@ -6212,11 +6211,10 @@ app.get('/', async (req, res) => {
         </div>
       </div>` : ''}
 
-      ${!user ? `
       <div class="db-cta">
-        <p class="db-cta-text">Log in to book slots, view the route map, and manage your flights.</p>
-        <a href="/auth/login" class="db-cta-btn">Login</a>
-      </div>` : ''}
+        <span class="db-cta-icon">🚧</span>
+        <p class="db-cta-text">This planning portal is still under construction — a lot of exciting features are just around the corner!</p>
+      </div>
 
     </div>
 
@@ -6266,7 +6264,7 @@ app.get('/', async (req, res) => {
 
       .db-stats {
         display: grid;
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(3, 1fr);
         gap: 16px;
       }
       .db-stat {
@@ -6276,10 +6274,18 @@ app.get('/', async (req, res) => {
         background: var(--panel2, rgba(255,255,255,0.03));
         text-align: center;
       }
-      .db-stat-value {
+      .db-stat-link {
+        text-decoration: none;
+        cursor: pointer;
+        transition: border-color 0.2s, background 0.2s, transform 0.15s;
+      }
+      .db-stat-link:hover {
+        border-color: var(--accent, #3b82f6);
+        background: rgba(59,130,246,0.08);
+        transform: translateY(-2px);
+      }
+      .db-stat-icon {
         font-size: 28px;
-        font-weight: 700;
-        color: var(--text, #e2e8f0);
         line-height: 1;
       }
       .db-stat-label {
@@ -6289,6 +6295,15 @@ app.get('/', async (req, res) => {
         text-transform: uppercase;
         letter-spacing: 0.5px;
         font-weight: 600;
+      }
+      .db-stat-desc {
+        font-size: 12px;
+        color: var(--muted2, #64748b);
+        margin-top: 8px;
+        line-height: 1.4;
+        text-transform: none;
+        letter-spacing: 0;
+        font-weight: 400;
       }
 
       .db-section {
@@ -6354,11 +6369,15 @@ app.get('/', async (req, res) => {
       .db-cta {
         display: flex;
         align-items: center;
-        justify-content: space-between;
+        gap: 14px;
         padding: 20px 24px;
         border-radius: 12px;
-        border: 1px solid rgba(59,130,246,0.2);
-        background: rgba(59,130,246,0.06);
+        border: 1px solid rgba(245,158,11,0.25);
+        background: rgba(245,158,11,0.06);
+      }
+      .db-cta-icon {
+        font-size: 24px;
+        flex-shrink: 0;
       }
       .db-cta-text {
         font-size: 14px;
@@ -6383,7 +6402,7 @@ app.get('/', async (req, res) => {
         .db-hero { flex-direction: column; align-items: flex-start; }
         .db-greeting { font-size: 20px; }
         .db-page { padding: 24px 16px; }
-        .db-stats { grid-template-columns: repeat(2, 1fr); }
+        .db-stats { grid-template-columns: 1fr; }
         .db-cta { flex-direction: column; gap: 12px; text-align: center; }
       }
     </style>`;

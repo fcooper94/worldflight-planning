@@ -1756,6 +1756,17 @@ select{ cursor:pointer; }
   opacity: 1;
   transform: rotate(-12deg);
 }
+[data-theme="light"] .logout-btn {
+  color: #3b82f6;
+  background: rgba(59,130,246,0.06);
+  border-color: rgba(59,130,246,0.2);
+}
+[data-theme="light"] .logout-btn:hover {
+  color: #ef4444;
+  background: rgba(239,68,68,0.08);
+  border-color: rgba(239,68,68,0.3);
+  box-shadow: 0 0 12px rgba(239,68,68,0.12);
+}
 
 /* ===== USER MENU (TOPBAR) ===== */
 
@@ -1786,12 +1797,7 @@ select{ cursor:pointer; }
   top: 100%;
   min-width: 180px;
 
-  background: linear-gradient(
-    180deg,
-    rgba(255,255,255,0.05),
-    rgba(0,0,0,0.4)
-  );
-
+  background: linear-gradient(180deg, #1e293b, #0f172a);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 14px;
   padding: 10px;
@@ -1801,7 +1807,12 @@ select{ cursor:pointer; }
   pointer-events: none;
   transform: translateY(-6px);
   transition: all 0.2s ease;
-  z-index: 200;
+  z-index: 1200;
+}
+[data-theme="light"] .user-dropdown {
+  background: linear-gradient(180deg, #ffffff, #f1f5f9);
+  border-color: rgba(0,0,0,0.1);
+  box-shadow: 0 20px 40px rgba(0,0,0,0.12);
 }
 
 
