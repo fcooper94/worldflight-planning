@@ -711,7 +711,7 @@ async function loadSiteBanner() {
 function requirePageEnabled(pageKey) {
   return (req, res, next) => {
     const cid = req.session?.user?.data?.cid;
-    const isAdmin = cid && ADMIN_CIDS.includes(Number(cid));
+    const isAdmin = isAdminUser(cid);
     if (isAdmin || isPageEnabled(pageKey)) return next();
     return res.status(403).send(`<!DOCTYPE html>
 <html lang="en">
@@ -1356,7 +1356,7 @@ function isCoveringCtr(callsign, icao) {
 
 function canEditIcao(user, pageIcao) {
   if (!user) return false;
-  if (ADMIN_CIDS.includes(Number(user.cid))) return true;
+  if (isAdminUser(user.cid)) return true;
 
   const cs = user.callsign || '';
   return cs.startsWith(pageIcao + '_') && !cs.endsWith('_OBS');
@@ -1590,6 +1590,85 @@ function requireMasterUser(req, res, next) {
   const cid = Number(req.session?.user?.data?.cid);
   if (!cid || !isMasterUser(cid)) return res.status(403).json({ error: 'Forbidden' });
   next();
+}
+
+/* ===== GRANULAR ADMIN PERMISSIONS ===== */
+// Map<cid, Set<pageKey>>
+const adminPermissions = new Map();
+
+const ADMIN_PAGE_KEYS = [
+  'wf-schedule', 'official-teams', 'scenery', 'access-management',
+  'visited-airports', 'suggestions', 'mailing-list', 'settings',
+  'airac', 'test-pilots', 'controller-pack'
+];
+
+const ADMIN_PAGE_LABELS = {
+  'wf-schedule': 'WF Schedule / Flow',
+  'official-teams': 'Official Teams',
+  'scenery': 'Scenery Submissions',
+  'access-management': 'Access Management',
+  'visited-airports': 'Visited Airports',
+  'suggestions': 'Suggestions',
+  'mailing-list': 'Mailing List',
+  'settings': 'Page Visibility / Settings',
+  'airac': 'AIRAC Data',
+  'test-pilots': 'Test Pilot Data',
+  'controller-pack': 'Controller Pack'
+};
+
+async function loadAdminPermissions() {
+  try {
+    const rows = await prisma.adminPermission.findMany();
+    adminPermissions.clear();
+    for (const row of rows) {
+      if (!adminPermissions.has(row.cid)) adminPermissions.set(row.cid, new Set());
+      adminPermissions.get(row.cid).add(row.page);
+    }
+    console.log(`[ADMIN] Loaded admin permissions for ${adminPermissions.size} users`);
+  } catch (e) { console.error('[ADMIN] Failed to load admin permissions', e.message); }
+}
+
+/** Returns true if cid has full admin access (master admin) */
+function isSuperAdmin(cid) {
+  return !!cid && ADMIN_CIDS.includes(Number(cid));
+}
+
+/** Returns true if cid has any admin access (super or granular) */
+function isAdminUser(cid) {
+  if (!cid) return false;
+  const n = Number(cid);
+  return ADMIN_CIDS.includes(n) || adminPermissions.has(n);
+}
+
+/** Returns true if cid has access to a specific admin page */
+function hasAdminPageAccess(cid, pageKey) {
+  if (!cid) return false;
+  const n = Number(cid);
+  if (ADMIN_CIDS.includes(n)) return true;
+  const perms = adminPermissions.get(n);
+  return !!perms && perms.has(pageKey);
+}
+
+/** Middleware: require any admin access */
+function requireAdmin(req, res, next) {
+  const cid = req.session?.user?.data?.cid;
+  if (!cid || !isAdminUser(cid)) {
+    if (req.accepts('json')) return res.status(403).json({ error: 'Forbidden' });
+    return res.status(403).send('<h1>403 Forbidden</h1><p>You do not have admin access.</p>');
+  }
+  next();
+}
+
+/** Middleware factory: require access to a specific admin page */
+function requireAdminPage(pageKey) {
+  return function(req, res, next) {
+    const cid = req.session?.user?.data?.cid;
+    if (!cid || !hasAdminPageAccess(cid, pageKey)) {
+      if (req.accepts('json')) return res.status(403).json({ error: 'Forbidden' });
+      return res.status(403).send('<h1>403 Forbidden</h1><p>You do not have access to this page.</p>');
+    }
+    next();
+  };
 }
 
 /* ===== WF TEAM MEMBERSHIP ===== */
@@ -1971,6 +2050,7 @@ async function bootstrap() {
   await loadSiteGate();
   await loadMasterUsers();
   await loadTeamMembers();
+  await loadAdminPermissions();
 
   setBootstrapStatus(4, 'Loading event schedule');
   await refreshAdminSheet();   // 🔑 sets activeEventId + loads schedule rows
@@ -3266,7 +3346,7 @@ app.delete('/admin/api/suggestions/:id', requireAdmin, async (req, res) => {
 app.get('/suggest-airport', requirePageEnabled('suggest-airport'), (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = Number(user?.cid) || null;
-  const isAdmin = cid && ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
 
   const firstName = user?.personal?.name_first || '';
   const lastName = user?.personal?.name_last || '';
@@ -4354,7 +4434,7 @@ app.get('/view-suggestions', (req, res) => {
 /* ===== PUBLIC POLICY PAGES ===== */
 function renderPolicyPage(req, res, opts) {
   const user = req.session?.user?.data || null;
-  const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
+  const isAdmin = isAdminUser(user?.cid);
   const content = `
     <section class="card card-full" style="max-width:860px;margin:0 auto;">
       <h2 style="margin-top:0;color:var(--accent);">${opts.title}</h2>
@@ -4758,7 +4838,7 @@ if (icaoFromQuery) {
   function canEditSector(sector) {
     if (!user || !sector) return false;
     const pageIcao = sector.split('-')[0];
-    return ADMIN_CIDS.includes(Number(user.cid)) || canEditIcao(user, pageIcao);
+    return isAdminUser(user.cid) || canEditIcao(user, pageIcao);
   }
 
   /* =========================================================
@@ -5317,33 +5397,6 @@ app.get('/dashboard', requirePageEnabled('schedule'), (req, res) => {
 });
 
 
-
-/* ===== ADMIN AUTH ===== */
-function requireAdmin(req, res, next) {
-  const cid = req.session?.user?.data?.cid;
-  if (!cid || !ADMIN_CIDS.includes(Number(cid))) {
-    return res.status(403).send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Access Denied</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="stylesheet" href="/styles.css" />
-</head>
-<body class="login-page no-layout">
-  <div class="login-overlay"></div>
-  <div class="login-container">
-    <img src="/logo.png" alt="WorldFlight" class="login-logo" />
-    <h1>Access Denied</h1>
-    <h2>Administrators Only</h2>
-    <p class="login-subtitle">You do not have permission to view this page.</p>
-    <a href="/" class="login-btn">Back to Homepage</a>
-  </div>
-</body>
-</html>`);
-  }
-  next();
-}
 
 function findFirstRouteMismatch(filedRoute, wfRoute) {
   const filed = normalizeRoute(filedRoute, wfRoute);
@@ -6123,7 +6176,7 @@ function makeTobtSlotKey({ from, to, dateUtc, depTimeUtc, tobtTimeUtc }) {
 app.get('/', async (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = user ? Number(user.cid) : null;
-  const isAdmin = cid ? ADMIN_CIDS.includes(cid) : false;
+  const isAdmin = isAdminUser(cid);
   const isMaster = cid ? isMasterUser(cid) : false;
   const _isTeamMember = cid ? isTeamMember(cid) : false;
 
@@ -6611,6 +6664,41 @@ function normalizeDateToIso(dateUtc) {
   return isNaN(d) ? '' : d.toISOString().slice(0, 10);
 }
 
+// Short city/airport nicknames for the world map labels
+const AIRPORT_NICKNAMES = {
+  YSSY: 'Sydney', NZAA: 'Auckland', NZCH: 'Christchurch', NZFX: 'Phoenix',
+  SCGC: 'Union Glacier', SCCI: 'Punta Arenas', SCEL: 'Santiago',
+  SBPV: 'Porto Velho', SBGR: 'Sao Paulo', SKBO: 'Bogota',
+  MPTO: 'Tocumen', MMUN: 'Cancun', KDTW: 'Detroit', KEWR: 'Newark',
+  CYHZ: 'Halifax', CYYR: 'Goose Bay', BGTL: 'Thule',
+  EGPF: 'Glasgow', LFPG: 'Paris', LIMC: 'Milan', LBSF: 'Sofia',
+  LIRF: 'Rome', DAAG: 'Algiers', LTFM: 'Istanbul', OJAI: 'Amman',
+  UBBB: 'Baku', OAKB: 'Kabul', VNKT: 'Kathmandu', VABB: 'Mumbai',
+  VTBD: 'Bangkok', WSSS: 'Singapore', WIII: 'Jakarta', WADD: 'Bali',
+  WALL: 'Balikpapan', WAJJ: 'Jayapura', YPDN: 'Darwin', YBCS: 'Cairns',
+  YBBN: 'Brisbane', UNNT: 'Novosibirsk', UEEE: 'Yakutsk',
+  ZBAD: 'Beijing', RKSI: 'Incheon', RJBB: 'Osaka', ROAH: 'Naha',
+  VHHH: 'Hong Kong', FACT: 'Cape Town', FKKD: 'Douala',
+  GCLP: 'Gran Canaria', LPAZ: 'Azores',
+  KLAX: 'Los Angeles', KJFK: 'New York', KDEN: 'Denver',
+  PANC: 'Anchorage', KORD: 'Chicago', KATL: 'Atlanta',
+  EGLL: 'Heathrow', EDDF: 'Frankfurt', LEMD: 'Madrid',
+  LOWW: 'Vienna', LOWI: 'Innsbruck',
+};
+
+function airportShortName(icao, fullName) {
+  if (AIRPORT_NICKNAMES[icao]) return AIRPORT_NICKNAMES[icao];
+  if (!fullName) return '';
+  // Try to extract a city name: take text before common suffixes
+  const cleaned = fullName
+    .replace(/\b(International|Intl|Airport|Regional|Municipal|Metropolitan|Memorial|Field)\b/gi, '')
+    .replace(/[\/\-].*/g, '')  // remove anything after / or -
+    .trim();
+  // Return the first 1-2 meaningful words
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  return words.slice(0, 2).join(' ');
+}
+
 async function buildWfWorldMapPayload({ a = '', b = '', c = '' } = {}) {
   a = String(a).trim().toUpperCase();
   b = String(b).trim().toUpperCase();
@@ -6658,6 +6746,7 @@ async function buildWfWorldMapPayload({ a = '', b = '', c = '' } = {}) {
     airports[icao] ??= {
       icao,
       name: ap.name || icao,
+      shortName: airportShortName(icao, ap.name),
       lat: ap.lat,
       lon: ap.lon,
       inbound: null,
@@ -6866,13 +6955,12 @@ app.get('/api/wf/world-map', async (req, res) => {
 
 app.get('/wf/world-map', requireLogin, requirePageEnabled('world-map'), (req, res) => {
   const user = req.session.user?.data || null;
-  const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
+  const isAdmin = isAdminUser(user?.cid);
 
   const content = `
     <div class="wf-map-page">
       <div id="wfWorldMap"></div>
 
-      <!-- Optional overlay title -->
 
     </div>
 
@@ -6898,7 +6986,7 @@ app.get('/wf/world-map', requireLogin, requirePageEnabled('world-map'), (req, re
 
 app.get('/previous-destinations', (req, res) => {
   const user = req.session.user?.data || null;
-  const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
+  const isAdmin = isAdminUser(user?.cid);
 
   const content = `
     <div class="wf-map-page">
@@ -6980,7 +7068,7 @@ app.get('/auth/callback', vatsimCallback);
 app.get('/sector/:wf/:from/:to', async (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = user ? Number(user.cid) : null;
-  const isAdmin = cid ? ADMIN_CIDS.includes(cid) : false;
+  const isAdmin = isAdminUser(cid);
 
   const { wf, from, to } = req.params;
   const fromIcao = from.toUpperCase();
@@ -7523,7 +7611,7 @@ app.get('/api/sector-traffic/:wf/:from/:to', async (req, res) => {
 
 app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
-  const isAdmin = ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
   const isLoggedIn = !!cid;
   const myBookings = cid ? tobtBookingsByCid[cid] : null;
   const showBookSlot = isAdmin || isPageEnabled('book-slot');
@@ -8169,6 +8257,26 @@ app.get('/admin/access-management', requireAdmin, (req, res) => {
       <select id="wfTeamSelect" style="padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:240px;">
         <option value="">Select team...</option>
       </select>
+    </div>
+  </div>
+
+  <div id="adminAccessSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+    <div style="font-weight:700;font-size:13px;margin-bottom:4px;">Admin Access</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Grant access to specific admin pages. Super admin always has full access.</div>
+    <div id="adminSuperBadge" style="display:none;padding:8px 12px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);border-radius:6px;color:#fbbf24;font-size:12px;font-weight:600;margin-bottom:10px;">
+      This user is a Super Admin — full access to everything. Cannot be modified.
+    </div>
+    <div id="adminToggleRow" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div>
+        <span style="font-weight:600;font-size:13px;">Admin Enabled</span>
+        <span style="font-size:11px;color:var(--muted);margin-left:6px;">(grant/revoke all pages)</span>
+      </div>
+      <select id="adminEnabledSelect" style="padding:4px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
+        <option value="disabled">Disabled</option>
+        <option value="enabled">Enabled</option>
+      </select>
+    </div>
+    <div id="adminPagesGrid" style="display:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">
     </div>
   </div>
 </section>
@@ -8929,6 +9037,82 @@ document.addEventListener('DOMContentLoaded', function () {
             catch (err) {}
           });
 
+          // ===== Admin Access Section =====
+          var adminSection = document.getElementById('adminAccessSection');
+          var adminSuperBadge = document.getElementById('adminSuperBadge');
+          var adminToggleRow = document.getElementById('adminToggleRow');
+          var adminPagesGrid = document.getElementById('adminPagesGrid');
+          var adminSelect = document.getElementById('adminEnabledSelect');
+
+          adminSection.style.display = '';
+
+          if (data.isSuperAdmin) {
+            // Super admin — show badge, hide controls
+            adminSuperBadge.style.display = '';
+            adminToggleRow.style.display = 'none';
+            adminPagesGrid.style.display = 'none';
+          } else {
+            adminSuperBadge.style.display = 'none';
+            adminToggleRow.style.display = '';
+
+            var userAdminPages = data.adminPages || [];
+            var allPageKeys = data.adminPageKeys || [];
+            var pageLabels = data.adminPageLabels || {};
+            var hasAnyAdmin = userAdminPages.length > 0;
+
+            // Clone select to remove old listeners
+            var newAdminSelect = adminSelect.cloneNode(true);
+            adminSelect.parentNode.replaceChild(newAdminSelect, adminSelect);
+            newAdminSelect.value = hasAnyAdmin ? 'enabled' : 'disabled';
+
+            // Build page checkboxes
+            adminPagesGrid.innerHTML = '';
+            adminPagesGrid.style.display = hasAnyAdmin ? 'grid' : 'none';
+            allPageKeys.forEach(function(key) {
+              var label = document.createElement('label');
+              label.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding:6px 8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:6px;';
+              var cb = document.createElement('input');
+              cb.type = 'checkbox';
+              cb.dataset.page = key;
+              cb.checked = userAdminPages.indexOf(key) !== -1;
+              cb.style.cssText = 'accent-color:var(--accent);cursor:pointer;';
+              cb.className = 'admin-page-checkbox';
+              var span = document.createElement('span');
+              span.textContent = pageLabels[key] || key;
+              label.appendChild(cb);
+              label.appendChild(span);
+              adminPagesGrid.appendChild(label);
+
+              cb.addEventListener('change', async function() {
+                var wasChecked = !this.checked;
+                try {
+                  var r = await fetch('/admin/api/admin-permissions/toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ cid: Number(data.cid), page: key, enabled: this.checked })
+                  });
+                  if (!r.ok) throw new Error('Failed');
+                } catch (err) { this.checked = wasChecked; }
+              });
+            });
+
+            // Toggle all on/off
+            newAdminSelect.addEventListener('change', async function() {
+              var enabled = this.value === 'enabled';
+              try {
+                var r = await fetch('/admin/api/admin-permissions/toggle-all', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'same-origin',
+                  body: JSON.stringify({ cid: Number(data.cid), enabled: enabled })
+                });
+                if (!r.ok) throw new Error('Failed');
+                doSearch();
+              } catch (err) { this.value = enabled ? 'disabled' : 'enabled'; }
+            });
+          }
+
           if (data.globalAccess) {
             html += '<tr><td colspan="3" style="text-align:center;padding:24px;color:#4ade80;font-weight:700;font-size:14px;">Global Access Enabled</td></tr>';
           } else {
@@ -8971,6 +9155,7 @@ document.addEventListener('DOMContentLoaded', function () {
           document.getElementById('globalAccessSection').style.display = 'none';
           document.getElementById('masterUserSection').style.display = 'none';
           document.getElementById('additionalRolesSection').style.display = 'none';
+          document.getElementById('adminAccessSection').style.display = 'none';
           document.getElementById('wfTeamPicker').style.display = 'none';
           updateAddSection('division', data.pattern);
           var docs = data.docPermissions || [];
@@ -9301,6 +9486,7 @@ app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
     const hasGlobal = docPerms.some(r => r.pattern === '****');
     const isMaster = masterUserCids.has(cid);
     const wfTeamRow = addlRoles.find(r => r.role === 'WF_TEAM');
+    const cidAdminPerms = adminPermissions.get(cid);
     return res.json({
       _searchType: 'cid',
       cid,
@@ -9311,7 +9497,11 @@ app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
       additionalRoles: addlRoles.map(r => r.role),
       wfTeamName: wfTeamRow?.teamName ?? null,
       docPermissions: docPerms.filter(r => r.pattern !== '****'),
-      firAccess: staffReqs
+      firAccess: staffReqs,
+      isSuperAdmin: isSuperAdmin(cid),
+      adminPages: cidAdminPerms ? [...cidAdminPerms] : [],
+      adminPageKeys: ADMIN_PAGE_KEYS,
+      adminPageLabels: ADMIN_PAGE_LABELS
     });
   }
 
@@ -10977,7 +11167,7 @@ if (!window.IS_LOGGED_IN && hint) {
   res.send(renderLayout({
     title: `${icao} Airport Portal`,
     user: req.session?.user?.data,
-    isAdmin: ADMIN_CIDS.includes(Number(req.session?.user?.data?.cid)),
+    isAdmin: isAdminUser(req.session?.user?.data?.cid),
     content,
     layoutClass: 'dashboard-full'
   }));
@@ -11553,6 +11743,65 @@ app.post('/admin/api/user-additional-roles/toggle', requireAdmin, async (req, re
   res.json({ ok: true });
 });
 
+/* ===== ADMIN PERMISSION TOGGLE ===== */
+app.post('/admin/api/admin-permissions/toggle', requireAdmin, async (req, res) => {
+  const callerCid = Number(req.session?.user?.data?.cid);
+  // Only super admins can manage admin permissions
+  if (!isSuperAdmin(callerCid)) return res.status(403).json({ error: 'Only the super admin can manage admin permissions' });
+
+  const cid = Number(req.body?.cid);
+  const page = String(req.body?.page || '');
+  const enabled = !!req.body?.enabled;
+
+  if (!cid) return res.status(400).json({ error: 'CID required' });
+  if (!ADMIN_PAGE_KEYS.includes(page)) return res.status(400).json({ error: 'Invalid page key' });
+  // Cannot modify super admin permissions
+  if (isSuperAdmin(cid)) return res.status(403).json({ error: 'Cannot modify super admin permissions' });
+
+  if (enabled) {
+    await prisma.adminPermission.upsert({
+      where: { cid_page: { cid, page } },
+      update: {},
+      create: { cid, page }
+    });
+    if (!adminPermissions.has(cid)) adminPermissions.set(cid, new Set());
+    adminPermissions.get(cid).add(page);
+  } else {
+    await prisma.adminPermission.deleteMany({ where: { cid, page } });
+    const perms = adminPermissions.get(cid);
+    if (perms) { perms.delete(page); if (!perms.size) adminPermissions.delete(cid); }
+  }
+  res.json({ ok: true });
+});
+
+app.post('/admin/api/admin-permissions/toggle-all', requireAdmin, async (req, res) => {
+  const callerCid = Number(req.session?.user?.data?.cid);
+  if (!isSuperAdmin(callerCid)) return res.status(403).json({ error: 'Only the super admin can manage admin permissions' });
+
+  const cid = Number(req.body?.cid);
+  const enabled = !!req.body?.enabled;
+
+  if (!cid) return res.status(400).json({ error: 'CID required' });
+  if (isSuperAdmin(cid)) return res.status(403).json({ error: 'Cannot modify super admin permissions' });
+
+  if (enabled) {
+    // Grant all pages
+    for (const page of ADMIN_PAGE_KEYS) {
+      await prisma.adminPermission.upsert({
+        where: { cid_page: { cid, page } },
+        update: {},
+        create: { cid, page }
+      });
+    }
+    adminPermissions.set(cid, new Set(ADMIN_PAGE_KEYS));
+  } else {
+    // Revoke all pages
+    await prisma.adminPermission.deleteMany({ where: { cid } });
+    adminPermissions.delete(cid);
+  }
+  res.json({ ok: true });
+});
+
 // User redeems a master token
 app.post('/api/master-token/redeem', requireLogin, async (req, res) => {
   const cid = Number(req.session.user.data.cid);
@@ -11682,9 +11931,9 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
   /* ================= RESPONSE ================= */
 
   const cid = req.session?.user?.data?.cid;
-  const isAdminUser = cid && ADMIN_CIDS.includes(Number(cid));
-  const showArrival = isAdminUser || isPageEnabled('arrival-info');
-  const showDeparture = isAdminUser || isPageEnabled('departure-info');
+  const isAdminFlag = isAdminUser(cid);
+  const showArrival = isAdminFlag || isPageEnabled('arrival-info');
+  const showDeparture = isAdminFlag || isPageEnabled('departure-info');
 
   res.json({
     arrival: (showArrival && arrivalLeg) ? {
@@ -12352,7 +12601,7 @@ tobtBookingsByCid[storedCid].add(bookingKey);
 async function requireTeamManager(req, res, next) {
   const cid = Number(req.session?.user?.data?.cid);
   if (!cid) return res.status(403).json({ error: 'Forbidden' });
-  if (ADMIN_CIDS.includes(cid)) return next();
+  if (isAdminUser(cid)) return next();
   const row = await prisma.userAdditionalRole.findUnique({
     where: { cid_role: { cid, role: 'WF_TEAM' } }
   }).catch(() => null);
@@ -12607,7 +12856,7 @@ app.get('/admin', (req, res) => {
 app.get('/team/management', requireLogin, requireTeamMember, async (req, res) => {
   const user = req.session.user.data;
   const cid = Number(user.cid);
-  const isAdmin = ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
 
   // Resolve the viewer's team name
   const wfTeamRow = await prisma.userAdditionalRole.findUnique({
@@ -13176,7 +13425,7 @@ app.get('/team/management', requireLogin, requireTeamMember, async (req, res) =>
 app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
   const user = req.session.user.data;
   const cid = Number(user.cid);
-  const isAdmin = ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
 
   // Resolve the user's team name → all callsigns across every aircraft row
   // that belongs to that team (teams can have multiple OfficialTeam rows,
@@ -13723,7 +13972,7 @@ app.get('/user-management', requireLogin, async (req, res) => {
   const user = req.session.user.data;
   const cid = Number(user.cid);
   if (!isMasterUser(cid)) return res.redirect('/');
-  const isAdmin = ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
 
   // Get this user's divisions
   const staffReqs = await prisma.staffAccessRequest.findMany({
@@ -14082,7 +14331,7 @@ app.post('/api/user-management/revoke-master', requireLogin, async (req, res) =>
 
 app.get('/admin/control-panel', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const isAdmin = isAdminUser(user.cid);
 
   let sceneryCount = 0;
   let docAccessCount = 0;
@@ -14103,85 +14352,23 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
     if (info && info.exists) airacAlert = !info.valid || info.daysLeft <= 2;
   } catch (e) {}
 
-  const sections = [
-    {
-      title: 'WF Schedule / Flow',
-      desc: 'Manage the WorldFlight schedule, departure flows, flow types, dates, and ATC routes.',
-      icon: '🛠️',
-      href: '/wf-schedule',
-      badge: null
-    },
-    {
-      title: 'Official Teams',
-      desc: 'Manage official teams and WF affiliates with active participation toggles.',
-      icon: '👥',
-      href: '/official-teams',
-      badge: null
-    },
-    {
-      title: 'Scenery Submissions',
-      desc: 'Review and approve or reject pending scenery submissions from the community.',
-      icon: '🗺️',
-      href: '/admin/scenery',
-      badge: sceneryCount > 0 ? sceneryCount : null
-    },
-    {
-      title: 'Access Management',
-      desc: 'Manage user permissions, document upload requests, and staff access requests.',
-      icon: '🔑',
-      href: '/admin/access-management',
-      badge: (docAccessCount + staffAccessCount) > 0 ? (docAccessCount + staffAccessCount) : null
-    },
-    {
-      title: 'Visited Airports',
-      desc: 'Manage which airports have been visited by year and ICAO code.',
-      icon: '🌍',
-      href: '/admin/visited-airports',
-      badge: null
-    },
-    {
-      title: 'Suggestions',
-      desc: 'View and manage community airport suggestions.',
-      icon: '💡',
-      href: '/admin/suggestions',
-      badge: null
-    },
-    {
-      title: 'Mailing List',
-      desc: 'Send route announcement emails to subscribers.',
-      icon: '📧',
-      href: '/admin/mailing-list',
-      badge: null
-    },
-    {
-      title: 'Page Visibility',
-      desc: 'Control page visibility for pilots and controllers.',
-      icon: '⚙️',
-      href: '/admin/settings',
-      badge: null
-    },
-    {
-      title: 'AIRAC Data',
-      desc: 'Upload and manage navigation data (waypoints, airways) for route planning.',
-      icon: '🧭',
-      href: '/admin/airac',
-      badge: airacAlert ? '!' : null
-    },
-    {
-      title: 'Test Pilot Data',
-      desc: 'Generate fake pilot departures at WF airports for testing.',
-      icon: '🧪',
-      href: '/admin/test-pilots',
-      badge: null
-    },
-    {
-      title: 'Controller Pack',
-      desc: 'Generate EuroScope controller pack files for WorldFlight airports.',
-      icon: '🎮',
-      href: '/admin/controller-pack',
-      badge: null
-    }
+  const allSections = [
+    { key: 'wf-schedule', title: 'WF Schedule / Flow', desc: 'Manage the WorldFlight schedule, departure flows, flow types, dates, and ATC routes.', icon: '🛠️', href: '/wf-schedule', badge: null },
+    { key: 'official-teams', title: 'Official Teams', desc: 'Manage official teams and WF affiliates with active participation toggles.', icon: '👥', href: '/official-teams', badge: null },
+    { key: 'scenery', title: 'Scenery Submissions', desc: 'Review and approve or reject pending scenery submissions from the community.', icon: '🗺️', href: '/admin/scenery', badge: sceneryCount > 0 ? sceneryCount : null },
+    { key: 'access-management', title: 'Access Management', desc: 'Manage user permissions, document upload requests, and staff access requests.', icon: '🔑', href: '/admin/access-management', badge: (docAccessCount + staffAccessCount) > 0 ? (docAccessCount + staffAccessCount) : null },
+    { key: 'visited-airports', title: 'Visited Airports', desc: 'Manage which airports have been visited by year and ICAO code.', icon: '🌍', href: '/admin/visited-airports', badge: null },
+    { key: 'suggestions', title: 'Suggestions', desc: 'View and manage community airport suggestions.', icon: '💡', href: '/admin/suggestions', badge: null },
+    { key: 'mailing-list', title: 'Mailing List', desc: 'Send route announcement emails to subscribers.', icon: '📧', href: '/admin/mailing-list', badge: null },
+    { key: 'settings', title: 'Page Visibility', desc: 'Control page visibility for pilots and controllers.', icon: '⚙️', href: '/admin/settings', badge: null },
+    { key: 'airac', title: 'AIRAC Data', desc: 'Upload and manage navigation data (waypoints, airways) for route planning.', icon: '🧭', href: '/admin/airac', badge: airacAlert ? '!' : null },
+    { key: 'test-pilots', title: 'Test Pilot Data', desc: 'Generate fake pilot departures at WF airports for testing.', icon: '🧪', href: '/admin/test-pilots', badge: null },
+    { key: 'controller-pack', title: 'Controller Pack', desc: 'Generate EuroScope controller pack files for WorldFlight airports.', icon: '🎮', href: '/admin/controller-pack', badge: null }
   ];
+
+  // Super admins see all sections; granular admins see only their permitted pages
+  const cid = Number(user.cid);
+  const sections = isSuperAdmin(cid) ? allSections : allSections.filter(s => hasAdminPageAccess(cid, s.key));
 
   const sectionCards = sections.map(s => `
     <a href="${s.href}" class="cp-card">
@@ -14302,7 +14489,7 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
   }
 
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const isAdmin = isAdminUser(user.cid);
 
   if (!isAdmin) {
     return res.status(403).send('You do not have Admin access');
@@ -15146,7 +15333,7 @@ if (!req.session.user || !req.session.user.data) {
 }
 
 const user = req.session.user.data;
-const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+const isAdmin = isAdminUser(user.cid);
 
 if (!isAdmin) {
   return res.status(403).send('You do not have Admin access');
@@ -17133,7 +17320,7 @@ document.querySelectorAll('.dep-flow-input').forEach(input => {
 // These values already exist server-side
 const USER_CONTEXT = {
   cid: ${req.session.user?.data?.cid || 'null'},
-  isAdmin: ${ADMIN_CIDS.includes(Number(req.session.user?.data?.cid))},
+  isAdmin: ${isAdminUser(req.session.user?.data?.cid)},
   isATC: ${!!req.session.user?.data?.controller},
 };
 
@@ -18577,7 +18764,7 @@ app.post('/admin/api/airac/upload', requireAdmin, multer({
 /* ===== SETTINGS PAGE ===== */
 app.get('/admin/settings', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const isAdmin = isAdminUser(user.cid);
 
   const pages = [
     { key: 'schedule',        label: 'WF Schedule',         icon: '🏠', desc: 'Main event schedule with slot booking' },
@@ -19057,7 +19244,7 @@ app.post('/admin/api/test-pilots/toggle', requireAdmin, express.json(), async (r
 /* ===== ADMIN: CONTROLLER PACK ===== */
 app.get('/admin/controller-pack', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const isAdmin = isAdminUser(user.cid);
 
   // Get legs from active event schedule
   const legs = adminSheetCache.filter(r => r.from && r.to && r.number).map(r => {
@@ -19448,7 +19635,7 @@ app.post('/admin/api/controller-pack/cleanup', requireAdmin, express.json(), (re
 /* ===== ADMIN: MAILING LIST ===== */
 app.get('/admin/mailing-list', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const isAdmin = isAdminUser(user.cid);
 
   const subscribers = await prisma.mailingListSubscriber.findMany({
     orderBy: { createdAt: 'desc' }
@@ -19727,7 +19914,7 @@ app.get('/departures', async (req, res) => {
 
   const user = req.session.user.data;
   const userCid = Number(user.cid);
-  const isAdmin = ADMIN_CIDS.includes(userCid);
+  const isAdmin = isAdminUser(userCid);
 
   // 2️⃣ ICAO — DEFINE ONCE
   const pageIcao = req.query.icao?.toUpperCase();
@@ -21255,7 +21442,7 @@ app.post('/api/acars/send-route', requireLogin, async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Not logged in' });
 
   // Anyone with edit access (admin or connected as ATC) can send
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const isAdmin = isAdminUser(user.cid);
   const cs = user.callsign || '';
   const isATC = cs.includes('_') && !cs.endsWith('_OBS');
   if (!isAdmin && !isATC) return res.status(403).json({ error: 'Forbidden' });
@@ -21351,7 +21538,7 @@ app.post('/api/tobt/clear-manual', requireLogin, async (req, res) => {
 
 app.post('/api/tobt/remove', async (req, res) => {
   const user = req.session?.user?.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user?.cid));
+  const isAdmin = isAdminUser(user?.cid);
   const isATC = !!user?.controller;
 
   if (!isAdmin && !isATC) {
@@ -21396,7 +21583,7 @@ app.post('/api/tobt/remove', async (req, res) => {
 
 app.get('/airport-portal', (req, res) => {
   const user = req.session?.user?.data || null;
-  const isAdmin = user ? ADMIN_CIDS.includes(Number(user.cid)) : false;
+  const isAdmin = user ? isAdminUser(user.cid) : false;
 
   const content = `
     <section class="card card-full">
@@ -21444,7 +21631,7 @@ app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
   }
 
   const user = req.session.user.data;
-  const isAdmin = ADMIN_CIDS.includes(Number(user.cid));
+  const isAdmin = isAdminUser(user.cid);
 
   
 
@@ -21554,7 +21741,7 @@ app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
 app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = Number(user?.cid) || null;
-  const isAdmin = cid && ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
 
   // Look up user's FIR staff access divisions
   let userDivisions = [];
@@ -22143,7 +22330,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           segs.sort(function(a, b) { return a.staffStartAbs - b.staffStartAbs; });
           var numLanes = assignLanes(segs);
           var rowH = Math.max(24, numLanes * 20 + 4);
-          html += '<div class="tl-row"><div class="tl-row-label">' + fir + '</div><div class="tl-row-bar" style="height:' + rowH + 'px;">';
+          html += '<div class="tl-row"><div class="tl-row-label">' + displayFir(fir) + '</div><div class="tl-row-bar" style="height:' + rowH + 'px;">';
           segs.forEach(function(l) {
             var sClamp = Math.max(l.staffStartAbs, rangeStart);
             var eClamp = Math.min(l.staffEndAbs, rangeEnd);
@@ -22202,6 +22389,12 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
     var activeRegions = new Set();
     var activeDivisions = new Set();
     var btnsPopulated = false;
+
+    // Display helper: strip "K" prefix from US FIR codes (KZNY → ZNY)
+    function displayFir(code) {
+      if (!code) return 'Unknown';
+      return /^K[A-Z]{3}$/.test(code) ? code.slice(1) : code;
+    }
     var summaryLoaded = false;
 
     function disableInactiveBtns() {
@@ -22403,7 +22596,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
         grid.innerHTML = data.firs.map(function(f) {
           var meta = firMeta[f.fir] || {};
           return '<div class="fir-chip" data-fir="' + f.fir + '" data-region="' + (meta.region || f.region || '') + '" data-division="' + (meta.division || f.division || '') + '">'
-            + '<span class="fir-name">' + f.fir + '</span>'
+            + '<span class="fir-name">' + displayFir(f.fir) + '</span>'
             + '<span class="fir-count">' + f.legCount + ' leg' + (f.legCount !== 1 ? 's' : '') + '</span>'
             + '</div>';
         }).join('');
@@ -22448,7 +22641,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
           document.getElementById('firDetailSection').style.display = '';
 
           var divLabel = data.division ? ' <span style="font-size:11px;color:var(--muted);margin-left:4px;">' + data.division + '</span>' : '';
-          document.getElementById('firDetailTitle').innerHTML = '<div class="fir-detail-header-box"><span class="fir-detail-header-name">' + data.fir + '</span><span class="fir-detail-header-label">FIR Airspace</span>' + divLabel + '</div>';
+          document.getElementById('firDetailTitle').innerHTML = '<div class="fir-detail-header-box"><span class="fir-detail-header-name">' + displayFir(data.fir) + '</span><span class="fir-detail-header-label">FIR Airspace</span>' + divLabel + '</div>';
           var metaParts = [];
           metaParts.push(data.legs.length + ' leg' + (data.legs.length !== 1 ? 's' : '') + ' transiting');
           document.getElementById('firDetailMeta').textContent = metaParts.join(' \u2014 ');
@@ -22493,7 +22686,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
             return '<tr>'
               + '<td style="font-weight:600;color:var(--accent);">' + l.wf + '</td>'
-              + '<td><span class="fir-badge">' + data.fir + '</span></td>'
+              + '<td><span class="fir-badge">' + displayFir(data.fir) + '</span></td>'
               + '<td>' + l.from + '</td>'
               + '<td>' + l.to + '</td>'
               + '<td>' + (l.date || '-') + '</td>'
@@ -22518,7 +22711,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
               var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
               var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
               return '<div class="fir-leg-card">'
-                + '<div class="fir-leg-card-header"><span class="wf">' + l.wf + '</span><span class="fir">' + data.fir + '</span></div>'
+                + '<div class="fir-leg-card-header"><span class="wf">' + l.wf + '</span><span class="fir">' + displayFir(data.fir) + '</span></div>'
                 + '<div class="fir-leg-card-route"><span>' + l.from + '</span><span>→</span><span>' + l.to + '</span></div>'
                 + '<div class="fir-leg-card-row">Date: <b>' + (l.date || '-') + '</b></div>'
                 + '<div class="fir-leg-card-row">Staff Window: <b>' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</b></div>'
@@ -22619,12 +22812,12 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             var flowClass = fl.flowType === 'SLOTTED' ? 'slotted' : (fl.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
             var flowLabel = fl.flowType === 'BOOKING_ONLY' ? 'Booking' : (fl.flowType === 'SLOTTED' ? 'Slotted' : 'None');
             html += '<tr class="fir-sub-row">'
-              + '<td><span class="fir-badge fir-badge-link" data-view-fir="' + fl.fir + '" style="cursor:pointer;">' + fl.fir + '</span></td>'
+              + '<td><span class="fir-badge fir-badge-link" data-view-fir="' + fl.fir + '" style="cursor:pointer;">' + displayFir(fl.fir) + '</span></td>'
               + '<td class="staff-window">' + (fl.staffStart && fl.staffEnd ? fl.staffStart + ' \u2013 ' + fl.staffEnd : '-') + '</td>'
               + '<td>' + (fl.staffMins ? fl.staffMins + ' min' : '-') + '</td>'
               + '<td style="white-space:nowrap;display:flex;align-items:center;justify-content:space-between;gap:4px;">'
               + '<span class="flow-badge ' + flowClass + '">' + flowLabel + '</span>'
-              + '<button class="fir-view-btn" data-view-fir="' + fl.fir + '" style="font-size:11px;padding:2px 6px;">Open ' + fl.fir + '</button>'
+              + '<button class="fir-view-btn" data-view-fir="' + fl.fir + '" style="font-size:11px;padding:2px 6px;">Open ' + displayFir(fl.fir) + '</button>'
               + '</td>'
               + '</tr>';
           });
@@ -22648,14 +22841,14 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
             var flowClass = l.flowType === 'SLOTTED' ? 'slotted' : (l.flowType === 'BOOKING_ONLY' ? 'booking' : 'none');
             var flowLabel = l.flowType === 'BOOKING_ONLY' ? 'Booking' : (l.flowType === 'SLOTTED' ? 'Slotted' : 'None');
             return '<div class="fir-leg-card">'
-              + '<div class="fir-leg-card-header"><span class="wf">' + l.wf + '</span><span class="fir">' + (l._fir || '') + '</span></div>'
+              + '<div class="fir-leg-card-header"><span class="wf">' + l.wf + '</span><span class="fir">' + displayFir(l._fir) + '</span></div>'
               + '<div class="fir-leg-card-route"><span>' + l.from + '</span><span>→</span><span>' + l.to + '</span></div>'
               + '<div class="fir-leg-card-row">Date: <b>' + (l.date || '-') + '</b></div>'
               + '<div class="fir-leg-card-row">Staff Window: <b>' + (l.staffStart && l.staffEnd ? l.staffStart + ' – ' + l.staffEnd : '-') + '</b></div>'
               + '<div class="fir-leg-card-row">Duration: <b>' + (l.staffMins ? l.staffMins + ' min' : '-') + '</b></div>'
               + '<div class="fir-leg-card-row">Flow: <b>' + flowLabel + '</b></div>'
               + '<div class="fir-leg-card-actions">'
-              + '<button class="fir-open-btn" data-open-fir="' + (l._fir || '') + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">Open ' + (l._fir || '') + '</button>'
+              + '<button class="fir-open-btn" data-open-fir="' + (l._fir || '') + '" style="flex:1;padding:6px;background:rgba(56,189,248,0.12);color:var(--accent);border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">Open ' + displayFir(l._fir) + '</button>'
               + '</div>'
               + '</div>';
           }).join('');
@@ -22935,7 +23128,7 @@ app.get('/airspace', requirePageEnabled('airspace'), async (req, res) => {
               + '<tr style="border-bottom:1px solid #334155;"><th style="text-align:left;padding:3px 6px;color:#94a3b8;">FIR</th><th style="text-align:left;padding:3px 6px;color:#94a3b8;">Staff Window</th><th style="text-align:left;padding:3px 6px;color:#94a3b8;">Duration</th><th style="text-align:left;padding:3px 6px;color:#94a3b8;">Flow</th></tr>';
             firLegs.forEach(function(fl) {
               html += '<tr>'
-                + '<td style="padding:3px 6px;font-weight:600;">' + fl._fir + '</td>'
+                + '<td style="padding:3px 6px;font-weight:600;">' + displayFir(fl._fir) + '</td>'
                 + '<td style="padding:3px 6px;">' + (fl.staffStart && fl.staffEnd ? fl.staffStart + '\u2013' + fl.staffEnd : '-') + '</td>'
                 + '<td style="padding:3px 6px;">' + (fl.staffMins ? fl.staffMins + 'm' : '-') + '</td>'
                 + '<td style="padding:3px 6px;">' + flowLabel(fl.flowType) + '</td>'
@@ -23183,7 +23376,7 @@ app.get('/book', async (req, res) => {
 
   const user = req.session.user.data;
   const cid = Number(user.cid);
-  const isAdmin = ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
 
   // Team booking context
   let teamBookingContext = null;
@@ -23715,7 +23908,7 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
 
   const user = req.session.user.data;
   const cid = Number(user.cid);
-  const isAdmin = ADMIN_CIDS.includes(cid);
+  const isAdmin = isAdminUser(cid);
 
   // 🔑 bookingKeys, not slotKeys (MODEL 2)
   const myBookingKeys = Array.from(tobtBookingsByCid[cid] || []);

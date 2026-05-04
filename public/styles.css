@@ -224,6 +224,10 @@
   border-bottom-color: rgba(59,130,246,0.2);
 }
 [data-theme="light"] footer { background: var(--bg0); }
+[data-theme="light"] .scenery-table thead th { color: #64748b; border-bottom-color: var(--border); }
+[data-theme="light"] .scenery-table tbody td { color: var(--text); border-bottom-color: var(--border); }
+[data-theme="light"] .scenery-table tbody tr:hover { background: rgba(0,0,0,0.03); }
+[data-theme="light"] .scenery-table a { color: #2563eb; }
 
 /* Search box on map pages (previous destinations) */
 [data-theme="light"] .wf-search-inner {
@@ -262,17 +266,12 @@
   color: #fff !important;
 }
 [data-theme="light"] .wf-airport-text {
-  background: rgba(255,255,255,0.85) !important;
-  border-color: rgba(0,0,0,0.1) !important;
-  color: #334155 !important;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-}
-[data-theme="light"] .wf-airport-text:hover {
-  background: rgba(255,255,255,0.95) !important;
-  border-color: var(--accent) !important;
+  background: #fde047 !important;
+  color: #000 !important;
+  text-shadow: none !important;
 }
 [data-theme="light"] .wf-airport-pin {
-  border-color: rgba(0,0,0,0.2) !important;
+  border-color: #1e293b !important;
 }
 
 /* ===== Theme toggle ===== */
@@ -384,7 +383,7 @@ body.sidebar-collapsed .sidebar { width: var(--sidebar-collapsed); }
 .sidebar{
   position:fixed;
   top:0; left:0;
-  z-index:60;
+  z-index:1200;
   width:var(--sidebar-expanded);
   height:100vh;
   padding:16px;
@@ -4901,12 +4900,12 @@ html[data-map-theme="light"] .ac-label {
 }
 
 .wf-airport-pin {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
-  border: 2px solid rgba(255,255,255,0.85);
-  background: rgba(47, 191, 113, 0.9); /* aligns with WF green styling */
-  box-shadow: 0 0 14px rgba(47, 191, 113, 0.35);
+  border: 2px solid #fff;
+  background: #dc2626;
+  box-shadow: 0 0 6px rgba(0,0,0,0.6), 0 0 12px rgba(220,38,38,0.3);
   transform: translate(-50%, -50%);
   position: absolute;
   left: 0;
@@ -4915,24 +4914,24 @@ html[data-map-theme="light"] .ac-label {
 
 .wf-airport-text {
   position: absolute;
-  left: 12px;
+  left: 14px;
   top: -10px;
-  padding: 4px 8px;
-  border-radius: 10px;
-  background: rgba(0,0,0,0.55);
-  border: 1px solid rgba(255,255,255,0.14);
-  color: rgba(255,255,255,0.92);
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: #fde047;
+  color: #000;
   font-weight: 700;
   letter-spacing: 0.6px;
-  font-size: 12px;
+  font-size: 11px;
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+  text-shadow: none;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.5);
 }
 
 .wf-airport-text:hover {
-  background: rgba(255,255,255,0.08);
-  border-color: rgba(255,255,255,0.22);
+  background: #facc15;
 }
 .map-overlay-controls {
   pointer-events: auto;
@@ -5482,7 +5481,7 @@ html[data-map-theme="light"] .ac-label {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background: #0b0f1a;
+  background: #0a0a0a;
 }
 
 /* ---- Body offset for sidebar */
@@ -5509,9 +5508,15 @@ body.sidebar-collapsed {
    ====================================================== */
 
 .leaflet-container {
-  background: #1b1b1b;
+  background: #0a0a0a;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
 }
+
+/* Tone down Stamen Toner tiles on the world map */
+.wf-map-page .leaflet-tile-pane {
+  filter: brightness(0.55);
+}
+
 
 /* Zoom controls */
 .leaflet-control-zoom {
@@ -5536,6 +5541,52 @@ body.sidebar-collapsed {
   background: rgba(0,0,0,0.6);
   color: #aaa;
   font-size: 11px;
+}
+
+/* ======================================================
+   DIRECTION OF TRAVEL ARROW
+   ====================================================== */
+
+.wf-direction-arrow {
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 14px 20px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.wf-direction-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #fde047;
+}
+
+.wf-direction-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.wf-direction-text {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.wf-direction-svg {
+  width: 80px;
+  height: 18px;
+  flex-shrink: 0;
+  color: #fde047;
 }
 
 /* ======================================================
@@ -5567,26 +5618,39 @@ body.sidebar-collapsed {
 }
 
 .wf-airport-pin {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: #1aff9c;
-  border: 2px solid #0b0f1a;
-  box-shadow: 0 0 6px rgba(26,255,156,0.9);
+  background: #dc2626;
+  border: 2px solid #fff;
+  box-shadow: 0 0 6px rgba(0,0,0,0.6), 0 0 12px rgba(220,38,38,0.3);
   margin: 0 auto;
 }
 
 .wf-airport-text {
-  margin-top: 4px;
-  padding: 2px 6px;
+  position: absolute;
+  padding: 2px 5px;
   font-size: 11px;
-  font-weight: 600;
-  color: #fff;
-  background: rgba(0,0,0,0.75);
-  border-radius: 6px;
+  font-weight: 700;
+  color: #000;
+  background: #fde047;
+  border-radius: 3px;
   white-space: nowrap;
   text-align: center;
+  text-shadow: none;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  /* Default: right */
+  left: 12px;
+  top: -9px;
 }
+.wf-airport-text.wf-label-right       { left: 12px;  top: -9px;  }
+.wf-airport-text.wf-label-left        { right: 12px; left: auto; top: -9px;  }
+.wf-airport-text.wf-label-top         { left: 50%;  top: auto; bottom: 14px; transform: translateX(-50%); }
+.wf-airport-text.wf-label-bottom      { left: 50%;  top: 14px;  transform: translateX(-50%); }
+.wf-airport-text.wf-label-top-right   { left: 10px;  top: auto; bottom: 12px; }
+.wf-airport-text.wf-label-top-left    { right: 10px; left: auto; top: auto; bottom: 12px; }
+.wf-airport-text.wf-label-bottom-right { left: 10px;  top: 12px; }
+.wf-airport-text.wf-label-bottom-left  { right: 10px; left: auto; top: 12px; }
 
 /* ======================================================
    AIRPORT HOVER TOOLTIP
@@ -6733,7 +6797,7 @@ main.dashboard.map-layout {
   .sidebar {
     transform: translateX(-100%);
     width: 260px !important;
-    z-index: 200;
+    z-index: 1200;
     transition: transform .25s ease;
   }
   .sidebar.collapsed {

@@ -285,3 +285,13 @@ model SiteSetting {
   key   String @id
   value String
 }
+
+model AdminPermission {
+  id        Int      @id @default(autoincrement())
+  cid       Int
+  page      String   @db.VarChar(50)
+  createdAt DateTime @default(now())
+
+  @@unique([cid, page])
+  @@index([cid])
+}

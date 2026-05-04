@@ -33,18 +33,45 @@ document.addEventListener('DOMContentLoaded', () => {
   window.__WF_MAP_INITIALIZED__ = true;
 
   /* --------------------------------------------------
-     MAP: single world, no wrap
+     MAP: wrapping tiles, no bounds lock
   -------------------------------------------------- */
   const map = L.map(el, {
     zoomControl: true,
-    maxBounds: [[-85, -180], [85, 180]],
-    maxBoundsViscosity: 1.0
+    worldCopyJump: false,
+    minZoom: 2,
+    maxZoom: 19
   });
 
-  const baseLayer = wfAddTileLayer(map, { maxZoom: 19, noWrap: true });
+  // Stamen Toner Background — black ocean, grey land, no labels (cleaner with our own markers)
+  const tileUrl = 'https://tiles.stadiamaps.com/tiles/stamen_toner_background/{z}/{x}/{y}{r}.png';
+  const baseLayer = L.tileLayer(tileUrl, { maxZoom: 19, noWrap: false }).addTo(map);
+  map._wfBaseTileLayer = baseLayer;
 
-  map.setView([20, 0], 2);
+  map.setView([20, 10], 2);
   requestAnimationFrame(() => map.invalidateSize(true));
+
+  /* --------------------------------------------------
+     Direction of travel key (Leaflet control)
+  -------------------------------------------------- */
+  const DirectionControl = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd: function(map) {
+      const div = L.DomUtil.create('div', 'wf-direction-arrow');
+      div.style.marginTop = '60px';
+      div.style.marginRight = '120px';
+      div.innerHTML =
+        '<div class="wf-direction-label">WorldFlight Route</div>' +
+        '<div class="wf-direction-row">' +
+          '<span class="wf-direction-text">Direction of travel</span>' +
+          '<svg class="wf-direction-svg" viewBox="0 0 80 18" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+            '<line x1="0" y1="9" x2="64" y2="9" stroke="currentColor" stroke-width="3"/>' +
+            '<polygon points="64,1 80,9 64,17" fill="currentColor"/>' +
+          '</svg>' +
+        '</div>';
+      return div;
+    }
+  });
+  map.addControl(new DirectionControl());
 
   /* --------------------------------------------------
      Layers
@@ -104,12 +131,15 @@ document.addEventListener('DOMContentLoaded', () => {
   /* --------------------------------------------------
      Airport icon + hover popup
   -------------------------------------------------- */
-  function airportIcon(label) {
+  function airportIcon(label, placement) {
+    // placement: 'right' (default), 'left', 'top', 'bottom',
+    //            'top-right', 'top-left', 'bottom-right', 'bottom-left'
+    const p = placement || 'right';
     return L.divIcon({
       className: 'wf-airport-label',
       html: `
         <div class="wf-airport-pin"></div>
-        <div class="wf-airport-text">${label}</div>`,
+        <div class="wf-airport-text wf-label-${p}">${label}</div>`,
       iconSize: [1, 1]
     });
   }
@@ -165,31 +195,92 @@ document.addEventListener('DOMContentLoaded', () => {
   /* --------------------------------------------------
      Utilities
   -------------------------------------------------- */
-  function splitAtDateline(points) {
-    // 🔑 straight airport-to-airport line: never split
-    if (points.length === 2) {
-      return [points];
+
+  /**
+   * Unwrap the entire route so longitudes flow continuously.
+   * The WF route goes westward from Sydney (151E) around the world
+   * and returns to Sydney. By letting lon go below -180 (or above 180)
+   * we get a single continuous path — Australia appears on both edges.
+   *
+   * Strategy: walk the wfPath in order; for each airport, pick the
+   * longitude copy closest to the previous airport. Same for polyline
+   * waypoints within each leg.
+   */
+  function unwrapRoute(data) {
+    const airports = data.airports || {};
+    const wfPath = data.wfPath || [];
+    const polylines = data.atcPolylines || [];
+
+    if (!wfPath.length) return { airportPositions: {}, polylines: [] };
+
+    // Build continuous airport longitude chain
+    const airportPositions = {}; // icao -> { lat, lon } (unwrapped)
+    let prevLon = null;
+
+    for (const icao of wfPath) {
+      const a = airports[icao];
+      if (!a) continue;
+
+      let lon = a.lon;
+      if (prevLon !== null) {
+        // Pick the copy of lon closest to prevLon
+        while (lon - prevLon > 180) lon -= 360;
+        while (lon - prevLon < -180) lon += 360;
+      }
+
+      // Only set the position the first time we see the airport in the path,
+      // UNLESS this is a later visit (like Sydney appearing at start AND end).
+      // For the first occurrence, store it. For subsequent occurrences in the
+      // path, we need separate positions — so track by path index.
+      airportPositions[icao] = { lat: a.lat, lon };
+      prevLon = lon;
     }
 
-    if (points.length < 2) return [];
-
-    const segs = [];
-    let cur = [points[0]];
-
-    for (let i = 1; i < points.length; i++) {
-      const a = points[i - 1];
-      const b = points[i];
-
-      if (Math.abs(b[1] - a[1]) > 180) {
-        if (cur.length > 1) segs.push(cur);
-        cur = [b];
-      } else {
-        cur.push(b);
+    // For airports that appear at both start and end (like YSSY),
+    // we need TWO positions. Track the final one separately.
+    const endPositions = {};
+    if (wfPath.length > 1 && wfPath[0] === wfPath[wfPath.length - 1]) {
+      const icao = wfPath[wfPath.length - 1];
+      const a = airports[icao];
+      if (a) {
+        let lon = a.lon;
+        // Use the second-to-last airport's lon as anchor
+        const prev = wfPath[wfPath.length - 2];
+        const prevPos = airportPositions[prev];
+        if (prevPos) {
+          while (lon - prevPos.lon > 180) lon -= 360;
+          while (lon - prevPos.lon < -180) lon += 360;
+        }
+        endPositions[icao] = { lat: a.lat, lon };
       }
     }
 
-    if (cur.length > 1) segs.push(cur);
-    return segs;
+    // Unwrap polyline points: for each leg, anchor the start to the
+    // departure airport's unwrapped lon, then flow continuously
+    const unwrappedPolylines = polylines.map((leg, legIdx) => {
+      const depPos = airportPositions[leg.from];
+      const pts = (leg.points || [])
+        .filter(p => p?.lat != null && p?.lon != null)
+        .map(p => ({ lat: Number(p.lat), lon: Number(p.lon) }));
+
+      if (pts.length === 0) return { ...leg, unwrappedPoints: [] };
+
+      // Anchor first point to departure airport
+      let anchorLon = depPos ? depPos.lon : pts[0].lon;
+      const unwrapped = [];
+
+      for (let i = 0; i < pts.length; i++) {
+        let lon = pts[i].lon;
+        const ref = i === 0 ? anchorLon : unwrapped[i - 1][1];
+        while (lon - ref > 180) lon -= 360;
+        while (lon - ref < -180) lon += 360;
+        unwrapped.push([pts[i].lat, lon]);
+      }
+
+      return { ...leg, unwrappedPoints: unwrapped };
+    });
+
+    return { airportPositions, endPositions, polylines: unwrappedPolylines };
   }
 
   function clearLeafletLayers(targetMap) {
@@ -208,49 +299,159 @@ document.addEventListener('DOMContentLoaded', () => {
     const localAtc = L.layerGroup().addTo(targetMap);
     const localAirports = L.layerGroup().addTo(targetMap);
 
+    const { airportPositions, endPositions, polylines } = unwrapRoute(data);
     const airports = data.airports || {};
     const wfPath = data.wfPath || [];
-    const booking = data.bookingLinks || {};
     const bounds = [];
 
-    wfPath.forEach(icao => {
+    const routeColor = '#ffffff';
+
+    // World copy offsets: render the route on every visible copy of the map
+    const WORLD_OFFSETS = [-720, -360, 0, 360, 720];
+
+    /* ---------- Routes ---------- */
+    polylines.forEach((leg) => {
+      const basePts = leg.unwrappedPoints || [];
+      if (basePts.length < 2) return;
+
+      const popupHtml =
+        `<strong style="font-size:13px;">${leg.from} → ${leg.to}</strong><br>
+         <div style="margin-top:6px;font-family:JetBrains Mono,monospace;font-size:12px;white-space:pre-wrap;">
+           ${(leg.atc_route || '').replace(/</g, '&lt;')}
+         </div>`;
+
+      WORLD_OFFSETS.forEach(offset => {
+        const pts = basePts.map(p => [p[0], p[1] + offset]);
+
+        /* Glow layer underneath */
+        L.polyline(pts, {
+          color: routeColor,
+          weight: 10,
+          opacity: 0.12,
+          noClip: true,
+          interactive: false,
+          lineCap: 'round', lineJoin: 'round'
+        }).addTo(localAtc);
+
+        /* Main route line */
+        const line = L.polyline(pts, {
+          color: routeColor,
+          weight: 4.5,
+          opacity: 1,
+          noClip: true,
+          lineCap: 'round', lineJoin: 'round'
+        }).addTo(localAtc).bindPopup(popupHtml);
+
+        /* Direction arrows */
+        if (L.polylineDecorator) {
+          L.polylineDecorator(line, {
+            patterns: [{
+              offset: '50%',
+              repeat: 0,
+              symbol: L.Symbol.arrowHead({
+                pixelSize: 10,
+                polygon: false,
+                pathOptions: { color: routeColor, weight: 2, opacity: 0.7 }
+              })
+            }]
+          }).addTo(localAtc);
+        }
+      });
+    });
+
+    /* ---------- Airports (on top of routes) ---------- */
+
+    // Collect unique airport positions first for declutter
+    const airportList = [];
+    const placed = new Set();
+    wfPath.forEach((icao, idx) => {
       const a = airports[icao];
       if (!a) return;
 
-      const ll = [a.lat, a.lon];
-      bounds.push(ll);
+      const isEnd = idx === wfPath.length - 1 && endPositions[icao];
+      const pos = isEnd ? endPositions[icao] : airportPositions[icao];
+      if (!pos) return;
 
-      L.marker(ll, { icon: airportIcon(icao) })
-  .addTo(localAirports)
-  .bindPopup(
-    airportPopupHtml(icao, a),
-    {
-      closeButton: true,
-      autoPan: true,
-      maxWidth: 320,
-      className: 'wf-airport-leaflet-popup'
-    }
-  );
+      const key = isEnd ? icao + ':end' : icao;
+      if (placed.has(key)) return;
+      placed.add(key);
 
+      const displayLabel = a.shortName ? `${a.shortName} ${icao}` : icao;
+      airportList.push({ icao, pos, a, displayLabel });
+      bounds.push([pos.lat, pos.lon]);
     });
 
-    (data.atcPolylines || []).forEach(leg => {
-      const pts = (leg.points || [])
-        .filter(p => p?.lat != null && p?.lon != null)
-        .map(p => [Number(p.lat), Number(p.lon)]);
+    // Declutter: decide label placement for each airport to minimise overlaps.
+    // Estimate label bounding boxes in pixel space, try 8 directions per label.
+    const PLACEMENTS = ['right', 'left', 'top', 'bottom', 'top-right', 'top-left', 'bottom-right', 'bottom-left'];
+    // Approximate label size in pixels
+    const LW = 95, LH = 18, PIN = 8;
+    // Offset from pin centre for each placement
+    const OFFSETS = {
+      'right':        { x: PIN,      y: -LH / 2 },
+      'left':         { x: -LW - PIN, y: -LH / 2 },
+      'top':          { x: -LW / 2,  y: -LH - PIN },
+      'bottom':       { x: -LW / 2,  y: PIN },
+      'top-right':    { x: PIN,      y: -LH - PIN },
+      'top-left':     { x: -LW - PIN, y: -LH - PIN },
+      'bottom-right': { x: PIN,      y: PIN },
+      'bottom-left':  { x: -LW - PIN, y: PIN },
+    };
 
-      splitAtDateline(pts).forEach(seg => {
-        L.polyline(seg, {
-          weight: 4,
-          opacity: 0.95,
-          noClip: true
-        })
-          .addTo(localAtc)
+    function getPixelPos(lat, lon) {
+      return targetMap.latLngToContainerPoint(L.latLng(lat, lon));
+    }
+
+    function labelRect(px, placement) {
+      const o = OFFSETS[placement];
+      return { x: px.x + o.x, y: px.y + o.y, w: LW, h: LH };
+    }
+
+    function rectsOverlap(a, b) {
+      return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
+    }
+
+    // Compute pixel positions and choose placements
+    const pixelPositions = airportList.map(ap => getPixelPos(ap.pos.lat, ap.pos.lon));
+    const chosenPlacements = [];
+    const placedRects = [];
+
+    airportList.forEach((ap, i) => {
+      const px = pixelPositions[i];
+      let best = 'right';
+      let bestOverlaps = Infinity;
+
+      for (const p of PLACEMENTS) {
+        const rect = labelRect(px, p);
+        let overlaps = 0;
+        for (const pr of placedRects) {
+          if (rectsOverlap(rect, pr)) overlaps++;
+        }
+        if (overlaps < bestOverlaps) {
+          bestOverlaps = overlaps;
+          best = p;
+          if (overlaps === 0) break;
+        }
+      }
+
+      chosenPlacements.push(best);
+      placedRects.push(labelRect(px, best));
+    });
+
+    // Place markers with chosen label placements
+    airportList.forEach((ap, i) => {
+      WORLD_OFFSETS.forEach(offset => {
+        const ll = [ap.pos.lat, ap.pos.lon + offset];
+        L.marker(ll, { icon: airportIcon(ap.displayLabel, chosenPlacements[i]) })
+          .addTo(localAirports)
           .bindPopup(
-            `<strong>${leg.from} → ${leg.to}</strong><br>
-             <div style="margin-top:6px;font-family:JetBrains Mono,monospace;font-size:12px;white-space:pre-wrap;">
-               ${(leg.atc_route || '').replace(/</g, '&lt;')}
-             </div>`
+            airportPopupHtml(ap.icao, ap.a),
+            {
+              closeButton: true,
+              autoPan: true,
+              maxWidth: 320,
+              className: 'wf-airport-leaflet-popup'
+            }
           );
       });
     });
@@ -263,16 +464,12 @@ document.addEventListener('DOMContentLoaded', () => {
       targetMap.fitBounds(bounds, {
         paddingTopLeft: [sidebarWidth + 24, 24],
         paddingBottomRight: [24, 24],
-        maxZoom: 5,
+        maxZoom: 4,
         animate: false
       });
 
       requestAnimationFrame(() => {
-        if (targetMap.getContainer().id === 'wfWorldMap') {
-          targetMap.invalidateSize(true);
-        } else {
-          // intentionally blank (original behavior)
-        }
+        targetMap.invalidateSize(true);
       });
     }
   }
@@ -291,41 +488,9 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('sidebar:toggle', () => {
     if (!map || !lastData) return;
 
-    const bounds = [];
-    const airports = lastData.airports || {};
-
-    Object.values(airports).forEach(a => {
-      if (a.lat && a.lon) bounds.push([a.lat, a.lon]);
-    });
-
-    if (bounds.length) {
-      const sidebarWidth = document.body.classList.contains('sidebar-collapsed')
-        ? 72
-        : 240;
-
-      const topbarHeight = 64;
-
-      map.fitBounds(bounds, {
-        paddingTopLeft: [
-          sidebarWidth + 24,  // LEFT padding accounts for sidebar
-          topbarHeight + 24   // TOP padding accounts for header
-        ],
-        paddingBottomRight: [24, 24],
-        maxZoom: 4,
-        animate: false
-      });
-
-      map.once('moveend', () => {
-        if (map.getZoom() < 2.5) {
-          map.setZoom(2.5, { animate: false });
-        }
-      });
-
-      // FIXED: targetMap was undefined here; use map (the actual map instance)
-      requestAnimationFrame(() => {
-        map.invalidateSize(true);
-      });
-    }
+    // Re-render to recalculate bounds with new sidebar width
+    clearLeafletLayers(map);
+    renderData(map, lastData);
   });
 
   /* --------------------------------------------------
@@ -418,8 +583,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setTimeout(() => {
       if (!modalMap) {
-        modalMap = L.map('wfMapModalMap', { zoomControl: true });
-        modalMap._wfBaseTileLayer = wfAddTileLayer(modalMap, { maxZoom: 19, noWrap: true });
+        modalMap = L.map('wfMapModalMap', { zoomControl: true, worldCopyJump: false });
+        modalMap._wfBaseTileLayer = L.tileLayer(tileUrl, { maxZoom: 19, noWrap: false }).addTo(modalMap);
       }
 
       clearLeafletLayers(modalMap);
