@@ -6855,6 +6855,7 @@ main.dashboard.map-layout {
     padding: 16px;
     max-width: 100vw;
     box-sizing: border-box;
+    overflow-x: hidden;
   }
 
   .card, .card-full,
@@ -6863,6 +6864,8 @@ main.dashboard.map-layout {
     border-radius: 10px;
     max-width: 100% !important;
     box-sizing: border-box;
+    overflow: hidden;
+    min-width: 0;
   }
   .icao-map {
     width: 100% !important;
@@ -6924,7 +6927,8 @@ main.dashboard.map-layout {
 
   /* Grids to single column */
   .suggest-layout,
-  .suggestions-view {
+  .suggestions-view,
+  .suggestions-grid {
     grid-template-columns: 1fr !important;
   }
 

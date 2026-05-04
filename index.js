@@ -2729,7 +2729,7 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
       <button id="deleteAllSuggestionsBtn" class="action-btn" style="background:var(--danger);color:#fff;">Delete All Suggestions</button>
     </div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px;">
+    <div class="suggestions-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px;">
       <section class="card">
         <h2 style="color:#4ade80;">Top 20 Suggested to Visit</h2>
         <div class="top-list">
@@ -3172,14 +3172,15 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
       .top-list::-webkit-scrollbar-track { background: transparent; }
       .top-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
       .top-row {
-        display: flex; align-items: center; gap: 10px;
+        display: flex; align-items: center; gap: 8px;
         padding: 6px 10px; border-radius: 6px;
         background: rgba(255,255,255,0.02);
         border: 1px solid var(--border);
+        min-width: 0;
       }
       .top-row:hover { background: rgba(255,255,255,0.04); }
-      .top-pos { font-size: 13px; font-weight: 700; color: var(--muted2); min-width: 30px; }
-      .top-bar-wrap { flex: 1; height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden; }
+      .top-pos { font-size: 13px; font-weight: 700; color: var(--muted2); min-width: 28px; flex-shrink: 0; }
+      .top-bar-wrap { flex: 1; min-width: 0; height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden; }
       .top-bar { height: 100%; border-radius: 3px; }
       .top-bar.visit { background: #4ade80; }
       .top-bar.avoid { background: #f87171; }
