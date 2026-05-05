@@ -7058,39 +7058,81 @@ if (process.env.DEV_MODE === 'true') {
     }
 
     // Show user picker
-    const buttons = DEV_USERS.map(u => `
+    const roleColors = { 'Super Admin': '#22c55e', 'Normal User': '#94a3b8' };
+    const roleIcons = { 'Super Admin': '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>', 'Normal User': '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' };
+    const buttons = DEV_USERS.map(u => {
+      const role = u._label.split(' — ')[1];
+      const color = roleColors[role] || '#60a5fa';
+      const icon = roleIcons[role] || '';
+      return `
       <a href="/dev-login?cid=${u.cid}&next=${encodeURIComponent(next)}" class="dev-user-btn">
-        <span class="dev-user-name">${u.personal.name_full}</span>
-        <span class="dev-user-cid">${u.cid}</span>
-        <span class="dev-user-role">${u._label.split(' — ')[1]}</span>
-      </a>
-    `).join('');
+        <div class="dev-user-avatar" style="color:${color}">${icon}</div>
+        <div class="dev-user-info">
+          <span class="dev-user-name">${u.personal.name_full}</span>
+          <span class="dev-user-cid">${u.cid}</span>
+        </div>
+        <span class="dev-user-role" style="color:${color}">${role}</span>
+      </a>`;
+    }).join('');
 
     res.send(`<!DOCTYPE html>
 <html><head>
   <title>Dev Login</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { min-height:100vh; display:flex; align-items:center; justify-content:center; background:#0f172a; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
-    .picker { text-align:center; }
-    .picker h1 { color:#e5e7eb; font-size:20px; margin-bottom:8px; }
-    .picker p { color:#94a3b8; font-size:13px; margin-bottom:24px; }
-    .dev-user-btn {
-      display:flex; flex-direction:column; align-items:center; gap:4px;
-      padding:20px 32px; margin:12px 0; border-radius:10px;
-      background:#1e293b; border:1px solid #334155; color:#e5e7eb;
-      text-decoration:none; transition:all 0.15s;
+    body {
+      min-height:100vh; display:flex; align-items:center; justify-content:center;
+      background:#0a0f1a; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      background-image: radial-gradient(ellipse at 50% 0%, rgba(56,189,248,0.08) 0%, transparent 60%);
     }
-    .dev-user-btn:hover { background:#334155; border-color:#60a5fa; transform:translateY(-1px); }
-    .dev-user-name { font-size:16px; font-weight:600; }
-    .dev-user-cid { font-size:12px; color:#94a3b8; font-family:monospace; }
-    .dev-user-role { font-size:11px; color:#60a5fa; font-weight:500; text-transform:uppercase; letter-spacing:0.5px; }
+    .picker { text-align:center; width:340px; }
+    .picker-header { margin-bottom:32px; }
+    .picker-logo {
+      width:48px; height:48px; margin:0 auto 16px; border-radius:12px;
+      background:linear-gradient(135deg, #3b82f6, #8b5cf6);
+      display:flex; align-items:center; justify-content:center;
+      box-shadow: 0 4px 20px rgba(59,130,246,0.3);
+    }
+    .picker-logo svg { color:#fff; }
+    .picker h1 { color:#f1f5f9; font-size:22px; font-weight:700; margin-bottom:6px; }
+    .picker p { color:#64748b; font-size:13px; }
+    .dev-users { display:flex; flex-direction:column; gap:10px; }
+    .dev-user-btn {
+      display:flex; align-items:center; gap:14px;
+      padding:16px 20px; border-radius:12px;
+      background:rgba(30,41,59,0.6); border:1px solid rgba(51,65,85,0.5);
+      color:#e5e7eb; text-decoration:none; transition:all 0.2s;
+      backdrop-filter:blur(8px); text-align:left;
+    }
+    .dev-user-btn:hover {
+      background:rgba(51,65,85,0.6); border-color:rgba(96,165,250,0.4);
+      transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3);
+    }
+    .dev-user-avatar {
+      width:40px; height:40px; border-radius:10px;
+      background:rgba(255,255,255,0.05); display:flex; align-items:center;
+      justify-content:center; flex-shrink:0;
+    }
+    .dev-user-info { flex:1; display:flex; flex-direction:column; gap:2px; }
+    .dev-user-name { font-size:15px; font-weight:600; color:#f1f5f9; }
+    .dev-user-cid { font-size:12px; color:#64748b; font-family:'SF Mono',monospace; }
+    .dev-user-role {
+      font-size:10px; font-weight:600; text-transform:uppercase;
+      letter-spacing:0.8px; flex-shrink:0;
+    }
   </style>
 </head><body>
   <div class="picker">
-    <h1>Dev Login</h1>
-    <p>Select a user to log in as</p>
-    ${buttons}
+    <div class="picker-header">
+      <div class="picker-logo">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      </div>
+      <h1>Dev Login</h1>
+      <p>Select a user to continue</p>
+    </div>
+    <div class="dev-users">
+      ${buttons}
+    </div>
   </div>
 </body></html>`);
   });

@@ -186,7 +186,8 @@
       "Bash(DATABASE_URL=\"file:./prisma/dev.db\" npx prisma studio --port 5556)",
       "Bash(sqlite3 c:/dev/WorldFlight-Planning/prisma/dev.db \".tables\")",
       "Bash(node -e \"const Database = require\\('better-sqlite3'\\); console.log\\('found'\\)\")",
-      "Bash(node -e \"const s = require\\('sql.js'\\); console.log\\('found sqljs'\\)\")"
+      "Bash(node -e \"const s = require\\('sql.js'\\); console.log\\('found sqljs'\\)\")",
+      "Bash(grep -E \"\\\\.js$|\\\\.css$|\\\\.html$\")"
     ]
   }
 }

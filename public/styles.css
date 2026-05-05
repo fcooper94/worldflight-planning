@@ -270,8 +270,15 @@
   color: #000 !important;
   text-shadow: none !important;
 }
+[data-theme="light"] .wf-airport-text.wf-start-end {
+  background: #3b82f6 !important;
+  color: #fff !important;
+}
 [data-theme="light"] .wf-airport-pin {
   border-color: #1e293b !important;
+}
+[data-theme="light"] .wf-airport-pin.wf-start-end {
+  background: #3b82f6 !important;
 }
 
 /* ===== Theme toggle ===== */
@@ -4933,6 +4940,36 @@ html[data-map-theme="light"] .ac-label {
 .wf-airport-text:hover {
   background: #facc15;
 }
+
+/* Start/End airport styling */
+.wf-airport-pin.wf-start-end {
+  width: 16px;
+  height: 16px;
+  background: #3b82f6;
+  border: 2px solid #fff;
+  box-shadow: 0 0 8px rgba(0,0,0,0.6), 0 0 16px rgba(59,130,246,0.5);
+}
+
+.wf-airport-text.wf-start-end {
+  background: #3b82f6;
+  color: #fff;
+  font-size: 12px;
+  padding: 3px 7px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+}
+
+.wf-airport-text.wf-start-end:hover {
+  background: #2563eb;
+}
+
+.wf-airport-badge {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  opacity: 0.9;
+  margin-top: 1px;
+}
 .map-overlay-controls {
   pointer-events: auto;
   z-index: 100;
@@ -5651,6 +5688,15 @@ body.sidebar-collapsed {
 .wf-airport-text.wf-label-top-left    { right: 10px; left: auto; top: auto; bottom: 12px; }
 .wf-airport-text.wf-label-bottom-right { left: 10px;  top: 12px; }
 .wf-airport-text.wf-label-bottom-left  { right: 10px; left: auto; top: 12px; }
+
+.wf-airport-text.wf-start-end {
+  background: #3b82f6;
+  color: #fff;
+  font-size: 12px;
+  padding: 3px 7px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+}
+.wf-airport-text.wf-start-end:hover { background: #2563eb; }
 
 /* ======================================================
    AIRPORT HOVER TOOLTIP

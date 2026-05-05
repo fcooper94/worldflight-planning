@@ -131,15 +131,17 @@ document.addEventListener('DOMContentLoaded', () => {
   /* --------------------------------------------------
      Airport icon + hover popup
   -------------------------------------------------- */
-  function airportIcon(label, placement) {
+  function airportIcon(label, placement, extra) {
     // placement: 'right' (default), 'left', 'top', 'bottom',
     //            'top-right', 'top-left', 'bottom-right', 'bottom-left'
     const p = placement || 'right';
+    const extraClass = extra?.isStartEnd ? ' wf-start-end' : '';
+    const badge = extra?.badge ? `<div class="wf-airport-badge">${extra.badge}</div>` : '';
     return L.divIcon({
       className: 'wf-airport-label',
       html: `
-        <div class="wf-airport-pin"></div>
-        <div class="wf-airport-text wf-label-${p}">${label}</div>`,
+        <div class="wf-airport-pin${extraClass}"></div>
+        <div class="wf-airport-text wf-label-${p}${extraClass}">${label}${badge}</div>`,
       iconSize: [1, 1]
     });
   }
@@ -364,6 +366,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Collect unique airport positions first for declutter
     const airportList = [];
     const placed = new Set();
+    const startIcao = wfPath[0];
+    const endIcao = wfPath[wfPath.length - 1];
+    const isRoundTrip = startIcao === endIcao;
+
     wfPath.forEach((icao, idx) => {
       const a = airports[icao];
       if (!a) return;
@@ -377,7 +383,16 @@ document.addEventListener('DOMContentLoaded', () => {
       placed.add(key);
 
       const displayLabel = a.shortName ? `${a.shortName} ${icao}` : icao;
-      airportList.push({ icao, pos, a, displayLabel });
+      let extra = null;
+
+      if (idx === 0) {
+        extra = { isStartEnd: true, badge: 'START \u2022 31 Oct' };
+      }
+      if (isEnd) {
+        extra = { isStartEnd: true, badge: 'FINISH \u2022 7 Nov' };
+      }
+
+      airportList.push({ icao, pos, a, displayLabel, extra });
       bounds.push([pos.lat, pos.lon]);
     });
 
@@ -442,7 +457,7 @@ document.addEventListener('DOMContentLoaded', () => {
     airportList.forEach((ap, i) => {
       WORLD_OFFSETS.forEach(offset => {
         const ll = [ap.pos.lat, ap.pos.lon + offset];
-        L.marker(ll, { icon: airportIcon(ap.displayLabel, chosenPlacements[i]) })
+        L.marker(ll, { icon: airportIcon(ap.displayLabel, chosenPlacements[i], ap.extra) })
           .addTo(localAirports)
           .bindPopup(
             airportPopupHtml(ap.icao, ap.a),
