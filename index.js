@@ -2725,9 +2725,9 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
   }
 
   const content = `
-    <div style="margin-bottom:24px;">
+    ${isSuperAdmin(Number(user.cid)) ? `<div style="margin-bottom:24px;">
       <button id="deleteAllSuggestionsBtn" class="action-btn" style="background:var(--danger);color:#fff;">Delete All Suggestions</button>
-    </div>
+    </div>` : ''}
 
     <div class="suggestions-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px;">
       <section class="card">
@@ -3293,7 +3293,8 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
         input.addEventListener('input', apply);
       })();
 
-      document.getElementById('deleteAllSuggestionsBtn').addEventListener('click', function() {
+      var deleteAllBtn = document.getElementById('deleteAllSuggestionsBtn');
+      if (deleteAllBtn) deleteAllBtn.addEventListener('click', function() {
         openConfirmModal({
           title: 'Delete All Suggestions',
           message: 'This will permanently delete all suggestions. This cannot be undone.'
