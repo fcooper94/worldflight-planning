@@ -180,7 +180,13 @@
       "Bash(npm uninstall:*)",
       "Bash(node sync-prod.mjs)",
       "Bash(node _check-prod.mjs)",
-      "Bash(grep -E \"\\\\.\\(js|json\\)$\")"
+      "Bash(grep -E \"\\\\.\\(js|json\\)$\")",
+      "Read(//tmp/**)",
+      "Bash(DATABASE_URL=\"file:./prisma/dev.db\" npx prisma db push --accept-data-loss)",
+      "Bash(DATABASE_URL=\"file:./prisma/dev.db\" npx prisma studio --port 5556)",
+      "Bash(sqlite3 c:/dev/WorldFlight-Planning/prisma/dev.db \".tables\")",
+      "Bash(node -e \"const Database = require\\('better-sqlite3'\\); console.log\\('found'\\)\")",
+      "Bash(node -e \"const s = require\\('sql.js'\\); console.log\\('found sqljs'\\)\")"
     ]
   }
 }

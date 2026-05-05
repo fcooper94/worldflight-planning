@@ -7016,27 +7016,83 @@ app.get('/api/dev-mode', (req, res) => {
 
 // ===== DEV LOGIN (only when DEV_MODE=true) =====
 if (process.env.DEV_MODE === 'true') {
+  const DEV_USERS = [
+    {
+      cid: 1303570,
+      personal: { name_first: 'Fraser', name_last: 'Cooper', name_full: 'Fraser Cooper' },
+      vatsim: {
+        rating: { id: 1, short: 'OBS', long: 'Observer' },
+        pilotrating: { id: 0, short: 'NEW', long: 'Basic Member' },
+        division: { id: 'GBR', name: 'United Kingdom' },
+        region: { id: 'EMEA', name: 'Europe, Middle East and Africa' }
+      },
+      oauth: { token_valid: true },
+      _label: 'Fraser Cooper — Super Admin'
+    },
+    {
+      cid: 1281926,
+      personal: { name_first: 'Matt', name_last: 'Collier', name_full: 'Matt Collier' },
+      vatsim: {
+        rating: { id: 3, short: 'S2', long: 'Tower Controller' },
+        pilotrating: { id: 0, short: 'NEW', long: 'Basic Member' },
+        division: { id: 'GBR', name: 'United Kingdom' },
+        region: { id: 'EMEA', name: 'Europe, Middle East and Africa' }
+      },
+      oauth: { token_valid: true },
+      _label: 'Matt Collier — Normal User'
+    }
+  ];
+
   app.get('/dev-login', requireSiteGate, (req, res) => {
-    req.session.user = {
-      data: {
-        cid: 1303570,
-        personal: {
-          name_first: 'Fraser',
-          name_last: 'Cooper',
-          name_full: 'Fraser Cooper'
-        },
-        vatsim: {
-          rating: { id: 1, short: 'OBS', long: 'Observer' },
-          pilotrating: { id: 0, short: 'NEW', long: 'Basic Member' },
-          division: { id: 'GBR', name: 'United Kingdom' },
-          region: { id: 'EMEA', name: 'Europe, Middle East and Africa' }
-        },
-        oauth: { token_valid: true }
+    const next = req.query.next || '/';
+
+    // If a user was selected via query param, log them in
+    const selectedCid = req.query.cid;
+    if (selectedCid) {
+      const user = DEV_USERS.find(u => u.cid === Number(selectedCid));
+      if (user) {
+        const { _label, ...data } = user;
+        req.session.user = { data };
+        return req.session.save(() => res.redirect(next));
       }
-    };
-    req.session.save(() => {
-      res.redirect(req.query.next || '/');
-    });
+    }
+
+    // Show user picker
+    const buttons = DEV_USERS.map(u => `
+      <a href="/dev-login?cid=${u.cid}&next=${encodeURIComponent(next)}" class="dev-user-btn">
+        <span class="dev-user-name">${u.personal.name_full}</span>
+        <span class="dev-user-cid">${u.cid}</span>
+        <span class="dev-user-role">${u._label.split(' — ')[1]}</span>
+      </a>
+    `).join('');
+
+    res.send(`<!DOCTYPE html>
+<html><head>
+  <title>Dev Login</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { min-height:100vh; display:flex; align-items:center; justify-content:center; background:#0f172a; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+    .picker { text-align:center; }
+    .picker h1 { color:#e5e7eb; font-size:20px; margin-bottom:8px; }
+    .picker p { color:#94a3b8; font-size:13px; margin-bottom:24px; }
+    .dev-user-btn {
+      display:flex; flex-direction:column; align-items:center; gap:4px;
+      padding:20px 32px; margin:12px 0; border-radius:10px;
+      background:#1e293b; border:1px solid #334155; color:#e5e7eb;
+      text-decoration:none; transition:all 0.15s;
+    }
+    .dev-user-btn:hover { background:#334155; border-color:#60a5fa; transform:translateY(-1px); }
+    .dev-user-name { font-size:16px; font-weight:600; }
+    .dev-user-cid { font-size:12px; color:#94a3b8; font-family:monospace; }
+    .dev-user-role { font-size:11px; color:#60a5fa; font-weight:500; text-transform:uppercase; letter-spacing:0.5px; }
+  </style>
+</head><body>
+  <div class="picker">
+    <h1>Dev Login</h1>
+    <p>Select a user to log in as</p>
+    ${buttons}
+  </div>
+</body></html>`);
   });
   console.log('[DEV] Dev login available at /dev-login');
 }
@@ -8167,153 +8223,188 @@ app.post('/admin/api/scenery/:id/reject', requireAdmin, async (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/admin/api/scenery/:id/edit', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { sim, name, developer, store, url, type } = req.body;
+    if (!sim || !name || !url || !type) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    await prisma.airportScenery.update({
+      where: { id },
+      data: { sim, name, developer: developer || null, store: store || null, url, type }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[SCENERY EDIT]', err);
+    res.status(500).json({ error: 'Failed to update scenery' });
+  }
+});
+
 app.get('/admin/documentation-access', requireAdmin, (req, res) => {
   res.redirect('/admin/access-management');
 });
 
 app.get('/admin/access-management', requireAdmin, (req, res) => {
   const content = `
-<a href="/admin" class="back-link">\u2190 Back to Admin</a>
+<a href="/admin" class="back-link">&larr; Back to Admin</a>
 
-<section class="card card-full staff-access-page">
-  <h2>Manage User Access</h2>
-  <p style="color:var(--muted);margin-bottom:16px;">Search by CID, Division (e.g. VATUK), or airport ICAO (e.g. EGLL) to view and manage document upload permissions.</p>
+<div class="access-mgmt-tabs">
+  <button class="access-tab active" data-tab="requests">Pending Requests <span id="pendingBadge" class="tab-badge" style="display:none;">0</span></button>
+  <button class="access-tab" data-tab="users">User Management</button>
+</div>
 
-  <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-    <input type="text" id="permSearchInput" placeholder="CID, Division, or ICAO..." style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:240px;text-transform:uppercase;" />
-    <button class="action-btn primary" id="permSearchBtn">Search</button>
+<!-- ====== TAB 1: PENDING REQUESTS ====== -->
+<div id="tab-requests" class="access-tab-content active">
+
+  <div class="requests-subtabs">
+    <button class="requests-subtab active" data-subtab="doc-requests">Document Upload</button>
+    <button class="requests-subtab" data-subtab="fir-requests">FIR Access</button>
   </div>
 
-  <div id="permResults" style="display:none;">
-    <div id="permResultsHeader" style="font-size:13px;color:var(--muted);margin-bottom:8px;"></div>
+  <div id="subtab-doc-requests" class="requests-subtab-content active">
     <div style="overflow-x:auto;">
       <table class="admin-table">
-        <thead id="permResultsHead"><tr><th>CID</th><th>Pattern</th><th>Actions</th></tr></thead>
-        <tbody id="permResultsBody"></tbody>
+        <thead>
+          <tr>
+            <th>CID</th><th>Name</th><th>Email</th><th>Role</th><th>Pattern</th><th>Requested</th><th>Status</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="docAccessRequestsTable">
+          <tr><td colspan="8" class="empty">Loading...</td></tr>
+        </tbody>
       </table>
     </div>
   </div>
 
-  <div id="permAddSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;">
-    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Add Permission</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-      <input type="text" id="permAddCid" placeholder="CID" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:120px;" />
-      <select id="permAddType" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
-        <option value="both">Both</option>
-        <option value="document">Document Only</option>
-        <option value="fir">FIR Only</option>
-      </select>
-      <input type="text" id="permAddPattern" placeholder="Access (e.g. EG**)" maxlength="10" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:160px;text-transform:uppercase;" />
-      <span id="permAddHelp" class="col-help" title="" style="display:none;cursor:help;font-size:14px;color:var(--muted);">?</span>
-      <span id="permAddPatternHint" style="display:none;font-size:12px;color:var(--muted);"></span>
-      <button class="action-btn primary" id="permAddBtn">Add</button>
+  <div id="subtab-fir-requests" class="requests-subtab-content">
+    <div style="overflow-x:auto;">
+      <table class="admin-table" id="staffAccessTable">
+        <thead>
+          <tr>
+            <th>CID</th><th>Name</th><th>Email</th><th>Division</th><th>Role</th><th>Rating</th><th>Requested</th><th>Status</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="staffAccessBody">
+          <tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px;">Loading...</td></tr>
+        </tbody>
+      </table>
     </div>
-    <div id="permAddMsg" style="display:none;margin-top:8px;font-size:12px;"></div>
   </div>
 
-  <div id="globalAccessSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <div>
-        <div style="font-weight:700;font-size:13px;">Global FIR and Document Access</div>
-        <div style="font-size:11px;color:var(--muted);">Overrides all individual permissions for this user</div>
+</div>
+
+<!-- ====== TAB 2: USER MANAGEMENT ====== -->
+<div id="tab-users" class="access-tab-content">
+
+  <section class="card card-full">
+    <p style="color:var(--muted);margin-bottom:16px;">Search by CID, Division (e.g. VATUK), or airport ICAO (e.g. EGLL) to view and manage permissions.</p>
+
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <input type="text" id="permSearchInput" placeholder="CID, Division, or ICAO..." style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:240px;text-transform:uppercase;" />
+      <button class="action-btn primary" id="permSearchBtn">Search</button>
+    </div>
+
+    <div id="permResults" style="display:none;">
+      <div id="permResultsHeader" style="font-size:13px;color:var(--muted);margin-bottom:8px;"></div>
+      <div style="overflow-x:auto;">
+        <table class="admin-table">
+          <thead id="permResultsHead"><tr><th>CID</th><th>Pattern</th><th>Actions</th></tr></thead>
+          <tbody id="permResultsBody"></tbody>
+        </table>
       </div>
-      <select id="globalAccessSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
-        <option value="disabled">Disabled</option>
-        <option value="enabled">Enabled</option>
-      </select>
     </div>
-  </div>
 
-  <div id="masterUserSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <div>
-        <div style="font-weight:700;font-size:13px;">Master User</div>
-        <div style="font-size:11px;color:var(--muted);">Grants access to User Permissions management</div>
+    <div id="permAddSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Add Permission</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input type="text" id="permAddCid" placeholder="CID" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:120px;" />
+        <select id="permAddType" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
+          <option value="both">Both</option>
+          <option value="document">Document Only</option>
+          <option value="fir">FIR Only</option>
+        </select>
+        <input type="text" id="permAddPattern" placeholder="Access (e.g. EG**)" maxlength="10" style="padding:8px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:160px;text-transform:uppercase;" />
+        <span id="permAddHelp" class="col-help" title="" style="display:none;cursor:help;font-size:14px;color:var(--muted);">?</span>
+        <span id="permAddPatternHint" style="display:none;font-size:12px;color:var(--muted);"></span>
+        <button class="action-btn primary" id="permAddBtn">Add</button>
       </div>
-      <select id="masterUserSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
-        <option value="disabled">Disabled</option>
-        <option value="enabled">Enabled</option>
-      </select>
+      <div id="permAddMsg" style="display:none;margin-top:8px;font-size:12px;"></div>
     </div>
-  </div>
 
-  <div id="additionalRolesSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
-    <div style="font-weight:700;font-size:13px;margin-bottom:4px;">Additional Permissions</div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Tag this user with one or more role memberships</div>
-    <div style="display:flex;flex-wrap:wrap;gap:16px;">
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-        <input type="checkbox" class="addl-role-checkbox" data-role="WF_ATC" style="accent-color:var(--accent);cursor:pointer;" />
-        <span>WF ATC</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-        <input type="checkbox" class="addl-role-checkbox" data-role="WF_AFFILIATE" style="accent-color:var(--accent);cursor:pointer;" />
-        <span>WF Affiliate</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-        <input type="checkbox" class="addl-role-checkbox" data-role="WF_TEAM" style="accent-color:var(--accent);cursor:pointer;" />
-        <span>WF Team Member</span>
-      </label>
-    </div>
-    <div id="wfTeamPicker" style="display:none;margin-top:10px;align-items:center;gap:8px;">
-      <label style="font-size:12px;color:var(--muted);">Team:</label>
-      <select id="wfTeamSelect" style="padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:240px;">
-        <option value="">Select team...</option>
-      </select>
-    </div>
-  </div>
-
-  <div id="adminAccessSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
-    <div style="font-weight:700;font-size:13px;margin-bottom:4px;">Admin Access</div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Grant access to specific admin pages. Super admin always has full access.</div>
-    <div id="adminSuperBadge" style="display:none;padding:8px 12px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);border-radius:6px;color:#fbbf24;font-size:12px;font-weight:600;margin-bottom:10px;">
-      This user is a Super Admin — full access to everything. Cannot be modified.
-    </div>
-    <div id="adminToggleRow" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-      <div>
-        <span style="font-weight:600;font-size:13px;">Admin Enabled</span>
-        <span style="font-size:11px;color:var(--muted);margin-left:6px;">(grant/revoke all pages)</span>
+    <div id="globalAccessSection" style="display:none;margin-top:16px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:13px;">Global FIR and Document Access</div>
+          <div style="font-size:11px;color:var(--muted);">Overrides all individual permissions for this user</div>
+        </div>
+        <select id="globalAccessSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
+          <option value="disabled">Disabled</option>
+          <option value="enabled">Enabled</option>
+        </select>
       </div>
-      <select id="adminEnabledSelect" style="padding:4px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
-        <option value="disabled">Disabled</option>
-        <option value="enabled">Enabled</option>
-      </select>
     </div>
-    <div id="adminPagesGrid" style="display:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">
+
+    <div id="masterUserSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:13px;">Master User</div>
+          <div style="font-size:11px;color:var(--muted);">Grants access to User Permissions management</div>
+        </div>
+        <select id="masterUserSelect" style="padding:6px 12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:120px;">
+          <option value="disabled">Disabled</option>
+          <option value="enabled">Enabled</option>
+        </select>
+      </div>
     </div>
-  </div>
-</section>
 
-<section class="card card-full doc-access-requests" style="margin-top:24px;">
-  <h2>Document Upload Requests</h2>
+    <div id="additionalRolesSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px;">Additional Permissions</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Tag this user with one or more role memberships</div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" class="addl-role-checkbox" data-role="WF_ATC" style="accent-color:var(--accent);cursor:pointer;" />
+          <span>WF ATC</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" class="addl-role-checkbox" data-role="WF_AFFILIATE" style="accent-color:var(--accent);cursor:pointer;" />
+          <span>WF Affiliate</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" class="addl-role-checkbox" data-role="WF_TEAM" style="accent-color:var(--accent);cursor:pointer;" />
+          <span>WF Team Member</span>
+        </label>
+      </div>
+      <div id="wfTeamPicker" style="display:none;margin-top:10px;align-items:center;gap:8px;">
+        <label style="font-size:12px;color:var(--muted);">Team:</label>
+        <select id="wfTeamSelect" style="padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:240px;">
+          <option value="">Select team...</option>
+        </select>
+      </div>
+    </div>
 
-  <table class="admin-table">
-    <thead>
-      <tr>
-        <th>CID</th><th>Name</th><th>Email</th><th>Role</th><th>Pattern</th><th>Requested</th><th>Status</th><th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="docAccessRequestsTable">
-      <tr><td colspan="8" class="empty">Loading...</td></tr>
-    </tbody>
-  </table>
-</section>
+    <div id="adminAccessSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px;">Admin Access</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Grant access to specific admin pages. Super admin always has full access.</div>
+      <div id="adminSuperBadge" style="display:none;padding:8px 12px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);border-radius:6px;color:#fbbf24;font-size:12px;font-weight:600;margin-bottom:10px;">
+        This user is a Super Admin &mdash; full access to everything. Cannot be modified.
+      </div>
+      <div id="adminToggleRow" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div>
+          <span style="font-weight:600;font-size:13px;">Admin Enabled</span>
+          <span style="font-size:11px;color:var(--muted);margin-left:6px;">(grant/revoke all pages)</span>
+        </div>
+        <select id="adminEnabledSelect" style="padding:4px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
+          <option value="disabled">Disabled</option>
+          <option value="enabled">Enabled</option>
+        </select>
+      </div>
+      <div id="adminPagesGrid" style="display:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">
+      </div>
+    </div>
+  </section>
 
-<section class="card card-full staff-access-page" id="firRequestsSection" style="margin-top:24px;">
-  <h2>FIR Access Requests</h2>
-
-  <div style="overflow-x:auto;">
-    <table class="admin-table" id="staffAccessTable">
-      <thead>
-        <tr>
-          <th>CID</th><th>Name</th><th>Email</th><th>Division</th><th>Role</th><th>Rating</th><th>Requested</th><th>Status</th><th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="staffAccessBody">
-        <tr><td colspan="9" style="color:var(--muted);text-align:center;padding:20px;">Loading...</td></tr>
-      </tbody>
-    </table>
-  </div>
-</section>
+</div>
 
 <!-- Hidden: old CID search elements (kept for script compatibility) -->
 <div style="display:none;">
@@ -8382,6 +8473,40 @@ app.get('/admin/access-management', requireAdmin, (req, res) => {
 </div>
 
 <style>
+  /* Tab navigation */
+  .access-mgmt-tabs {
+    display:flex; gap:0; margin-bottom:24px; border-bottom:2px solid var(--border);
+  }
+  .access-tab {
+    padding:10px 20px; font-size:14px; font-weight:600; color:var(--muted);
+    background:none; border:none; cursor:pointer; position:relative;
+    border-bottom:2px solid transparent; margin-bottom:-2px; transition:color 0.2s;
+  }
+  .access-tab:hover { color:var(--text); }
+  .access-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+  .tab-badge {
+    display:inline-flex; align-items:center; justify-content:center;
+    min-width:18px; height:18px; padding:0 5px; margin-left:6px;
+    background:var(--danger); color:#fff; border-radius:9px;
+    font-size:11px; font-weight:700;
+  }
+  .access-tab-content { display:none; }
+  .access-tab-content.active { display:block; }
+
+  /* Sub-tabs for request types */
+  .requests-subtabs {
+    display:flex; gap:0; margin-bottom:16px; border-bottom:1px solid var(--border);
+  }
+  .requests-subtab {
+    padding:8px 16px; font-size:13px; font-weight:500; color:var(--muted);
+    background:none; border:none; cursor:pointer;
+    border-bottom:2px solid transparent; margin-bottom:-1px; transition:color 0.2s;
+  }
+  .requests-subtab:hover { color:var(--text); }
+  .requests-subtab.active { color:var(--text); border-bottom-color:var(--text); }
+  .requests-subtab-content { display:none; }
+  .requests-subtab-content.active { display:block; }
+
   .approval-info { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
   .approval-info-row { display:flex; gap:12px; font-size:13px; }
   .approval-label { color:var(--muted); min-width:80px; font-weight:600; }
@@ -8405,6 +8530,25 @@ app.get('/admin/access-management', requireAdmin, (req, res) => {
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
+
+  // ===== TAB SWITCHING =====
+  document.querySelectorAll('.access-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      document.querySelectorAll('.access-tab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.access-tab-content').forEach(function(c) { c.classList.remove('active'); });
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  document.querySelectorAll('.requests-subtab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      document.querySelectorAll('.requests-subtab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.requests-subtab-content').forEach(function(c) { c.classList.remove('active'); });
+      tab.classList.add('active');
+      document.getElementById('subtab-' + tab.dataset.subtab).classList.add('active');
+    });
+  });
 
   var searchForm = document.getElementById('docAccessSearch');
   var cidInput = document.getElementById('docAccessCid');
@@ -9443,6 +9587,30 @@ document.addEventListener('DOMContentLoaded', function () {
 
   loadFirRequests();
 })();
+
+// ===== PENDING BADGE COUNTER =====
+(function() {
+  var badge = document.getElementById('pendingBadge');
+  function updateBadge() {
+    Promise.all([
+      fetch('/admin/api/documentation-access-requests', { credentials: 'same-origin' }).then(function(r) { return r.json(); }),
+      fetch('/admin/api/staff-access-requests', { credentials: 'same-origin' }).then(function(r) { return r.json(); })
+    ]).then(function(results) {
+      var docPending = results[0].filter(function(r) { return r.status === 'PENDING'; }).length;
+      var firPending = results[1].filter(function(r) { return r.status === 'PENDING'; }).length;
+      var total = docPending + firPending;
+      if (total > 0) {
+        badge.textContent = total;
+        badge.style.display = '';
+      } else {
+        badge.style.display = 'none';
+      }
+    });
+  }
+  updateBadge();
+  // Re-check every 30s
+  setInterval(updateBadge, 30000);
+})();
 </script>
 `;
 
@@ -9935,6 +10103,143 @@ app.get('/admin/scenery', requireAdmin, (req, res) => {
   </div>
 </section>
 
+<section class="card card-narrow" style="margin-top:24px;">
+  <h2 style="display:flex;align-items:center;gap:10px;">
+    Scenery Reports
+    <span id="reportCount" style="display:none;font-size:12px;font-weight:600;background:#ef4444;color:#fff;padding:2px 8px;border-radius:10px;"></span>
+  </h2>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">User-reported issues with existing scenery listings</p>
+
+  <div id="sceneryReportsTable">
+    <div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>
+  </div>
+</section>
+
+<style>
+  .report-card {
+    display:flex; align-items:center; gap:16px; padding:14px 16px;
+    border:1px solid #e2e8f0; border-left:4px solid #ef4444;
+    border-radius:8px; margin-bottom:10px; background:#fff;
+    flex-wrap:wrap;
+  }
+  .report-card-scenery {
+    flex:1; min-width:160px;
+  }
+  .report-card-scenery-name {
+    font-weight:600; font-size:14px; color:#1e293b;
+  }
+  .report-card-scenery-name a { color:#3b82f6; text-decoration:none; }
+  .report-card-scenery-name a:hover { text-decoration:underline; }
+  .report-card-scenery-meta {
+    font-size:12px; color:#94a3b8; margin-top:2px;
+  }
+  .report-card-icao {
+    font-family:monospace; font-weight:700; font-size:14px; color:#334155;
+    background:#f1f5f9; padding:4px 10px; border-radius:6px; white-space:nowrap;
+  }
+  .report-reason-badge {
+    display:inline-block; padding:4px 10px; border-radius:6px;
+    font-size:12px; font-weight:600; white-space:nowrap;
+  }
+  .report-reason-badge.out-of-date { background:rgba(251,191,36,0.12); color:#b45309; }
+  .report-reason-badge.link-broken { background:rgba(239,68,68,0.10); color:#dc2626; }
+  .report-reason-badge.wrong-sim { background:rgba(59,130,246,0.10); color:#2563eb; }
+  .report-reason-badge.wrong-label { background:rgba(168,85,247,0.10); color:#7c3aed; }
+  .report-reason-badge.other { background:rgba(100,116,139,0.10); color:#475569; }
+  .report-card-details {
+    font-size:12px; color:#64748b; max-width:220px;
+    white-space:pre-wrap; word-break:break-word;
+    font-style:italic;
+  }
+  .report-card-meta {
+    font-size:12px; color:#94a3b8; text-align:right; min-width:100px;
+  }
+  .report-card-actions {
+    display:flex; gap:6px; flex-shrink:0;
+  }
+  .report-card-actions button {
+    padding:6px 14px; border-radius:6px; font-size:12px; font-weight:600;
+    border:none; cursor:pointer; transition:opacity 0.15s;
+  }
+  .report-card-actions button:hover { opacity:0.85; }
+  .report-btn-resolve { background:#10b981; color:#fff; }
+  .report-btn-dismiss { background:#f1f5f9; color:#64748b; border:1px solid #e2e8f0 !important; }
+</style>
+
+<!-- RESOLVE ACTION MODAL -->
+<div id="resolveActionModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:400px;">
+    <h3>Resolve Report</h3>
+    <p id="resolveActionInfo" style="font-size:13px;color:#64748b;margin-bottom:20px;"></p>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <button id="resolveDeleteBtn" class="modal-btn" style="background:#ef4444;color:#fff;padding:12px;border-radius:8px;font-size:14px;font-weight:600;border:none;cursor:pointer;">
+        Delete Scenery
+        <div style="font-size:11px;font-weight:400;opacity:0.8;margin-top:2px;">Remove this scenery listing entirely</div>
+      </button>
+      <button id="resolveEditBtn" class="modal-btn" style="background:#3b82f6;color:#fff;padding:12px;border-radius:8px;font-size:14px;font-weight:600;border:none;cursor:pointer;">
+        Edit Scenery
+        <div style="font-size:11px;font-weight:400;opacity:0.8;margin-top:2px;">Update the details to fix the issue</div>
+      </button>
+      <button id="resolveDismissBtn" class="modal-btn" style="background:#f1f5f9;color:#64748b;padding:10px;border-radius:8px;font-size:13px;font-weight:500;border:1px solid #e2e8f0;cursor:pointer;">
+        Dismiss Report (no action needed)
+      </button>
+    </div>
+    <div style="margin-top:12px;text-align:center;">
+      <button id="resolveActionCancel" style="background:none;border:none;color:#94a3b8;font-size:13px;cursor:pointer;">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- EDIT SCENERY MODAL -->
+<div id="editSceneryModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:480px;">
+    <h3>Edit Scenery</h3>
+    <p id="editSceneryReportInfo" style="font-size:12px;color:#64748b;margin-bottom:16px;padding:8px 12px;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;"></p>
+    <form id="editSceneryForm" style="display:flex;flex-direction:column;gap:12px;">
+      <input type="hidden" id="editSceneryId">
+      <input type="hidden" id="editReportId">
+      <label style="font-size:13px;font-weight:600;">
+        Simulator
+        <select id="editSim" required style="display:block;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;">
+          <option value="MSFS">MSFS</option>
+          <option value="XPLANE">X-Plane</option>
+          <option value="P3D">Prepar3D</option>
+        </select>
+      </label>
+      <label style="font-size:13px;font-weight:600;">
+        Product Name
+        <input id="editName" required style="display:block;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;">
+      </label>
+      <label style="font-size:13px;font-weight:600;">
+        Developer
+        <input id="editDeveloper" style="display:block;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;">
+      </label>
+      <label style="font-size:13px;font-weight:600;">
+        Store
+        <input id="editStore" style="display:block;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;">
+      </label>
+      <label style="font-size:13px;font-weight:600;">
+        URL
+        <input id="editUrl" type="url" required style="display:block;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;">
+      </label>
+      <label style="font-size:13px;font-weight:600;">
+        Type
+        <select id="editType" required style="display:block;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;">
+          <option value="Freeware">Freeware</option>
+          <option value="Payware">Payware</option>
+        </select>
+      </label>
+      <div id="editSceneryMsg" class="modal-message hidden" style="margin-top:4px;"></div>
+      <div class="modal-actions" style="margin-top:8px;">
+        <button type="button" class="modal-btn modal-btn-cancel" id="editSceneryCancel">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-submit" id="editScenerySave">Save Changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
     <script>
       async function loadPendingScenery() {
         const tbody = document.getElementById('sceneryAdminTable');
@@ -9991,7 +10296,193 @@ const rows = await res.json();
         loadPendingScenery();
       }
 
-      document.addEventListener('DOMContentLoaded', loadPendingScenery);
+      function getReasonClass(reason) {
+        if (reason.includes('out of date')) return 'out-of-date';
+        if (reason.includes('Link')) return 'link-broken';
+        if (reason.includes('simulator')) return 'wrong-sim';
+        if (reason.includes('payware') || reason.includes('freeware')) return 'wrong-label';
+        return 'other';
+      }
+
+      async function loadReports() {
+        var container = document.getElementById('sceneryReportsTable');
+        var badge = document.getElementById('reportCount');
+        try {
+          var res = await fetch('/admin/api/scenery/reports');
+          if (!res.ok) throw new Error();
+          var rows = await res.json();
+          loadedReports = rows;
+
+          if (rows.length > 0) {
+            badge.textContent = rows.length;
+            badge.style.display = '';
+          } else {
+            badge.style.display = 'none';
+          }
+
+          if (!rows.length) {
+            container.innerHTML = '<div class="empty" style="padding:20px;text-align:center;color:var(--muted);">No open reports</div>';
+            return;
+          }
+
+          container.innerHTML = rows.map(function(r) {
+            var s = r.scenery || {};
+            var date = new Date(r.reportedAt).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+            var reasonClass = getReasonClass(r.reason);
+            var nameHtml = s.url
+              ? '<a href="' + s.url + '" target="_blank" rel="noopener">' + (s.name || '-') + '</a>'
+              : (s.name || '-');
+            return '<div class="report-card">' +
+              '<span class="report-card-icao">' + (s.icao || '-') + '</span>' +
+              '<div class="report-card-scenery">' +
+                '<div class="report-card-scenery-name">' + nameHtml + '</div>' +
+                '<div class="report-card-scenery-meta">' + (s.sim || '') + ' &middot; ' + (s.type || '') + '</div>' +
+              '</div>' +
+              '<span class="report-reason-badge ' + reasonClass + '">' + r.reason + '</span>' +
+              (r.details ? '<div class="report-card-details">' + r.details + '</div>' : '') +
+              '<div class="report-card-meta">CID ' + r.reportedBy + '<br>' + date + '</div>' +
+              '<div class="report-card-actions">' +
+                '<button class="report-btn-resolve" onclick="resolveReport(' + r.id + ')">Resolve</button>' +
+                '<button class="report-btn-dismiss" onclick="dismissReport(' + r.id + ')">Dismiss</button>' +
+              '</div>' +
+            '</div>';
+          }).join('');
+        } catch(err) {
+          container.innerHTML = '<div class="empty" style="padding:20px;text-align:center;color:var(--muted);">Failed to load reports</div>';
+        }
+      }
+
+      // Store loaded reports for modal access
+      var loadedReports = [];
+
+      var _origLoadReports = loadReports;
+      var __loadReports = loadReports;
+      loadReports = async function() {
+        await __loadReports();
+      };
+
+      function resolveReport(id) {
+        var report = loadedReports.find(function(r) { return r.id === id; });
+        if (!report) return;
+        var s = report.scenery || {};
+        var modal = document.getElementById('resolveActionModal');
+        document.getElementById('resolveActionInfo').innerHTML =
+          '<strong>' + (s.name || 'Unknown') + '</strong> (' + (s.icao || '') + ')<br>' +
+          'Reported: <span style="color:#ef4444;font-weight:600;">' + report.reason + '</span>' +
+          (report.details ? '<br><em>' + report.details + '</em>' : '');
+
+        modal.classList.remove('hidden');
+
+        // Wire buttons (clone to remove old listeners)
+        ['resolveDeleteBtn','resolveEditBtn','resolveDismissBtn','resolveActionCancel'].forEach(function(btnId) {
+          var old = document.getElementById(btnId);
+          var btn = old.cloneNode(true);
+          old.parentNode.replaceChild(btn, old);
+        });
+
+        document.getElementById('resolveActionCancel').addEventListener('click', function() {
+          modal.classList.add('hidden');
+        });
+        modal.querySelector('.modal-backdrop').addEventListener('click', function() {
+          modal.classList.add('hidden');
+        });
+
+        // Delete scenery
+        document.getElementById('resolveDeleteBtn').addEventListener('click', async function() {
+          this.disabled = true; this.textContent = 'Deleting...';
+          try {
+            await fetch('/admin/api/scenery/' + s.id + '/reject', { method: 'POST' });
+            await fetch('/admin/api/scenery/reports/' + id + '/resolve', { method: 'POST' });
+            modal.classList.add('hidden');
+            loadReports();
+            loadPendingScenery();
+          } catch(err) { this.disabled = false; this.textContent = 'Delete Scenery'; }
+        });
+
+        // Edit scenery
+        document.getElementById('resolveEditBtn').addEventListener('click', function() {
+          modal.classList.add('hidden');
+          openEditSceneryModal(report);
+        });
+
+        // Dismiss report
+        document.getElementById('resolveDismissBtn').addEventListener('click', async function() {
+          this.disabled = true;
+          await fetch('/admin/api/scenery/reports/' + id, { method: 'DELETE' });
+          modal.classList.add('hidden');
+          loadReports();
+        });
+      }
+
+      var _editSceneryId = null;
+      var _editReportId = null;
+
+      function openEditSceneryModal(report) {
+        var s = report.scenery || {};
+        var modal = document.getElementById('editSceneryModal');
+        _editSceneryId = s.id;
+        _editReportId = report.id;
+        document.getElementById('editSim').value = s.sim || 'MSFS';
+        document.getElementById('editName').value = s.name || '';
+        document.getElementById('editDeveloper').value = s.developer || '';
+        document.getElementById('editStore').value = s.store || '';
+        document.getElementById('editUrl').value = s.url || '';
+        document.getElementById('editType').value = s.type || 'Freeware';
+        document.getElementById('editSceneryReportInfo').innerHTML =
+          'Report: <strong>' + report.reason + '</strong>' +
+          (report.details ? ' &mdash; ' + report.details : '');
+        document.getElementById('editSceneryMsg').classList.add('hidden');
+        document.getElementById('editScenerySave').disabled = false;
+        modal.classList.remove('hidden');
+      }
+
+      function dismissReport(id) {
+        resolveReport(id);
+      }
+
+      document.addEventListener('DOMContentLoaded', function() {
+        loadPendingScenery();
+        loadReports();
+
+        // Edit modal listeners (once, not per-open)
+        var editModal = document.getElementById('editSceneryModal');
+        document.getElementById('editSceneryCancel').addEventListener('click', function() { editModal.classList.add('hidden'); });
+        editModal.querySelector('.modal-backdrop').addEventListener('click', function() { editModal.classList.add('hidden'); });
+
+        document.getElementById('editSceneryForm').addEventListener('submit', async function(e) {
+          e.preventDefault();
+          var saveBtn = document.getElementById('editScenerySave');
+          var msg = document.getElementById('editSceneryMsg');
+          saveBtn.disabled = true;
+          msg.classList.add('hidden');
+
+          try {
+            var res = await fetch('/admin/api/scenery/' + _editSceneryId + '/edit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sim: document.getElementById('editSim').value,
+                name: document.getElementById('editName').value,
+                developer: document.getElementById('editDeveloper').value,
+                store: document.getElementById('editStore').value,
+                url: document.getElementById('editUrl').value,
+                type: document.getElementById('editType').value
+              })
+            });
+            if (!res.ok) throw new Error('Failed');
+            await fetch('/admin/api/scenery/reports/' + _editReportId + '/resolve', { method: 'POST' });
+            msg.textContent = 'Saved!';
+            msg.style.color = '#10b981';
+            msg.classList.remove('hidden');
+            setTimeout(function() { editModal.classList.add('hidden'); loadReports(); }, 1000);
+          } catch(err) {
+            msg.textContent = 'Failed to save changes';
+            msg.style.color = '#ef4444';
+            msg.classList.remove('hidden');
+            saveBtn.disabled = false;
+          }
+        });
+      });
     </script>
   `;
 
@@ -10176,6 +10667,49 @@ app.get('/admin/api/scenery/pending', requireAdmin, async (req, res) => {
   });
 
   res.json(rows);
+});
+
+app.get('/admin/api/scenery/reports', requireAdmin, async (req, res) => {
+  try {
+    if (!prisma.sceneryReport) return res.json([]);
+    const rows = await prisma.sceneryReport.findMany({
+      where: { resolved: false },
+      include: { scenery: true },
+      orderBy: { reportedAt: 'asc' }
+    });
+    res.json(rows);
+  } catch (err) {
+    console.error('[SCENERY REPORTS]', err);
+    res.json([]);
+  }
+});
+
+app.post('/admin/api/scenery/reports/:id/resolve', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    await prisma.sceneryReport.update({
+      where: { id },
+      data: {
+        resolved: true,
+        resolvedBy: String(req.session.user.data.cid),
+        resolvedAt: new Date()
+      }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[SCENERY REPORT RESOLVE]', err);
+    res.status(500).json({ error: 'Failed to resolve report' });
+  }
+});
+
+app.delete('/admin/api/scenery/reports/:id', requireAdmin, async (req, res) => {
+  try {
+    await prisma.sceneryReport.delete({ where: { id: Number(req.params.id) } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[SCENERY REPORT DELETE]', err);
+    res.status(500).json({ error: 'Failed to delete report' });
+  }
 });
 
 function getWorldFlightLegForAirport(icao) {
@@ -11121,6 +11655,7 @@ if (!window.IS_LOGGED_IN && hint) {
               '<th class="hide-mobile">Developer</th>' +
               '<th class="hide-mobile">Store</th>' +
               '<th>Type</th>' +
+              '<th></th>' +
             '</tr>' +
           '</thead>' +
           '<tbody>' +
@@ -11137,11 +11672,38 @@ if (!window.IS_LOGGED_IN && hint) {
         r.type +
       '</span>' +
     '</td>' +
+    '<td>' +
+      '<button class="scenery-report-btn" data-id="' + r.id + '" data-name="' + (r.name || '').replace(/"/g, '&quot;') + '" title="Report an issue">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>' +
+      '</button>' +
+    '</td>' +
   '</tr>'
 ).join('')
  +
           '</tbody>' +
         '</table>';
+
+
+      // Hide report buttons if not logged in
+      if (!window.IS_LOGGED_IN) {
+        container.querySelectorAll('.scenery-report-btn').forEach(function(btn) {
+          btn.style.display = 'none';
+        });
+      }
+
+      // Report button handler
+      container.addEventListener('click', function(e) {
+        var btn = e.target.closest('.scenery-report-btn');
+        if (!btn) return;
+        var modal = document.getElementById('sceneryReportModal');
+        document.getElementById('reportSceneryId').value = btn.dataset.id;
+        document.getElementById('reportSceneryName').textContent = btn.dataset.name;
+        modal.querySelectorAll('input[name="reason"]').forEach(function(r) { r.checked = false; });
+        document.getElementById('reportDetails').value = '';
+        document.getElementById('sceneryReportMsg').classList.add('hidden');
+        document.getElementById('submitReportBtn').disabled = false;
+        modal.classList.remove('hidden');
+      });
     })
     .catch(() => {
       container.innerHTML =
@@ -11150,8 +11712,135 @@ if (!window.IS_LOGGED_IN && hint) {
 })();
 </script>
 
+<!-- SCENERY REPORT MODAL -->
+<div id="sceneryReportModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:440px;">
+    <h3>Report Scenery</h3>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+      Reporting: <strong id="reportSceneryName"></strong>
+    </p>
 
+    <form id="sceneryReportForm">
+      <input type="hidden" id="reportSceneryId">
 
+      <div class="report-reasons">
+        <label class="report-reason-option">
+          <input type="radio" name="reason" value="Scenery out of date" required>
+          <span>Scenery out of date</span>
+        </label>
+        <label class="report-reason-option">
+          <input type="radio" name="reason" value="Link does not work">
+          <span>Link does not work</span>
+        </label>
+        <label class="report-reason-option">
+          <input type="radio" name="reason" value="Wrong simulator">
+          <span>Wrong simulator</span>
+        </label>
+        <label class="report-reason-option">
+          <input type="radio" name="reason" value="Wrong payware/freeware label">
+          <span>Wrong payware/freeware label</span>
+        </label>
+        <label class="report-reason-option">
+          <input type="radio" name="reason" value="Other">
+          <span>Other</span>
+        </label>
+      </div>
+
+      <label style="display:block;margin-top:12px;">
+        <span style="font-size:13px;color:var(--muted);">Additional details (optional)</span>
+        <textarea id="reportDetails" rows="3" placeholder="Any extra info..." style="width:100%;margin-top:4px;padding:8px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);resize:vertical;font-family:inherit;font-size:13px;"></textarea>
+      </label>
+
+      <div id="sceneryReportMsg" class="modal-message hidden" style="margin-top:10px;"></div>
+
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" class="modal-btn modal-btn-cancel" id="closeReportModal">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-submit" id="submitReportBtn" style="background:var(--danger);">Submit Report</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<style>
+  .scenery-report-btn {
+    background:none; border:none; cursor:pointer; color:var(--muted);
+    padding:4px; border-radius:4px; transition:color 0.15s;
+    display:inline-flex; align-items:center; justify-content:center;
+  }
+  .scenery-report-btn:hover { color:var(--danger); }
+  .report-reasons { display:flex; flex-direction:column; gap:6px; }
+  .report-reason-option {
+    display:flex; align-items:center; gap:10px; font-size:13px;
+    padding:10px 14px; background:transparent; border:1px solid #e2e8f0;
+    border-radius:8px; cursor:pointer; transition:all 0.15s;
+    margin:0;
+  }
+  .report-reason-option:hover { border-color:#3b82f6; background:rgba(59,130,246,0.04); }
+  .report-reason-option:has(input:checked) { border-color:#ef4444; background:rgba(239,68,68,0.05); }
+  .report-reason-option input[type="radio"] {
+    appearance:none; -webkit-appearance:none; width:18px; height:18px;
+    border:2px solid #cbd5e1; border-radius:50%; cursor:pointer;
+    position:relative; flex-shrink:0; margin:0; transition:border-color 0.15s;
+  }
+  .report-reason-option input[type="radio"]:checked {
+    border-color:#ef4444;
+  }
+  .report-reason-option input[type="radio"]:checked::after {
+    content:''; position:absolute; top:3px; left:3px;
+    width:8px; height:8px; border-radius:50%; background:#ef4444;
+  }
+</style>
+
+<script>
+(function() {
+  var modal = document.getElementById('sceneryReportModal');
+  if (!modal) return;
+
+  var form = document.getElementById('sceneryReportForm');
+  var msg = document.getElementById('sceneryReportMsg');
+
+  function close() { modal.classList.add('hidden'); }
+
+  document.getElementById('closeReportModal').addEventListener('click', close);
+  modal.querySelector('.modal-backdrop').addEventListener('click', close);
+
+  form.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var reason = form.querySelector('input[name="reason"]:checked');
+    if (!reason) return;
+
+    var btn = document.getElementById('submitReportBtn');
+    btn.disabled = true;
+    msg.classList.add('hidden');
+
+    try {
+      var res = await fetch('/api/scenery/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sceneryId: Number(document.getElementById('reportSceneryId').value),
+          reason: reason.value,
+          details: document.getElementById('reportDetails').value.trim() || null
+        })
+      });
+      if (!res.ok) {
+        var d = await res.json().catch(function() { return {}; });
+        throw new Error(d.error || 'Failed');
+      }
+      msg.textContent = 'Report submitted. Thank you!';
+      msg.style.color = 'var(--success)';
+      msg.classList.remove('hidden');
+      setTimeout(close, 1500);
+    } catch(err) {
+      msg.textContent = err.message || 'Failed to submit report';
+      msg.style.color = 'var(--danger)';
+      msg.classList.remove('hidden');
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
 
 
 
@@ -11856,6 +12545,38 @@ app.post('/api/scenery/submit', requireLogin, async (req, res) => {
   } catch (err) {
     console.error('[SCENERY SUBMIT]', err);
     res.status(500).json({ error: 'Failed to submit scenery' });
+  }
+});
+
+app.post('/api/scenery/report', requireLogin, async (req, res) => {
+  try {
+    if (!prisma.sceneryReport) {
+      return res.status(503).json({ error: 'Reporting is not yet available' });
+    }
+
+    const { sceneryId, reason, details } = req.body;
+    if (!sceneryId || !reason) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const scenery = await prisma.airportScenery.findUnique({ where: { id: sceneryId } });
+    if (!scenery) {
+      return res.status(404).json({ error: 'Scenery not found' });
+    }
+
+    await prisma.sceneryReport.create({
+      data: {
+        sceneryId,
+        reason,
+        details: details || null,
+        reportedBy: String(req.session.user.data.cid)
+      }
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[SCENERY REPORT]', err);
+    res.status(500).json({ error: 'Failed to submit report' });
   }
 });
 

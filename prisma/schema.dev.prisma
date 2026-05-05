@@ -96,8 +96,27 @@ model AirportScenery {
   approvedBy  String?
   approvedAt  DateTime?
 
+  reports     SceneryReport[]
+
   @@index([icao])
   @@index([approved])
+}
+
+model SceneryReport {
+  id          Int      @id @default(autoincrement())
+  sceneryId   Int
+  reason      String
+  details     String?
+  reportedBy  String
+  reportedAt  DateTime @default(now())
+  resolved    Boolean  @default(false)
+  resolvedBy  String?
+  resolvedAt  DateTime?
+
+  scenery     AirportScenery @relation(fields: [sceneryId], references: [id], onDelete: Cascade)
+
+  @@index([sceneryId])
+  @@index([resolved])
 }
 
 model DocumentationPermission {
