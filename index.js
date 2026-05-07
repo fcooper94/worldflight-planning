@@ -354,6 +354,7 @@ import vatsimCallback from './auth/callback.js';
 import cron from 'node-cron';
 import nodemailer from 'nodemailer';
 import _renderLayout from './layout.js';
+import { getAirportGround, detectStandOccupancy } from './lib/osm-ground.mjs';
 function renderLayout(opts) {
   const cid = Number(opts.user?.cid);
   const active = wfEvents.find(e => e.id === activeEventId) || null;
@@ -2072,10 +2073,42 @@ function clearTSAT(sectorKey, callsign) {
 }
 
 let bootstrapComplete = false;
-let bootstrapStatus = { step: 0, total: 8, label: 'Starting...' };
+let bootstrapStatus = { step: 0, total: 9, label: 'Starting...' };
 
 function setBootstrapStatus(step, label) {
-  bootstrapStatus = { step, total: 8, label };
+  bootstrapStatus = { step, total: 9, label };
+}
+
+// Pre-fetch ground GeoJSON for every airport in the active event schedule.
+// Sequential — Overpass rate-limits parallel hits, and cache hits return
+// instantly anyway, so the only slow case is first-ever startup.
+async function prefetchGroundForActiveSchedule() {
+  const icaos = new Set();
+  for (const r of (adminSheetCache || [])) {
+    if (r.from) icaos.add(String(r.from).toUpperCase());
+    if (r.to) icaos.add(String(r.to).toUpperCase());
+  }
+  const list = [...icaos].filter(i => /^[A-Z]{4}$/.test(i));
+  const total = list.length;
+  if (!total) {
+    console.log('[GROUND PREFETCH] no airports in active schedule, skipping');
+    return;
+  }
+  let done = 0, hit = 0, fetched = 0, failed = 0;
+  for (const icao of list) {
+    done++;
+    setBootstrapStatus(9, `Pre-fetching airport ground layouts (${done}/${total}): ${icao}`);
+    const cacheFile = path.join(__dirname, 'data', 'ground', `${icao}.json`);
+    const wasCached = fs.existsSync(cacheFile);
+    try {
+      await getAirportGround(icao);
+      if (wasCached) hit++; else fetched++;
+    } catch (err) {
+      failed++;
+      console.warn('[GROUND PREFETCH]', icao, '-', err.message);
+    }
+  }
+  console.log(`[GROUND PREFETCH] done: ${total} airports — ${hit} cached, ${fetched} newly fetched, ${failed} failed`);
 }
 
 async function bootstrap() {
@@ -2116,6 +2149,12 @@ await (async () => {
     wfWorldMapCache.set(key, { builtAt: Date.now(), payload });
   }
 })();
+
+  // Pre-fetch ground (runways/taxiways/aprons/stands) for every airport in
+  // the active schedule. Cached entries return instantly; only airports we've
+  // never seen before hit OSM. Failures are non-fatal — server still starts.
+  setBootstrapStatus(9, 'Pre-fetching airport ground layouts');
+  await prefetchGroundForActiveSchedule();
 
 
   rebuildAllTobtSlots();       // 🔑 NOW WORKS
@@ -5896,6 +5935,72 @@ const aircraft = livePilots
   res.json({ airport, aircraft });
 });
 
+// Ground layout (runways, taxiways, aprons, stands, buildings) as GeoJSON.
+// Disk-cached per ICAO. Admins can pass ?refresh=1 to force re-fetch from OSM.
+app.get('/api/icao/:icao/ground', async (req, res) => {
+  const icao = String(req.params.icao || '').toUpperCase();
+  if (!/^[A-Z]{4}$/.test(icao)) return res.status(400).json({ error: 'Invalid ICAO' });
+  try {
+    const isAdmin = isAdminUser(Number(req.session?.user?.data?.cid));
+    const force = isAdmin && req.query.refresh === '1';
+    const geo = await getAirportGround(icao, { forceRefresh: force });
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.json(geo);
+  } catch (err) {
+    console.error('[GROUND]', icao, err.message);
+    res.status(502).json({ error: 'Failed to fetch ground data', message: err.message });
+  }
+});
+
+// Stand-occupancy: which stands have an aircraft parked on them right now.
+// Returns { occupancy: { osm_id: { callsign, cid, groundspeed } }, count }.
+//
+// Uses live VATSIM data (same source as /api/icao/:icao/map) so we're never
+// out of sync with what the user sees on the map. cachedPilots is bypassed
+// because it can contain fake-test data when DEV_MODE has fake-pilots enabled.
+app.get('/api/icao/:icao/stand-occupancy', async (req, res) => {
+  const icao = String(req.params.icao || '').toUpperCase();
+  if (!/^[A-Z]{4}$/.test(icao)) return res.status(400).json({ error: 'Invalid ICAO' });
+  try {
+    const geo = await getAirportGround(icao);
+    const airport = await prisma.airport.findUnique({ where: { icao }, select: { lat: true, lon: true } });
+    if (!airport) return res.json({ occupancy: {}, count: 0 });
+
+    let livePilots = [];
+    try {
+      const vatsimRes = await axios.get('https://data.vatsim.net/v3/vatsim-data.json');
+      livePilots = vatsimRes.data.pilots || [];
+    } catch (e) {
+      // Fall back to the cache only if VATSIM is unreachable.
+      livePilots = (cachedPilots || []).filter(p => p.server !== 'FAKE');
+    }
+
+    // Geofence: keep aircraft within ~10 km of the airport reference point,
+    // using proper metres so latitude scaling is correct at any airport.
+    const cosLat = Math.cos(airport.lat * Math.PI / 180);
+    const geofenceMeters = 10000;
+    const aircraft = [];
+    for (const p of livePilots) {
+      if (typeof p.latitude !== 'number' || typeof p.longitude !== 'number') continue;
+      const dy = (p.latitude - airport.lat) * 111320;
+      const dx = (p.longitude - airport.lon) * 111320 * cosLat;
+      if (dx * dx + dy * dy > geofenceMeters * geofenceMeters) continue;
+      aircraft.push({
+        lat: p.latitude,
+        lon: p.longitude,
+        callsign: p.callsign,
+        cid: p.cid,
+        groundspeed: p.groundspeed
+      });
+    }
+
+    const occupancy = detectStandOccupancy(geo, aircraft);
+    res.json({ occupancy, count: Object.keys(occupancy).length });
+  } catch (err) {
+    console.error('[STAND OCCUPANCY]', icao, err.message);
+    res.status(502).json({ error: 'Failed', message: err.message });
+  }
+});
 
 
 // Loading page while bootstrap is running
@@ -6039,6 +6144,7 @@ app.use((req, res, next) => {
       <div class="step-item" data-step="6"><span class="step-dot"></span>Loading bookings</div>
       <div class="step-item" data-step="7"><span class="step-dot"></span>Fetching VATSIM data</div>
       <div class="step-item" data-step="8"><span class="step-dot"></span>Building map cache</div>
+      <div class="step-item" data-step="9"><span class="step-dot"></span>Pre-fetching airport ground layouts</div>
     </div>
   </div>
 
