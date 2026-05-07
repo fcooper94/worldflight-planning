@@ -197,8 +197,8 @@
   border-color: var(--border) !important;
   box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
 }
-[data-theme="light"] .icao-top-row .atc-callsign { color: #8b8b8b !important; }
-[data-theme="light"] .atc-freq { color: var(--accent); }
+[data-theme="light"] .atc-callsign { color: #0f172a !important; }
+[data-theme="light"] .atc-freq { color: #1d4ed8 !important; }
 
 /* ATIS cards */
 [data-theme="light"] .atis-text { color: var(--text); }
@@ -3621,15 +3621,17 @@ tr:hover .row-actions {
 .runway-label .runway-label-text {
   transform-origin: center center;
   transform: rotate(var(--rwy-rot));
-  font-weight: 600;
-  font-size: 12px;
-  color: #fb923c;
+  font-weight: 700;
+  font-size: 13px;
+  color: #fbbf24;
   white-space: nowrap;
+  text-shadow: 0 0 4px rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.6);
 }
 
-/* Runway labels – light map: dark aviation green for contrast */
+/* Runway labels – light map */
 html[data-map-theme="light"] .runway-label .runway-label-text {
-  color: #14532d;
+  color: #1e40af;
+  text-shadow: 0 0 3px rgba(255,255,255,0.9), 0 0 6px rgba(255,255,255,0.7);
 }
 
 /* ICAO airport map — VATSIM Radar palette for stand labels and ground layers */
@@ -3658,16 +3660,18 @@ html[data-map-theme="light"] .runway-label .runway-label-text {
   border-color: rgba(239, 68, 68, 0.55);
 }
 
-/* Light theme: pull contrast for stand labels */
+/* Light theme: high contrast stand labels */
 html[data-map-theme="light"] .stand-label-box {
-  background: rgba(255, 255, 255, 0.92);
-  color: #0d9488;
-  border-color: rgba(13, 148, 136, 0.45);
+  background: rgba(15, 118, 110, 0.9);
+  color: #fff;
+  border-color: rgba(13, 148, 136, 0.6);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.3);
 }
 html[data-map-theme="light"] .stand-label-box.stand-occupied {
-  background: rgba(255, 240, 240, 0.95);
-  color: #b91c1c;
-  border-color: rgba(185, 28, 28, 0.45);
+  background: rgba(185, 28, 28, 0.9);
+  color: #fff;
+  border-color: rgba(239, 68, 68, 0.6);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.3);
 }
 
 /* "Loading ground layout…" pill at the top of the airport map */
@@ -4495,16 +4499,29 @@ html[data-map-theme="light"] .map-overlay-btn .moon {
   width: 100%;
   height: 100%;
 }
-/* Aircraft markers – dark map default */
+/* Aircraft markers */
 .ac-icon,
 .ac-label {
-  color: rgba(255, 255, 255, 0.9);
   white-space: nowrap;
 }
+.ac-icon {
+  color: #60a5fa;
+  filter: drop-shadow(0 0 3px rgba(0,0,0,0.7));
+}
+.ac-label {
+  color: #e2e8f0;
+  font-weight: 700;
+  font-size: 11px;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8), 0 0 6px rgba(0,0,0,0.5);
+}
 /* Aircraft markers – light map */
-html[data-map-theme="light"] .ac-icon,
+html[data-map-theme="light"] .ac-icon {
+  color: #2563eb;
+  filter: drop-shadow(0 0 2px rgba(255,255,255,0.8));
+}
 html[data-map-theme="light"] .ac-label {
-  color: #000;
+  color: #1e293b;
+  text-shadow: 0 0 3px rgba(255,255,255,0.9), 0 0 6px rgba(255,255,255,0.6);
 }
 .callsign-link {
   cursor: pointer;
@@ -5093,14 +5110,21 @@ html[data-map-theme="light"] .ac-label {
   font-size: 12px;
   line-height: 1.5;
   color: #e5e7eb;
-
-  max-height: 4.5em;            /* ~3 lines */
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.atis-text.atis-expanded {
-  max-height: none;
-  overflow: visible;
+/* Only truncate on mobile */
+@media (max-width: 768px) {
+  .atis-text {
+    max-height: 4.5em;            /* ~3 lines */
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .atis-text.atis-expanded {
+    max-height: none;
+    overflow: visible;
+  }
+  .atis-expand-btn.has-overflow {
+    display: block;
+  }
 }
 .atis-expand-btn {
   display: none;

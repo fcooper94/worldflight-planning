@@ -103,8 +103,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Recompute tile bounds whenever the map container resizes
       // (e.g. ATIS card appears and stretches the grid row).
+      // Debounced to avoid invalidateSize ↔ ResizeObserver feedback loops.
       if (typeof ResizeObserver !== 'undefined') {
-        new ResizeObserver(function() { map.invalidateSize(); }).observe(el);
+        let resizeTimer = null;
+        new ResizeObserver(function() {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(function() { map.invalidateSize(); }, 150);
+        }).observe(el);
       }
 
       // Kick off the ground-layout fetch in parallel with rendering aircraft.
@@ -123,7 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
             html: `<div class="ac-icon" style="transform:rotate(${ac.heading || 0}deg)"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg></div>
                    <div class="ac-label">${ac.callsign}</div>`
           }),
-          zIndexOffset: 1000
+          zIndexOffset: 5000
         }).addTo(map);
       });
 
@@ -173,7 +178,7 @@ document.addEventListener('DOMContentLoaded', () => {
               html: `<div class="ac-icon" style="transform:rotate(${ac.heading || 0}deg)"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg></div>
                      <div class="ac-label">${ac.callsign}</div>`
             }),
-            zIndexOffset: 1000
+            zIndexOffset: 5000
           }).addTo(modalMap);
         });
 
@@ -187,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
    Ground layout (runways, taxiways, aprons, stands, buildings)
 ========================= */
 
-const GROUND_STYLE = {
+const GROUND_STYLE_DARK = {
   apron:    { color: '#3a3d45', weight: 0.5, fillColor: '#2a2d35', fillOpacity: 0.55 },
   taxiway:  { color: '#4a4d55', weight: 0.6, fillColor: '#363940', fillOpacity: 0.75 },
   runway:   { color: '#525560', weight: 1.0, fillColor: '#3a3d45', fillOpacity: 0.9 },
@@ -195,6 +200,19 @@ const GROUND_STYLE = {
   stand:    { color: '#5eead4', weight: 1, fillColor: '#5eead4', fillOpacity: 0.18 },
   standOcc: { color: '#ef4444', weight: 1, fillColor: '#ef4444', fillOpacity: 0.32 }
 };
+const GROUND_STYLE_LIGHT = {
+  apron:    { color: '#94a3b8', weight: 0.5, fillColor: '#cbd5e1', fillOpacity: 0.45 },
+  taxiway:  { color: '#94a3b8', weight: 0.6, fillColor: '#b0bec5', fillOpacity: 0.55 },
+  runway:   { color: '#64748b', weight: 1.0, fillColor: '#94a3b8', fillOpacity: 0.7 },
+  building: { color: '#94a3b8', weight: 0.4, fillColor: '#b0bec5', fillOpacity: 0.45 },
+  stand:    { color: '#0d9488', weight: 1.5, fillColor: '#0d9488', fillOpacity: 0.15 },
+  standOcc: { color: '#dc2626', weight: 1.5, fillColor: '#dc2626', fillOpacity: 0.25 }
+};
+function getGroundStyle() {
+  return document.documentElement.dataset.mapTheme === 'light' ? GROUND_STYLE_LIGHT : GROUND_STYLE_DARK;
+}
+// Keep backward compat reference
+const GROUND_STYLE = GROUND_STYLE_DARK;
 
 function loadGround(map, icao) {
   // Only show the loading pill if the fetch is genuinely slow (cache miss).
@@ -237,14 +255,17 @@ function makeGroundIndicator(map) {
 function renderGround(map, geo) {
   if (!geo || !Array.isArray(geo.features)) return;
 
-  // Z-order matters: aprons at the bottom, then taxiways, runways, buildings,
-  // stand polygons, finally stand labels on top.
+  const gs = getGroundStyle();
+
+  // Runways and buildings only — aprons and taxiways are already visible on the
+  // base tile layer and rendering hundreds of widened OSM polygons for them
+  // tanks performance on integrated GPUs.
   const layers = {};
-  ['apron', 'taxiway', 'runway', 'building'].forEach(kind => {
+  ['runway', 'building'].forEach(kind => {
     const features = geo.features.filter(f => f.properties && f.properties.kind === kind);
     if (!features.length) return;
     layers[kind] = L.geoJSON({ type: 'FeatureCollection', features }, {
-      style: GROUND_STYLE[kind],
+      style: gs[kind],
       interactive: false,
       pane: 'overlayPane'
     }).addTo(map);
@@ -263,7 +284,7 @@ function renderGround(map, geo) {
 
     if (f.geometry.type === 'Polygon') {
       const ring = f.geometry.coordinates[0];
-      polygon = L.polygon(ring.map(c => [c[1], c[0]]), GROUND_STYLE.stand).addTo(standLayer);
+      polygon = L.polygon(ring.map(c => [c[1], c[0]]), getGroundStyle().stand).addTo(standLayer);
       let lat = 0, lon = 0;
       ring.forEach(c => { lon += c[0]; lat += c[1]; });
       center = [lat / ring.length, lon / ring.length];
@@ -319,7 +340,8 @@ async function refreshStandOccupancy(icao) {
     Object.keys(lookup).forEach(id => {
       const s = lookup[id];
       const isOccupied = !!occ[id];
-      if (s.polygon) s.polygon.setStyle(isOccupied ? GROUND_STYLE.standOcc : GROUND_STYLE.stand);
+      const gs = getGroundStyle();
+      if (s.polygon) s.polygon.setStyle(isOccupied ? gs.standOcc : gs.stand);
       if (s.label) {
         const box = s.label.getElement()?.querySelector('.stand-label-box');
         if (box) {

@@ -1349,8 +1349,9 @@ function isCoveringGenericIcaoCtr(callsign, icao) {
   // 1️⃣ Exact ICAO match (VABB_CTR, WSSS_CTR)
   if (prefix === ap) return true;
 
-  // 2️⃣ Regional ICAO match (VO*, WS*, SC*)
-  if (prefix.startsWith(ap.slice(0, 2))) return true;
+  // 2️⃣ Regional ICAO match — only 2-letter prefixes (e.g. VO_CTR → VO** airports)
+  //    3+ letter prefixes are city/FIR codes (SCO, BKK) handled elsewhere
+  if (prefix.length === 2 && ap.startsWith(prefix)) return true;
 
   // 3️⃣ FIR / city aliases (Asia-Pacific reality)
   const FIR_ALIAS_BY_ICAO = {
@@ -5852,6 +5853,98 @@ app.post('/admin/scenery/refresh-links', requireAdmin, (req, res) => {
 });
 
 
+// ===== METAR =====
+app.get('/api/icao/:icao/metar', async (req, res) => {
+  const icao = String(req.params.icao || '').toUpperCase();
+  if (!/^[A-Z]{4}$/.test(icao)) return res.status(400).json({ error: 'Invalid ICAO' });
+
+  // Try multiple METAR sources in order
+  async function fetchMetar(code) {
+    // Source 1: aviationweather.gov (NOAA/FAA — no key needed)
+    try {
+      const url = `https://aviationweather.gov/api/data/metar?ids=${code}&format=raw&taf=false`;
+      const r = await axios.get(url, { timeout: 5000 });
+      const text = (r.data || '').trim();
+      if (text && text.length > 10) {
+        return { metar: text, source: 'aviationweather.gov' };
+      }
+    } catch (e) {}
+
+    // Source 2: AVWX REST API (free tier, no key for basic METAR)
+    try {
+      const url = `https://avwx.rest/api/metar/${code}?options=&airport=true&reporting=true&format=json`;
+      const r = await axios.get(url, { timeout: 5000, headers: { 'Accept': 'application/json' } });
+      if (r.data?.raw) {
+        return { metar: r.data.raw, source: 'avwx.rest' };
+      }
+    } catch (e) {}
+
+    return null;
+  }
+
+  try {
+    // Try the requested airport first
+    let result = await fetchMetar(icao);
+    if (result) {
+      return res.json({ icao, metar: result.metar, source: result.source, proxy: null });
+    }
+
+    // No METAR — find nearest airport that has one, expanding search radius
+    const airport = await prisma.airport.findUnique({ where: { icao }, select: { lat: true, lon: true } });
+    if (!airport) return res.json({ icao, metar: null, source: null, proxy: null });
+
+    const cosLat = Math.cos(airport.lat * Math.PI / 180);
+    const searchRadii = [1.5, 5, 15, 45]; // degrees lat — roughly 170km, 550km, 1650km, 5000km
+
+    for (const radius of searchRadii) {
+      const lonRadius = cosLat > 0.01 ? radius / cosLat : 180;
+      const nearby = await prisma.airport.findMany({
+        where: {
+          AND: [
+            { NOT: { icao } },
+            { NOT: { icao: { startsWith: 'AQ' } } },
+            { NOT: { icao: { startsWith: 'AT' } } }
+          ],
+          lat: { gte: airport.lat - radius, lte: airport.lat + radius },
+          lon: { gte: airport.lon - lonRadius, lte: airport.lon + lonRadius }
+        },
+        select: { icao: true, lat: true, lon: true }
+      });
+
+      // Only consider 4-letter ICAO codes (skip pseudo-codes like AT03)
+      const filtered = nearby.filter(a => /^[A-Z]{4}$/.test(a.icao));
+
+      filtered.sort((a, b) => {
+        const da = Math.pow((a.lat - airport.lat) * 111.32, 2) + Math.pow((a.lon - airport.lon) * 111.32 * cosLat, 2);
+        const db = Math.pow((b.lat - airport.lat) * 111.32, 2) + Math.pow((b.lon - airport.lon) * 111.32 * cosLat, 2);
+        return da - db;
+      });
+
+      const tryCount = radius >= 15 ? 20 : 5;
+      for (const apt of filtered.slice(0, tryCount)) {
+        result = await fetchMetar(apt.icao);
+        if (result) {
+          const distKm = Math.sqrt(
+            Math.pow((apt.lat - airport.lat) * 111.32, 2) +
+            Math.pow((apt.lon - airport.lon) * 111.32 * cosLat, 2)
+          );
+          return res.json({
+            icao,
+            metar: result.metar,
+            source: result.source,
+            proxy: { icao: apt.icao, distKm: Math.round(distKm) }
+          });
+        }
+      }
+    }
+
+    res.json({ icao, metar: null, source: null, proxy: null });
+  } catch (err) {
+    console.error('[METAR]', icao, err.message);
+    res.status(502).json({ error: 'Failed to fetch METAR' });
+  }
+});
+
 app.get('/api/icao/:icao/map', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
 
@@ -5966,12 +6059,12 @@ app.get('/api/icao/:icao/stand-occupancy', async (req, res) => {
     const airport = await prisma.airport.findUnique({ where: { icao }, select: { lat: true, lon: true } });
     if (!airport) return res.json({ occupancy: {}, count: 0 });
 
+    // Always use real VATSIM data for stand occupancy, even in dev mode
     let livePilots = [];
     try {
       const vatsimRes = await axios.get('https://data.vatsim.net/v3/vatsim-data.json');
       livePilots = vatsimRes.data.pilots || [];
     } catch (e) {
-      // Fall back to the cache only if VATSIM is unreachable.
       livePilots = (cachedPilots || []).filter(p => p.server !== 'FAKE');
     }
 
@@ -11673,6 +11766,15 @@ app.get('/icao/:icao', async (req, res) => {
   <div class="icao-tab-panel active" data-panel="map">
     <div class="icao-portal-grid">
       <div class="icao-portal-left">
+        <section class="card metar-card" id="metarCard">
+          <div class="metar-header">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+            <span class="metar-title">METAR</span>
+            <span class="metar-source" id="metarSource"></span>
+          </div>
+          <pre class="metar-text" id="metarText">Loading METAR data\u2026</pre>
+          <div class="metar-proxy-note" id="metarProxy" style="display:none;"></div>
+        </section>
         <section class="card icao-portal-map-card">
           <div class="icao-map">
             <div id="icaoMap" data-icao="${icao}"></div>
@@ -11827,12 +11929,34 @@ app.get('/icao/:icao', async (req, res) => {
       }
     }
 
+    .metar-card { padding:12px 16px; }
+    .metar-header {
+      display:flex; align-items:center; gap:8px; margin-bottom:8px;
+    }
+    .metar-header svg { color:var(--accent); flex-shrink:0; }
+    .metar-title { font-weight:700; font-size:13px; color:var(--text); }
+    .metar-source {
+      font-size:11px; color:var(--muted); font-weight:400;
+      margin-left:auto;
+    }
+    .metar-text {
+      font-family:'JetBrains Mono',ui-monospace,monospace;
+      font-size:12px; line-height:1.5; color:var(--text);
+      margin:0; white-space:pre-wrap; word-break:break-word;
+    }
+    .metar-proxy-note {
+      margin-top:6px; font-size:11px; color:var(--muted); font-style:italic;
+    }
+    .metar-none {
+      font-family:inherit; font-size:12px; color:var(--muted); font-style:italic;
+    }
+
     .icao-tabs {
       display: flex;
       gap: 4px;
       margin-bottom: 16px;
       border-bottom: 1px solid var(--border);
-      overflow-x: auto;
+      overflow: hidden;
       flex-wrap: wrap;
     }
     .icao-tab {
@@ -11861,6 +11985,9 @@ app.get('/icao/:icao', async (req, res) => {
     }
     .icao-portal-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
     .icao-portal-right { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .icao-portal-right > section:last-child { flex: 1; display: flex; flex-direction: column; }
+    .icao-portal-right > section:last-child .controllers-card { flex: 1; display: flex; flex-direction: column; }
+    .icao-portal-right > section:last-child .controllers-scroll { flex: 1; }
     .icao-portal-map-card {
       padding: 12px;
       flex: 1;
@@ -11896,6 +12023,35 @@ app.get('/icao/:icao', async (req, res) => {
         });
       });
     })();
+  </script>
+
+  <script>
+  (function() {
+    var icao = window.ICAO;
+    if (!icao) return;
+    var text = document.getElementById('metarText');
+    var source = document.getElementById('metarSource');
+    var proxy = document.getElementById('metarProxy');
+    fetch('/api/icao/' + icao + '/metar')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.metar) {
+          text.textContent = 'No specific or nearby METAR data available';
+          text.classList.add('metar-none');
+          return;
+        }
+        text.textContent = data.metar;
+        source.textContent = data.source || '';
+        if (data.proxy) {
+          proxy.textContent = 'No METAR available for ' + icao + '. Showing nearest: ' + data.proxy.icao + ' (' + data.proxy.distKm + ' km away)';
+          proxy.style.display = '';
+        }
+      })
+      .catch(function() {
+        text.textContent = 'No specific or nearby METAR data available';
+        text.classList.add('metar-none');
+      });
+  })();
   </script>
 
 <div id="sceneryModal" class="modal hidden">
