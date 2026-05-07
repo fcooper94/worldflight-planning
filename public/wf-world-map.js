@@ -154,7 +154,7 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
 
       ${a.inbound ? `
-        <div class="wf-airport-section inbound">
+        <a class="wf-airport-section inbound" href="/sector/${a.inbound.wf}/${a.inbound.from}/${a.inbound.to}">
           <div class="wf-airport-section-title">Inbound</div>
           <div class="wf-airport-leg">
             ${a.inbound.wf} ${a.inbound.from} → ${a.inbound.to}
@@ -164,11 +164,11 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="dot">•</span>
             <span>Arr Window ${a.inbound.arrWindow}</span>
           </div>
-        </div>
+        </a>
       ` : ''}
 
       ${a.outbound ? `
-        <div class="wf-airport-section outbound">
+        <a class="wf-airport-section outbound" href="/sector/${a.outbound.wf}/${a.outbound.from}/${a.outbound.to}">
           <div class="wf-airport-section-title">Outbound</div>
           <div class="wf-airport-leg">
             ${a.outbound.wf} ${a.outbound.from} → ${a.outbound.to}
@@ -178,17 +178,8 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="dot">•</span>
             <span>Dep Window ${a.outbound.depWindow}</span>
           </div>
-        </div>
+        </a>
       ` : ''}
-
-      <div class="wf-airport-popup-actions">
-        <button
-          class="wf-airport-action-btn"
-          data-icao="${icao}"
-        >
-          View Details / Book Slot
-        </button>
-      </div>
     </div>
   `;
 }
@@ -488,17 +479,6 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
   }
-
-  document.addEventListener('click', e => {
-  const btn = e.target.closest('.wf-airport-action-btn');
-  if (!btn) return;
-
-  const icao = btn.getAttribute('data-icao');
-  if (!icao) return;
-
-  window.location.href = `/icao/${icao}`;
-});
-
 
   window.addEventListener('sidebar:toggle', () => {
     if (!map || !lastData) return;

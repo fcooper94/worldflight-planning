@@ -239,8 +239,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const ll = L.latLng(ap.data.lat, ap.data.lon + shift);
         const m = L.circleMarker(ll, {
           radius: 3,
-          color: '#00e5a0',
-          fillColor: '#00e5a0',
+          color: '#22c55e',
+          fillColor: '#22c55e',
           fillOpacity: 0.85,
           weight: 1
         })
