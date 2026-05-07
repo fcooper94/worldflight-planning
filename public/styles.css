@@ -98,6 +98,73 @@
   border-top-color: var(--border);
 }
 [data-theme="light"] .login-overlay { background: var(--bg0); }
+[data-theme="light"] .login-overlay-card { background: linear-gradient(180deg, #ffffff, #f1f5f9); border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .login-overlay-card .login-overlay-title { color: #0f172a; }
+[data-theme="light"] .login-overlay-gate { background: rgba(248,250,252,0.55); }
+
+/* Login-required gate (blurred page + centered login card) */
+.dashboard.has-login-overlay {
+  position: relative;
+  min-height: 70vh;
+}
+.dashboard.has-login-overlay > :not(.login-overlay-gate) {
+  filter: blur(6px);
+  pointer-events: none;
+  user-select: none;
+}
+.login-overlay-gate {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2,6,23,0.55);
+  z-index: 50;
+  filter: none !important;
+  pointer-events: auto;
+}
+.login-overlay-card {
+  background: linear-gradient(180deg, #1e293b, #0f172a);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 16px;
+  padding: 32px 36px;
+  text-align: center;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+  max-width: 360px;
+  width: calc(100% - 48px);
+}
+.login-overlay-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+  color: var(--accent);
+}
+.login-overlay-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0 0 6px;
+  color: #fff;
+}
+.login-overlay-desc {
+  font-size: 14px;
+  color: var(--muted);
+  margin: 0 0 20px;
+}
+.login-overlay-btn {
+  display: inline-block;
+  padding: 12px 24px;
+  background: var(--accent);
+  color: #020617;
+  font-weight: 700;
+  font-size: 14px;
+  border-radius: 10px;
+  text-decoration: none;
+  transition: transform .12s, box-shadow .12s;
+}
+.login-overlay-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(56,189,248,0.35);
+}
 [data-theme="light"] .login-page { background: var(--bg0); }
 [data-theme="light"] ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
 [data-theme="light"] * { scrollbar-color: rgba(0,0,0,0.15) transparent; }
@@ -508,9 +575,15 @@ body.sidebar-collapsed .sidebar { width: var(--sidebar-collapsed); }
 }
 .icon{
   width:20px;
-  text-align:center;
+  height:20px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
   font-size:16px;
   flex-shrink:0;
+}
+.nav-item .icon svg{
+  display:block;
 }
 .label, .nav-label{
   white-space:nowrap;
@@ -568,7 +641,7 @@ body.no-sidebar .topbar{ padding-left: 0; }
   height: var(--topbar-h);
   padding-left: var(--sidebar-expanded);
   padding-right: 24px;
-  z-index: 100;
+  z-index: 1200;
 
   background:
     linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.15)),
@@ -1797,6 +1870,15 @@ select{ cursor:pointer; }
   background: rgba(0,180,255,0.08);
 }
 
+[data-theme="light"] .user-trigger {
+  border-color: rgba(37,99,235,0.55);
+  color: #1d4ed8;
+}
+
+[data-theme="light"] .user-trigger:hover {
+  background: rgba(37,99,235,0.08);
+}
+
 .user-dropdown {
   position: absolute;
   right: 0;
@@ -2800,6 +2882,47 @@ tr:hover .row-actions {
   text-transform: uppercase;
 }
 
+/* Upload doc modal: narrower, left-aligned, no uppercase shouting. */
+#uploadDocModal .modal-card {
+  max-width: 480px;
+  text-align: left;
+  padding: 24px 28px;
+}
+#uploadDocModal .modal-card h3 {
+  text-align: center;
+  margin-bottom: 16px;
+}
+#uploadDocModal .modal-card label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 14px;
+}
+#uploadDocModal .modal-card input,
+#uploadDocModal .modal-card select {
+  text-transform: none;
+  text-align: left;
+  letter-spacing: normal;
+  font-size: 14px;
+  font-weight: 500;
+  padding: 10px 12px;
+  margin-top: 6px;
+  margin-bottom: 0;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-sizing: border-box;
+}
+#uploadDocModal .modal-card input[type="file"] {
+  padding: 8px 10px;
+}
+#uploadDocModal .modal-card .modal-actions {
+  margin-top: 20px;
+}
+
 .hidden {
   display: none !important;
 }
@@ -3656,7 +3779,8 @@ html[data-map-theme="light"] .runway-label > div {
 
 /* ICAO – Online Controllers panel */
 .icao-top-row.three-cols .atc-list,
-.icao-top-row.two-cols .atc-list {
+.icao-top-row.two-cols .atc-list,
+.icao-portal-grid .atc-list {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -3667,7 +3791,8 @@ html[data-map-theme="light"] .runway-label > div {
 
 /* Individual controller row */
 .icao-top-row.three-cols .atc-item,
-.icao-top-row.two-cols .atc-item {
+.icao-top-row.two-cols .atc-item,
+.icao-portal-grid .atc-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3683,7 +3808,8 @@ html[data-map-theme="light"] .runway-label > div {
 
 /* Callsign */
 .icao-top-row.three-cols .atc-callsign,
-.icao-top-row.two-cols .atc-callsign {
+.icao-top-row.two-cols .atc-callsign,
+.icao-portal-grid .atc-callsign {
   font-weight: 700;
   font-size: 14px;
   letter-spacing: 0.4px;
@@ -3692,7 +3818,8 @@ html[data-map-theme="light"] .runway-label > div {
 
 /* Frequency */
 .icao-top-row.three-cols .atc-freq,
-.icao-top-row.two-cols .atc-freq {
+.icao-top-row.two-cols .atc-freq,
+.icao-portal-grid .atc-freq {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   color: var(--accent);
@@ -3701,7 +3828,8 @@ html[data-map-theme="light"] .runway-label > div {
 
 /* Empty state */
 .icao-top-row.three-cols .atc-empty,
-.icao-top-row.two-cols .atc-empty {
+.icao-top-row.two-cols .atc-empty,
+.icao-portal-grid .atc-empty {
   color: var(--muted);
   font-style: italic;
   padding: 8px 4px;
@@ -3751,6 +3879,33 @@ html[data-map-theme="light"] .runway-label > div {
   text-align: center;
   font-style: italic;
   color: var(--muted2);
+}
+
+.doc-scope {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+.doc-scope-permanent {
+  background: rgba(148,163,184,0.15);
+  color: var(--muted);
+}
+.doc-scope-event-active {
+  background: rgba(56,189,248,0.15);
+  color: var(--accent);
+}
+.doc-scope-event-archived {
+  background: rgba(245,158,11,0.12);
+  color: #fbbf24;
+}
+.doc-scope-event-archived::before {
+  content: 'Archived: ';
+  font-weight: 600;
+  opacity: 0.85;
 }
 .scenery-platform {
   margin: 16px 0 8px;
@@ -4198,6 +4353,17 @@ html[data-map-theme="light"] .runway-label > div {
   color: #fff;
 }
 
+[data-theme="light"] .map-overlay-btn {
+  border-color: rgba(0,0,0,0.18);
+  background: rgba(255,255,255,0.85);
+  color: rgba(0,0,0,0.75);
+}
+
+[data-theme="light"] .map-overlay-btn:hover {
+  background: rgba(0,0,0,0.08);
+  color: #000;
+}
+
 .map-overlay-btn svg {
   pointer-events: none;
 }
@@ -4268,7 +4434,7 @@ html[data-map-theme="light"] .map-overlay-btn .moon {
 /* Aircraft markers – light map */
 html[data-map-theme="light"] .ac-icon,
 html[data-map-theme="light"] .ac-label {
-  color: rgba(0, 0, 0, 0.85);
+  color: #000;
 }
 .callsign-link {
   cursor: pointer;
@@ -5313,6 +5479,26 @@ html[data-map-theme="light"] .ac-label {
   white-space: nowrap;
   transition: background 0.15s, border-color 0.15s;
 }
+.sector-details-btn--dep {
+  background: rgba(74,222,128,0.1);
+  border-color: rgba(74,222,128,0.3);
+  color: #4ade80;
+}
+.sector-details-btn--dep:hover {
+  background: rgba(74,222,128,0.2);
+  border-color: #4ade80;
+}
+
+.sector-details-btn--arr {
+  background: rgba(245,158,11,0.1);
+  border-color: rgba(245,158,11,0.3);
+  color: #f59e0b;
+}
+.sector-details-btn--arr:hover {
+  background: rgba(245,158,11,0.2);
+  border-color: #f59e0b;
+}
+
 .sector-details-btn:hover {
   background: rgba(56,189,248,0.2);
   border-color: var(--accent);
@@ -5561,16 +5747,27 @@ body.sidebar-collapsed {
   margin-left: 20px;
 }
 
+.leaflet-control-zoom {
+  border: 0 !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  border-radius: 6px;
+  overflow: hidden;
+}
 .leaflet-control-zoom a {
   background: rgba(30,41,59,0.85) !important;
   color: #e2e8f0 !important;
-  border-radius: 6px;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  border-bottom-color: rgba(255,255,255,0.08) !important;
+}
+.leaflet-control-zoom a:last-child {
+  border-bottom: 0 !important;
+}
+[data-theme="light"] .leaflet-control-zoom {
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15);
 }
 [data-theme="light"] .leaflet-control-zoom a {
   background: #ffffff !important;
   color: #1e293b !important;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+  border-bottom-color: rgba(0,0,0,0.08) !important;
 }
 
 /* Remove attribution clutter if desired */

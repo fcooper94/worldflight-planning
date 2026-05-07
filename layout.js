@@ -8,9 +8,36 @@ export default function renderLayout({
   layoutClass = '',
   pageVisibility = {},
   hideSidebar = false,
-  siteBanner = { enabled: false, text: '' }
+  siteBanner = { enabled: false, text: '' },
+  loginOverlay = false,
+  activeEvent = null
 }) {
-  const pv = (key) => isAdmin || pageVisibility[key] !== false;
+  // pageVisibility[key] is a string mode: 'visible' | 'hidden' | 'admin-only'.
+  // Show in nav when visible to all, or when admin-only and viewer is an admin.
+  // 'hidden' means hidden from the nav for everyone (admin can still URL-navigate).
+  const pv = (key) => {
+    const m = pageVisibility[key];
+    if (m === undefined || m === 'visible' || m === true) return true;  // default visible
+    if (m === 'admin-only') return isAdmin;
+    return false; // 'hidden' or false (legacy boolean)
+  };
+
+  // Lucide-style line icons. fill=none, stroke=currentColor so they pick up nav-item colours.
+  const svg = (paths) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  const icons = {
+    home:        svg('<path d="M3 9.5 12 2l9 7.5V21a2 2 0 0 1-2 2h-4v-7H9v7H5a2 2 0 0 1-2-2z"/>'),
+    calendar:    svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
+    building:    svg('<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>'),
+    map:         svg('<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/>'),
+    pin:         svg('<path d="M20 10c0 7-8 13-8 13s-8-6-8-13a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>'),
+    ticket:      svg('<path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4Z"/><path d="M13 5v2"/><path d="M13 17v2"/><path d="M13 11v2"/>'),
+    bulb:        svg('<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.7.6 1 1.5 1 2.3v1h6v-1c0-.8.3-1.7 1-2.3A7 7 0 0 0 12 2Z"/>'),
+    headphones:  svg('<path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3Z"/>'),
+    globe:       svg('<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/>'),
+    users:       svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
+    clipboard:   svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="14" y2="16"/>'),
+    settings:    svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>')
+  };
 
   const sidebarHtml = `<aside class="sidebar" id="sidebar">
   <div class="sidebar-header">
@@ -24,33 +51,33 @@ export default function renderLayout({
     <div class="nav-section">
       <div class="nav-title">Pilots</div>
       <a href="/" class="nav-item" data-tooltip="Dashboard">
-        <span class="icon">🏠</span>
+        <span class="icon">${icons.home}</span>
         <span class="label">Dashboard</span>
       </a>
       ${pv('schedule') ? `<a href="/schedule" class="nav-item" data-tooltip="WF Schedule">
-        <span class="icon">🗓️</span>
+        <span class="icon">${icons.calendar}</span>
         <span class="label">WF Schedule</span>
       </a>` : ''}
 
       <a href="/airport-portal" class="nav-item" data-tooltip="Airport Portal">
-        <span class="icon">🛫</span>
+        <span class="icon">${icons.building}</span>
         <span class="label">Airport Portal</span>
       </a>
 
       ${pv('world-map') ? `<a href="/wf/world-map" class="nav-item" data-tooltip="Route Map">
-        <span class="icon">🗺️</span>
+        <span class="icon">${icons.map}</span>
         <span class="label">Route Map</span>
       </a>` : ''}
       <a href="/previous-destinations" class="nav-item" data-tooltip="Previous Destinations">
-        <span class="icon">📍</span>
+        <span class="icon">${icons.pin}</span>
         <span class="label">Past Destinations</span>
       </a>
       ${pv('my-slots') ? `<a href="/my-slots" class="nav-item" data-tooltip="My Slots / Bookings">
-        <span class="icon">✈️</span>
+        <span class="icon">${icons.ticket}</span>
         <span class="label">My Slots / Bookings</span>
       </a>` : ''}
       ${pv('suggest-airport') ? `<a href="/suggest-airport" class="nav-item" data-tooltip="Suggest Airport">
-        <span class="icon">💡</span>
+        <span class="icon">${icons.bulb}</span>
         <span class="label">Suggest Airport</span>
       </a>` : ''}
     </div>
@@ -58,11 +85,11 @@ export default function renderLayout({
     ${pv('atc') || pv('airspace') ? `<div class="nav-section">
       <div class="nav-title">Controllers</div>
       ${pv('atc') ? `<a href="/atc" class="nav-item" data-tooltip="WF Flow Control">
-        <span class="icon">🎧</span>
+        <span class="icon">${icons.headphones}</span>
         <span class="label">WF Flow Control</span>
       </a>` : ''}
       ${pv('airspace') ? `<a href="/airspace" class="nav-item" data-tooltip="Airspace Management">
-        <span class="icon">🌐</span>
+        <span class="icon">${icons.globe}</span>
         <span class="label">Airspace Management</span>
       </a>` : ''}
     </div>` : ''}
@@ -71,7 +98,7 @@ export default function renderLayout({
     <div class="nav-section">
       <div class="nav-title">FIR Manager</div>
       <a href="/user-management" class="nav-item" data-tooltip="User Management">
-        <span class="icon">👥</span>
+        <span class="icon">${icons.users}</span>
         <span class="label">
           User Management
           <span id="firManagerBadge" class="nav-badge hidden"></span>
@@ -84,11 +111,11 @@ export default function renderLayout({
     <div class="nav-section">
       <div class="nav-title">Team Member</div>
       <a href="/team/management" class="nav-item" data-tooltip="Team Management">
-        <span class="icon">👥</span>
+        <span class="icon">${icons.users}</span>
         <span class="label">Team Management</span>
       </a>
       <a href="/team/bookings" class="nav-item" data-tooltip="Our Bookings">
-        <span class="icon">📋</span>
+        <span class="icon">${icons.clipboard}</span>
         <span class="label">Our Bookings</span>
       </a>
     </div>
@@ -98,7 +125,7 @@ export default function renderLayout({
     <div class="nav-section nav-admin">
       <div class="nav-title">Admin</div>
       <a href="/admin/control-panel" class="nav-item" data-tooltip="Admin Panel">
-        <span class="icon">🛠️</span>
+        <span class="icon">${icons.settings}</span>
         <span class="label">
           Admin Panel
           <span id="adminBadge" class="nav-badge hidden"></span>
@@ -228,8 +255,20 @@ export default function renderLayout({
   ${isAdmin ? '<div id="adminAlertBanner" class="admin-alert-banner"></div>' : ''}
 
   <!-- ===== PAGE CONTENT ===== -->
-  <main class="dashboard ${layoutClass}">
+  <main class="dashboard ${layoutClass}${loginOverlay ? ' has-login-overlay' : ''}">
     ${content}
+    ${loginOverlay ? `
+    <div class="login-overlay-gate" role="dialog" aria-modal="true" aria-label="Login required">
+      <div class="login-overlay-card">
+        <div class="login-overlay-icon">
+          <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </div>
+        <h2 class="login-overlay-title">Login required</h2>
+        <p class="login-overlay-desc">Sign in to access this page.</p>
+        <a href="/auth/login" class="login-overlay-btn">${process.env.DEV_MODE === 'true' ? 'Login Offline' : 'Login with VATSIM'}</a>
+      </div>
+    </div>
+    ` : ''}
   </main>
 
   <footer class="admin-connected-footer">
@@ -311,6 +350,14 @@ export default function renderLayout({
       <label>
     File name
     <input type="text" placeholder="Pilot Brief 2026" name="filename" required>
+  </label>
+
+  <label>
+    Document validity
+    <select name="eventId" id="uploadDocEventId">
+      <option value="">Permanent (always visible)</option>
+      ${activeEvent && activeEvent.id ? `<option value="${activeEvent.id}">${activeEvent.name || 'Active event'} only</option>` : ''}
+    </select>
   </label>
 
   <label>
@@ -771,36 +818,6 @@ window.location.href = '/icao/' + icao;
 
     <div class="icao-map">
       <div id="mapModalMap"></div>
-
-      <!-- 🔑 ADD THIS BLOCK -->
-      <div class="map-overlay-controls">
-        <button
-          id="toggleMapThemeBtnModal"
-          class="map-overlay-btn"
-          title="Toggle map theme"
-          aria-label="Toggle map theme"
-        >
-          <svg viewBox="0 0 24 24" width="24" height="24" class="theme-icon">
-            <g class="sun">
-              <circle cx="12" cy="12" r="4" />
-              <line x1="12" y1="2" x2="12" y2="5" />
-              <line x1="12" y1="19" x2="12" y2="22" />
-              <line x1="2" y1="12" x2="5" y2="12" />
-              <line x1="19" y1="12" x2="22" y2="12" />
-              <line x1="4.5" y1="4.5" x2="6.5" y2="6.5" />
-              <line x1="17.5" y1="17.5" x2="19.5" y2="19.5" />
-              <line x1="17.5" y1="6.5" x2="19.5" y2="4.5" />
-              <line x1="4.5" y1="19.5" x2="6.5" y2="17.5" />
-            </g>
-
-            <path
-              class="moon"
-              d="M21 12.79A9 9 0 1111.21 3
-                 7 7 0 0021 12.79z"
-            />
-          </svg>
-        </button>
-      </div>
     </div>
   </div>
 </div>
@@ -1288,6 +1305,7 @@ ${isAdmin ? `
     const current = document.documentElement.getAttribute('data-theme') || 'dark';
     const next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
+    document.documentElement.dataset.mapTheme = next;
     localStorage.setItem('wf-theme', next);
     updateLabel();
     swapTiles();

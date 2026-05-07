@@ -134,9 +134,11 @@ model AirportDocument {
   filename   String
   uploadedBy Int
   uploadedAt DateTime @default(now())
+  eventId    Int?
 
   @@unique([icao, filename])
   @@index([icao])
+  @@index([eventId])
 }
 
 model DocumentationAccessRequest {
@@ -287,6 +289,7 @@ model WfEvent {
 model PageVisibility {
   key     String  @id
   enabled Boolean @default(true)
+  mode    String  @default("visible")
 }
 
 model MailingListSubscriber {

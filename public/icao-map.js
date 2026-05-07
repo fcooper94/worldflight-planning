@@ -90,12 +90,21 @@ document.addEventListener('DOMContentLoaded', () => {
       window._icaoAircraft = aircraft;
 
       const map = L.map('icaoMap', {
-        zoomControl: false,
-        attributionControl: false
+        zoomControl: true,
+        attributionControl: false,
+        scrollWheelZoom: false,
+        doubleClickZoom: false,
+        boxZoom: false
       });
 
       wfAddTileLayer(map, TILE_LAYERS[getMapTheme()].options);
       window._icaoMapInstance = map;
+
+      // Recompute tile bounds whenever the map container resizes
+      // (e.g. ATIS card appears and stretches the grid row).
+      if (typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(function() { map.invalidateSize(); }).observe(el);
+      }
 
       const bounds = L.latLngBounds([[airport.lat, airport.lon]]);
 
@@ -105,7 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
         L.marker([ac.lat, ac.lon], {
           icon: L.divIcon({
             className: 'ac-marker',
-            html: `<div class="ac-icon" style="transform:rotate(${ac.heading || 0}deg)">✈</div>
+            html: `<div class="ac-icon" style="transform:rotate(${ac.heading || 0}deg)"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg></div>
                    <div class="ac-label">${ac.callsign}</div>`
           })
         }).addTo(map);
@@ -132,6 +141,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!modalMap) {
           modalMap = L.map('mapModalMap', {
             zoomControl: true,
+            scrollWheelZoom: false,
+            doubleClickZoom: false,
+            boxZoom: false,
             attributionControl: false
           });
 
@@ -154,7 +166,7 @@ document.addEventListener('DOMContentLoaded', () => {
           L.marker([ac.lat, ac.lon], {
             icon: L.divIcon({
               className: 'ac-marker',
-              html: `<div class="ac-icon" style="transform:rotate(${ac.heading || 0}deg)">✈</div>
+              html: `<div class="ac-icon" style="transform:rotate(${ac.heading || 0}deg)"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg></div>
                      <div class="ac-label">${ac.callsign}</div>`
             })
           }).addTo(modalMap);

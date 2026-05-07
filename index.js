@@ -356,12 +356,14 @@ import nodemailer from 'nodemailer';
 import _renderLayout from './layout.js';
 function renderLayout(opts) {
   const cid = Number(opts.user?.cid);
+  const active = wfEvents.find(e => e.id === activeEventId) || null;
   return _renderLayout({
     ...opts,
     pageVisibility,
     siteBanner,
     isMaster: cid ? isMasterUser(cid) : false,
-    isTeamMember: cid ? isTeamMember(cid) : false
+    isTeamMember: cid ? isTeamMember(cid) : false,
+    activeEvent: active ? { id: active.id, name: active.name, year: active.year } : null
   });
 }
 
@@ -652,7 +654,7 @@ io.use((socket, next) => {
 
 
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots', 'wf-portal-banner'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions'];
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
 // Division → ICAO prefix mapping for document upload permissions
@@ -679,22 +681,47 @@ const DIVISION_ICAO_MAP = {
   'VATSIM':  '****'
 };
 
+// pageVisibility[key] is a string mode: 'visible' | 'hidden' | 'admin-only'
 async function loadPageVisibility() {
   const rows = await prisma.pageVisibility.findMany();
   const found = new Set();
   for (const r of rows) {
-    pageVisibility[r.key] = r.enabled;
+    // Prefer the explicit mode column. Fall back to the legacy enabled boolean
+    // so older rows keep working: enabled=false → 'hidden', enabled=true → 'visible'.
+    let mode = r.mode;
+    if (!mode || (mode !== 'visible' && mode !== 'hidden' && mode !== 'admin-only')) {
+      mode = r.enabled === false ? 'hidden' : 'visible';
+    }
+    pageVisibility[r.key] = mode;
     found.add(r.key);
   }
-  // default missing keys to true
+  // default missing keys to visible
   for (const k of PAGE_KEYS) {
-    if (!found.has(k)) pageVisibility[k] = true;
+    if (!found.has(k)) pageVisibility[k] = 'visible';
   }
   console.log('[PAGE VIS] Loaded page visibility:', pageVisibility);
 }
 
+function getPageMode(key) {
+  const m = pageVisibility[key];
+  if (m === 'hidden' || m === 'admin-only') return m;
+  return 'visible';
+}
+
+// Legacy shim: returns true if the page is publicly accessible (visible to everyone).
+// Hidden and admin-only both report false; admin gating is layered separately
+// via requirePageEnabled / sidebar pv() which know about the user.
 function isPageEnabled(key) {
-  return pageVisibility[key] !== false;
+  return getPageMode(key) === 'visible';
+}
+
+// Inline-feature helper: true if the user can see a feature gated by page-visibility.
+// 'visible' shows to all; 'admin-only' shows only to admins; 'hidden' shows to nobody.
+function isPageVisibleTo(key, isAdminUserFlag) {
+  const mode = getPageMode(key);
+  if (mode === 'visible') return true;
+  if (mode === 'admin-only' && isAdminUserFlag) return true;
+  return false;
 }
 
 // ===== SITE BANNER =====
@@ -1423,11 +1450,24 @@ app.post(
         return res.status(400).json({ error: 'No file uploaded' });
       }
 
+      // Optional eventId scoping: NULL = permanent. Only the active event is
+      // currently allowed to be tagged (any other id is rejected).
+      let eventId = null;
+      if (req.body.eventId) {
+        const requested = Number(req.body.eventId);
+        if (Number.isFinite(requested) && requested === activeEventId) {
+          eventId = requested;
+        } else {
+          return res.status(400).json({ error: 'Invalid eventId — only the active event can be tagged.' });
+        }
+      }
+
       await prisma.airportDocument.create({
         data: {
           icao: req.params.icao.toUpperCase(),
           filename: req.file.filename,
-          uploadedBy: Number(req.session.user.data.cid)
+          uploadedBy: Number(req.session.user.data.cid),
+          eventId
         }
       });
 
@@ -1599,7 +1639,7 @@ const adminPermissions = new Map();
 const ADMIN_PAGE_KEYS = [
   'wf-schedule', 'official-teams', 'scenery', 'access-management',
   'visited-airports', 'suggestions', 'mailing-list', 'settings',
-  'airac', 'test-pilots', 'controller-pack'
+  'airac', 'test-pilots', 'controller-pack', 'documents-scenery'
 ];
 
 const ADMIN_PAGE_LABELS = {
@@ -1613,7 +1653,8 @@ const ADMIN_PAGE_LABELS = {
   'settings': 'Page Visibility / Settings',
   'airac': 'AIRAC Data',
   'test-pilots': 'Test Pilot Data',
-  'controller-pack': 'Controller Pack'
+  'controller-pack': 'Controller Pack',
+  'documents-scenery': 'Documents & Scenery'
 };
 
 async function loadAdminPermissions() {
@@ -3294,15 +3335,23 @@ app.get('/admin/suggestions', requireAdmin, async (req, res) => {
       })();
 
       var deleteAllBtn = document.getElementById('deleteAllSuggestionsBtn');
-      if (deleteAllBtn) deleteAllBtn.addEventListener('click', function() {
-        openConfirmModal({
+      if (deleteAllBtn) deleteAllBtn.addEventListener('click', async function() {
+        var ok = await openConfirmModal({
           title: 'Delete All Suggestions',
-          message: 'This will permanently delete all suggestions. This cannot be undone.'
-        }).then(async function(ok) {
-          if (!ok) return;
-          var res = await fetch('/admin/api/suggestions/all', { method: 'DELETE' });
-          if (res.ok) window.location.reload();
+          message: 'This will permanently delete every suggestion in the database. This cannot be undone.'
         });
+        if (!ok) return;
+
+        // Second gate: must type DELETE exactly. Prevents accidental Enter-key confirms.
+        var typed = window.prompt('Final check — type DELETE in capital letters to permanently remove every suggestion:');
+        if (typed === null) return;
+        if (typed.trim() !== 'DELETE') {
+          alert('Cancelled — typed text did not match "DELETE".');
+          return;
+        }
+
+        var res = await fetch('/admin/api/suggestions/all', { method: 'DELETE' });
+        if (res.ok) window.location.reload();
       });
 
       document.addEventListener('click', async function(e) {
@@ -6201,9 +6250,9 @@ app.get('/', async (req, res) => {
     const fmt = v => `${String(Math.floor(v / 60)).padStart(2, '0')}${String(v % 60).padStart(2, '0')}`;
     return `${fmt(lo)}-${fmt(hi)}z`;
   }
-  const upcomingLegs = adminSheetCache.slice(0, 8).map(r => `
+  const upcomingLegs = adminSheetCache.map(r => `
     <tr>
-      <td class="db-cell db-cell--num">${r.number || ''}</td>
+      <td class="db-cell db-cell--num">${r.number ? `<a class="sector-details-btn" href="/sector/${r.number}/${r.from}/${r.to}">${r.number}</a>` : ''}</td>
       <td class="db-cell"><a href="/icao/${r.from}">${r.from || ''}</a></td>
       <td class="db-cell"><a href="/icao/${r.to}">${r.to || ''}</a></td>
       <td class="db-cell db-cell--muted">${r.date_utc || ''}</td>
@@ -6227,17 +6276,23 @@ app.get('/', async (req, res) => {
 
       <div class="db-stats">
         <a href="/suggest-airport" class="db-stat db-stat-link">
-          <div class="db-stat-icon">💡</div>
+          <div class="db-stat-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.7.6 1 1.5 1 2.3v1h6v-1c0-.8.3-1.7 1-2.3A7 7 0 0 0 12 2Z"/></svg>
+          </div>
           <div class="db-stat-label">Suggest Airport</div>
           <div class="db-stat-desc">Tell us where you'd like to see WorldFlight 2026 visit</div>
         </a>
         <a href="/previous-destinations" class="db-stat db-stat-link">
-          <div class="db-stat-icon">🗺️</div>
+          <div class="db-stat-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 7-8 13-8 13s-8-6-8-13a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+          </div>
           <div class="db-stat-label">Past Destinations</div>
           <div class="db-stat-desc">Explore every airport WorldFlight has visited over the years</div>
         </a>
         <a href="/airport-portal" class="db-stat db-stat-link">
-          <div class="db-stat-icon">✈️</div>
+          <div class="db-stat-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg>
+          </div>
           <div class="db-stat-label">Airport Portal</div>
           <div class="db-stat-desc">View details, charts and info for airports on this year's route</div>
         </a>
@@ -6253,7 +6308,7 @@ app.get('/', async (req, res) => {
           <table class="db-table">
             <thead>
               <tr>
-                <th class="db-th">Flight</th>
+                <th class="db-th">Sector</th>
                 <th class="db-th">From</th>
                 <th class="db-th">To</th>
                 <th class="db-th">Date</th>
@@ -6342,7 +6397,12 @@ app.get('/', async (req, res) => {
       .db-stat-icon {
         font-size: 28px;
         line-height: 1;
+        color: var(--accent, #38bdf8);
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
+      .db-stat-icon svg { display: block; }
       .db-stat-label {
         font-size: 12px;
         color: var(--muted, #94a3b8);
@@ -6392,6 +6452,8 @@ app.get('/', async (req, res) => {
 
       .db-table-wrap {
         overflow-x: auto;
+        overflow-y: auto;
+        max-height: 440px;
       }
       .db-table {
         width: 100%;
@@ -6407,6 +6469,10 @@ app.get('/', async (req, res) => {
         letter-spacing: 0.5px;
         color: var(--muted, #94a3b8);
         border-bottom: 1px solid var(--border, rgba(255,255,255,0.04));
+        position: sticky;
+        top: 0;
+        background: var(--panel, #0f172a);
+        z-index: 1;
       }
       .db-cell {
         padding: 10px 16px;
@@ -7245,10 +7311,10 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
   const bookingTobt = userBooking?.tobtTimeUtc || null;
 
   const content = `
-    <div style="margin-bottom:12px;"><a href="/schedule" class="sector-details-btn" style="text-decoration:none;padding:14px 20px;font-size:14px;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.3);color:#a78bfa;">\u2190 Back to Schedule</a></div>
     <section class="card card-full">
-      <div style="margin-bottom:20px;">
-        <h1 style="margin:0;font-size:28px;font-weight:800;letter-spacing:0.5px;">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap;">
+        ${(isAdmin || isPageEnabled('schedule')) ? '<a href="/schedule" class="sector-details-btn" style="text-decoration:none;padding:8px 14px;font-size:13px;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.3);color:#a78bfa;flex-shrink:0;">← Back</a>' : ''}
+        <h1 style="margin:0;font-size:28px;font-weight:800;letter-spacing:0.5px;flex:1;min-width:0;">
           <span style="color:var(--accent);">${wfNum}</span>
           <span style="color:var(--muted);font-weight:400;margin:0 8px;">\u2014</span>
           <span style="color:var(--text);">${fromIcao}</span>
@@ -7275,11 +7341,14 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
           </div>
           ${leg && leg.atc_route ? '<div style="border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">ATC Route</div><div style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text);word-break:break-all;">' + leg.atc_route + '</div></div>' : ''}
         </div>
-        ${!isPageEnabled('book-slot') ? `
+        ${!isPageVisibleTo('flow-restrictions', isAdmin) ? `
         <div class="sector-banner sector-banner-flow-full" style="width:calc(40% - 8px);min-width:250px;flex-direction:column;justify-content:center;padding:16px;box-sizing:border-box;">
-          <div style="display:flex;flex-direction:column;align-items:center;gap:8px;">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:10px;">
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
-            <div class="sector-banner-text" style="align-items:center;"><span class="sector-banner-label">Flow Restrictions</span><span class="sector-banner-icao" style="color:#64748b;">No flow info yet</span></div>
+            <div class="sector-banner-text" style="align-items:center;text-align:center;">
+              <span class="sector-banner-label">Flow Restrictions</span>
+              <span style="font-size:13px;font-weight:500;color:#94a3b8;line-height:1.5;margin-top:4px;">No flow restrictions yet available. We are in communication with the local division / vACC to determine if any flow restrictions are required for this sector.</span>
+            </div>
           </div>
         </div>
         ` : `
@@ -7336,7 +7405,17 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
       var toIcao = '${toIcao}';
       var route = ${leg ? JSON.stringify(leg.atc_route || '') : "''"};
 
-      var map = L.map('sectorMap', { zoomControl: true, worldCopyJump: false, maxZoom: 7 }).setView([30, 0], 3);
+      var map = L.map('sectorMap', {
+        zoomControl: false,
+        scrollWheelZoom: false,
+        doubleClickZoom: false,
+        touchZoom: false,
+        boxZoom: false,
+        keyboard: false,
+        dragging: false,
+        worldCopyJump: false,
+        maxZoom: 7
+      }).setView([30, 0], 3);
       wfAddTileLayer(map, { maxZoom: 7 });
 
       // Resolve and render route
@@ -7402,20 +7481,14 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
           L.circleMarker([arrPt.lat, arrPt.lon], { radius: 7, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.9, weight: 2 }).addTo(map)
             .bindTooltip('<strong>' + toIcao + '</strong><br>Arrival', { permanent: true, direction: 'top', className: 'sector-airport-label' });
 
-          // Fit bounds to route — handle antimeridian
-          var lons = pts.map(function(p) { return p.lon; });
-          var minLon = Math.min.apply(null, lons);
-          var maxLon = Math.max.apply(null, lons);
-          var crossesAntimeridian = minLon < -170 || maxLon > 170 || (maxLon - minLon) > 300;
-
-          if (crossesAntimeridian) {
-            // Use custom bounds with the normalized coordinates
-            var latMin = Math.min.apply(null, pts.map(function(p) { return p.lat; }));
-            var latMax = Math.max.apply(null, pts.map(function(p) { return p.lat; }));
-            map.fitBounds([[latMin, minLon], [latMax, maxLon]], { padding: [50, 50], maxZoom: 7 });
-          } else {
-            map.fitBounds(routeLine.getBounds(), { padding: [50, 50], maxZoom: 7 });
-          }
+          // Fit bounds to JUST dep/arr endpoints (pts already antimeridian-corrected above)
+          // Use dynamic padding: more on the constrained axis where airport labels could clip.
+          var spanLat = Math.abs(arrPt.lat - depPt.lat);
+          var spanLon = Math.abs(arrPt.lon - depPt.lon);
+          var routeIsVertical = spanLat > spanLon;
+          var padX = routeIsVertical ? 20 : 50;
+          var padY = routeIsVertical ? 50 : 20;
+          map.fitBounds([[depPt.lat, depPt.lon], [arrPt.lat, arrPt.lon]], { padding: [padX, padY], maxZoom: 10 });
 
           // Show all FIR boundaries faintly
           fetch('/fir-boundaries.geojson')
@@ -8283,6 +8356,617 @@ app.post('/admin/api/scenery/:id/edit', requireAdmin, async (req, res) => {
   }
 });
 
+/* ===========================================================
+   ADMIN: DOCUMENTS & SCENERY MANAGEMENT
+   List / edit / delete entries from one place.
+   =========================================================== */
+
+// List every airport document (admin only). Resolves uploadedBy and eventId
+// to friendly names so the page can render without extra round-trips.
+app.get('/admin/api/documents-all', requireAdmin, async (req, res) => {
+  try {
+    const docs = await prisma.airportDocument.findMany({
+      orderBy: { uploadedAt: 'desc' }
+    });
+    const uploaderCids = [...new Set(docs.map(d => d.uploadedBy))];
+    const users = uploaderCids.length
+      ? await prisma.user.findMany({ where: { cid: { in: uploaderCids } } })
+      : [];
+    const userMap = Object.fromEntries(users.map(u => [u.cid, u.name]));
+    const eventNameMap = Object.fromEntries(wfEvents.map(e => [e.id, e.name]));
+
+    res.json({
+      docs: docs.map(d => ({
+        id: d.id,
+        icao: d.icao,
+        filename: d.filename,
+        displayName: d.filename.replace(/\.[^/.]+$/, ''),
+        url: `/uploads/${d.icao}/${encodeURIComponent(d.filename)}`,
+        uploadedBy: d.uploadedBy,
+        uploadedByName: userMap[d.uploadedBy] || null,
+        uploadedAt: d.uploadedAt,
+        eventId: d.eventId,
+        eventName: d.eventId != null ? (eventNameMap[d.eventId] || ('Event ' + d.eventId)) : null,
+        validity: d.eventId == null ? 'permanent' : (d.eventId === activeEventId ? 'event-active' : 'event-archived')
+      }))
+    });
+  } catch (err) {
+    console.error('[ADMIN DOCS LIST]', err);
+    res.status(500).json({ error: 'Failed to load documents' });
+  }
+});
+
+app.post('/admin/api/documents/:id/edit', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { icao, filename, eventId } = req.body;
+    const data = {};
+    if (typeof icao === 'string' && /^[A-Z]{4}$/.test(icao.toUpperCase())) {
+      data.icao = icao.toUpperCase();
+    }
+    if (typeof filename === 'string' && filename.trim()) {
+      data.filename = filename.trim();
+    }
+    if (eventId === null || eventId === '' || eventId === undefined) {
+      data.eventId = null;
+    } else {
+      const n = Number(eventId);
+      if (!Number.isFinite(n)) return res.status(400).json({ error: 'Invalid eventId' });
+      data.eventId = n;
+    }
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
+    await prisma.airportDocument.update({ where: { id }, data });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[ADMIN DOC EDIT]', err);
+    res.status(500).json({ error: 'Failed to update document' });
+  }
+});
+
+app.delete('/admin/api/documents/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const doc = await prisma.airportDocument.findUnique({ where: { id } });
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+    // Best-effort file removal — don't block deletion if file is missing.
+    try {
+      const filePath = path.join(__dirname, 'Uploads', doc.icao, doc.filename);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {
+      console.warn('[ADMIN DOC DELETE] file unlink failed:', e.message);
+    }
+    await prisma.airportDocument.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[ADMIN DOC DELETE]', err);
+    res.status(500).json({ error: 'Failed to delete document' });
+  }
+});
+
+// List every scenery entry (any approval state). Pending-only is at /admin/api/scenery/pending.
+app.get('/admin/api/scenery-all', requireAdmin, async (req, res) => {
+  try {
+    const rows = await prisma.airportScenery.findMany({
+      orderBy: [{ icao: 'asc' }, { submittedAt: 'desc' }]
+    });
+    res.json({ scenery: rows });
+  } catch (err) {
+    console.error('[ADMIN SCENERY LIST]', err);
+    res.status(500).json({ error: 'Failed to load scenery' });
+  }
+});
+
+// Documents & Scenery admin page
+app.get('/admin/documents-scenery', requireAdmin, (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  // Accept either the legacy 'scenery' admin permission or the new 'documents-scenery'
+  // so existing granular admins keep their access after the consolidation.
+  if (!isSuperAdmin(cid)
+      && !hasAdminPageAccess(cid, 'documents-scenery')
+      && !hasAdminPageAccess(cid, 'scenery')) {
+    return res.status(403).send('Forbidden');
+  }
+  const eventOptions = wfEvents
+    .map(e => `<option value="${e.id}">${e.name || ('Event ' + e.id)}</option>`)
+    .join('');
+
+  const content = `
+<a href="/admin/control-panel" class="back-link">&larr; Back to Admin</a>
+
+<section class="card card-full doc-access-requests">
+  <h2 style="margin-top:0;">Documents &amp; Scenery</h2>
+
+  <div class="ds-tabs" role="tablist">
+    <button class="ds-tab active" data-tab="docs" type="button">Documents</button>
+    <button class="ds-tab" data-tab="scenery" type="button">Scenery</button>
+    <button class="ds-tab" data-tab="pending" type="button">Pending Submissions <span id="dsPendingBadge" class="ds-badge" style="display:none;">0</span></button>
+    <button class="ds-tab" data-tab="reports" type="button">Reports <span id="dsReportsBadge" class="ds-badge" style="display:none;">0</span></button>
+  </div>
+
+  <div style="display:flex;gap:8px;align-items:center;margin:14px 0;flex-wrap:wrap;">
+    <input type="text" id="dsSearch" placeholder="Search by name or ICAO…" style="flex:1;min-width:240px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--panel2);color:var(--text);font-size:14px;" />
+    <span id="dsCount" style="color:var(--muted);font-size:13px;"></span>
+  </div>
+
+  <div class="ds-panel active" data-panel="docs">
+    <div style="overflow-x:auto;">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>ICAO</th>
+            <th>Filename</th>
+            <th>Validity</th>
+            <th class="hide-mobile">Uploaded By</th>
+            <th class="hide-mobile">Uploaded At</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="dsDocsBody">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="ds-panel" data-panel="scenery">
+    <div style="overflow-x:auto;">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>ICAO</th>
+            <th>Sim</th>
+            <th>Name</th>
+            <th class="hide-mobile">Developer</th>
+            <th>Type</th>
+            <th class="hide-mobile">Approved</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="dsSceneryBody">
+          <tr><td colspan="7" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="ds-panel" data-panel="pending">
+    <div style="overflow-x:auto;">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>ICAO</th>
+            <th>Sim</th>
+            <th>Name</th>
+            <th class="hide-mobile">Developer</th>
+            <th>Type</th>
+            <th class="hide-mobile">Submitted By</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="dsPendingBody">
+          <tr><td colspan="7" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="ds-panel" data-panel="reports">
+    <div style="overflow-x:auto;">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>ICAO</th>
+            <th>Sim</th>
+            <th>Name</th>
+            <th>Reason</th>
+            <th class="hide-mobile">Reporter</th>
+            <th class="hide-mobile">Date</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="dsReportsBody">
+          <tr><td colspan="7" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- Edit Document modal -->
+<div id="dsDocEditModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog">
+    <h3>Edit Document</h3>
+    <form id="dsDocEditForm" style="display:flex;flex-direction:column;gap:12px;">
+      <input type="hidden" id="dsDocId">
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">ICAO
+        <input type="text" id="dsDocIcao" maxlength="4" required style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;text-transform:uppercase;">
+      </label>
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Filename
+        <input type="text" id="dsDocFilename" required style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+      </label>
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Validity
+        <select id="dsDocEventId" style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+          <option value="">Permanent (always visible)</option>
+          ${eventOptions}
+        </select>
+      </label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+        <button type="button" class="action-btn" id="dsDocEditCancel">Cancel</button>
+        <button type="submit" class="action-btn primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Edit Scenery modal -->
+<div id="dsSceneryEditModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog">
+    <h3>Edit Scenery</h3>
+    <form id="dsSceneryEditForm" style="display:flex;flex-direction:column;gap:12px;">
+      <input type="hidden" id="dsSceneryId">
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Sim
+        <select id="dsScenerySim" required style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+          <option value="MSFS">MSFS</option>
+          <option value="XPLANE">X-Plane</option>
+          <option value="P3D">Prepar3D</option>
+        </select>
+      </label>
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Name
+        <input type="text" id="dsSceneryName" required style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+      </label>
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Developer
+        <input type="text" id="dsSceneryDeveloper" style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+      </label>
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Store
+        <input type="text" id="dsSceneryStore" style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+      </label>
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">URL
+        <input type="text" id="dsSceneryUrl" required style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+      </label>
+      <label style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Type
+        <select id="dsSceneryType" required style="display:block;width:100%;padding:8px 12px;margin-top:4px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+          <option value="FREE">Free</option>
+          <option value="PAID">Paid</option>
+          <option value="DEFAULT">Default</option>
+        </select>
+      </label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+        <button type="button" class="action-btn" id="dsSceneryEditCancel">Cancel</button>
+        <button type="submit" class="action-btn primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<style>
+  .ds-tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:0; }
+  .ds-tab { background:transparent; border:0; padding:10px 18px; color:var(--muted); cursor:pointer; font-size:14px; font-weight:600; border-bottom:2px solid transparent; margin-bottom:-1px; transition:color .15s, border-color .15s; }
+  .ds-tab:hover { color:var(--text); }
+  .ds-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+  .ds-panel { display:none; }
+  .ds-panel.active { display:block; }
+  .ds-icon-btn { background:transparent; border:1px solid var(--border); border-radius:6px; padding:6px 12px; color:var(--muted); cursor:pointer; font-size:12px; font-weight:600; margin-right:6px; transition:all .12s; }
+  .ds-icon-btn:hover { color:var(--text); border-color:var(--accent); background:rgba(56,189,248,0.08); }
+  .ds-icon-btn.danger:hover { color:#fff; background:#ef4444; border-color:#ef4444; }
+  /* Compact admin-table tweaks for this page only */
+  .ds-panel .admin-table tbody td:first-child { font-family:monospace; font-weight:700; color:var(--accent); letter-spacing:0.4px; }
+  .ds-panel .admin-table tbody td:last-child,
+  .ds-panel .admin-table thead th:last-child { white-space:nowrap; text-align:right; }
+  /* Empty/colspan rows should always be centred regardless of column position */
+  .ds-panel .admin-table tbody td.empty { text-align:center !important; }
+  .ds-panel .admin-table .sim-pill { display:inline-block; padding:2px 8px; border-radius:6px; background:rgba(74,222,128,0.12); color:#4ade80; font-size:10px; font-weight:700; letter-spacing:0.5px; }
+  .ds-panel .admin-table a { color:var(--accent); font-weight:600; text-decoration:none; }
+  .ds-panel .admin-table a:hover { text-decoration:underline; }
+  .ds-panel .admin-table .empty { text-align:center; font-style:italic; color:var(--muted2); padding:24px; }
+  /* Search input */
+  #dsSearch:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px rgba(56,189,248,0.2); }
+  /* Tab badge (pending/reports counts) */
+  .ds-badge { display:inline-block; min-width:18px; padding:1px 6px; margin-left:6px; border-radius:999px; background:#ef4444; color:#fff; font-size:11px; font-weight:700; line-height:1.4; text-align:center; }
+  /* Reports tab — reason badge inside table cell */
+  .ds-report-reason-badge { display:inline-block; padding:3px 8px; border-radius:6px; background:rgba(245,158,11,0.12); color:#fbbf24; font-size:11px; font-weight:700; }
+  .ds-report-details { font-size:11px; color:var(--muted); font-style:italic; margin-top:4px; }
+</style>
+
+<script>
+(function(){
+  const docsBody     = document.getElementById('dsDocsBody');
+  const sceneryBody  = document.getElementById('dsSceneryBody');
+  const searchInput  = document.getElementById('dsSearch');
+  const countEl      = document.getElementById('dsCount');
+  const tabs         = document.querySelectorAll('.ds-tab');
+  const panels       = document.querySelectorAll('.ds-panel');
+
+  let allDocs = [];
+  let allScenery = [];
+  let pendingScenery = [];
+  let sceneryReports = [];
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function activeTab() {
+    return document.querySelector('.ds-tab.active').dataset.tab;
+  }
+
+  function matchesQuery(s, q) {
+    if (!q) return true;
+    return String(s).toLowerCase().includes(q);
+  }
+
+  function validityBadge(v, eventName) {
+    if (v === 'permanent') return '<span class="doc-scope doc-scope-permanent">Permanent</span>';
+    if (v === 'event-active') return '<span class="doc-scope doc-scope-event-active">' + escapeHtml(eventName) + '</span>';
+    return '<span class="doc-scope doc-scope-event-archived">' + escapeHtml(eventName) + '</span>';
+  }
+
+  function renderDocs() {
+    const q = searchInput.value.trim().toLowerCase();
+    const rows = allDocs.filter(d => matchesQuery(d.icao, q) || matchesQuery(d.displayName, q) || matchesQuery(d.filename, q));
+    if (activeTab() === 'docs') countEl.textContent = rows.length + ' / ' + allDocs.length + ' documents';
+    docsBody.innerHTML = rows.length
+      ? rows.map(d => '<tr>'
+          + '<td><strong>' + escapeHtml(d.icao) + '</strong></td>'
+          + '<td><a href="' + d.url + '" target="_blank">' + escapeHtml(d.displayName) + '</a></td>'
+          + '<td>' + validityBadge(d.validity, d.eventName || '') + '</td>'
+          + '<td class="hide-mobile">' + escapeHtml(d.uploadedByName || d.uploadedBy) + '</td>'
+          + '<td class="hide-mobile">' + new Date(d.uploadedAt).toLocaleDateString('en-GB') + '</td>'
+          + '<td>'
+            + '<button class="ds-icon-btn" data-action="edit-doc" data-id="' + d.id + '">Edit</button>'
+            + '<button class="ds-icon-btn danger" data-action="delete-doc" data-id="' + d.id + '">Delete</button>'
+          + '</td>'
+        + '</tr>').join('')
+      : '<tr><td colspan="6" class="empty">No documents found</td></tr>';
+  }
+
+  function renderScenery() {
+    const q = searchInput.value.trim().toLowerCase();
+    const rows = allScenery.filter(s => matchesQuery(s.icao, q) || matchesQuery(s.name, q) || matchesQuery(s.developer || '', q));
+    if (activeTab() === 'scenery') countEl.textContent = rows.length + ' / ' + allScenery.length + ' scenery entries';
+    sceneryBody.innerHTML = rows.length
+      ? rows.map(s => '<tr>'
+          + '<td><strong>' + escapeHtml(s.icao) + '</strong></td>'
+          + '<td><span class="sim-pill">' + escapeHtml(s.sim) + '</span></td>'
+          + '<td><a href="' + s.url + '" target="_blank">' + escapeHtml(s.name) + '</a></td>'
+          + '<td class="hide-mobile">' + escapeHtml(s.developer || '-') + '</td>'
+          + '<td>' + escapeHtml(s.type) + '</td>'
+          + '<td class="hide-mobile">' + (s.approved ? '<span style="color:#4ade80;">Yes</span>' : '<span style="color:#fbbf24;">Pending</span>') + '</td>'
+          + '<td>'
+            + '<button class="ds-icon-btn" data-action="edit-scenery" data-id="' + s.id + '">Edit</button>'
+            + '<button class="ds-icon-btn danger" data-action="delete-scenery" data-id="' + s.id + '">Delete</button>'
+          + '</td>'
+        + '</tr>').join('')
+      : '<tr><td colspan="7" class="empty">No scenery found</td></tr>';
+  }
+
+  function renderPending() {
+    const q = searchInput.value.trim().toLowerCase();
+    const tbody = document.getElementById('dsPendingBody');
+    const rows = pendingScenery.filter(r => matchesQuery(r.icao, q) || matchesQuery(r.name, q) || matchesQuery(r.developer || '', q));
+    if (activeTab() === 'pending') countEl.textContent = rows.length + ' / ' + pendingScenery.length + ' pending';
+    tbody.innerHTML = rows.length
+      ? rows.map(r => '<tr>'
+          + '<td><strong>' + escapeHtml(r.icao) + '</strong></td>'
+          + '<td><span class="sim-pill">' + escapeHtml(r.sim) + '</span></td>'
+          + '<td><a href="' + r.url + '" target="_blank">' + escapeHtml(r.name) + '</a></td>'
+          + '<td class="hide-mobile">' + escapeHtml(r.developer || '-') + '</td>'
+          + '<td>' + escapeHtml(r.type) + '</td>'
+          + '<td class="hide-mobile">' + escapeHtml(r.submittedBy || '-') + '</td>'
+          + '<td>'
+            + '<button class="ds-icon-btn" data-action="approve-pending" data-id="' + r.id + '" style="border-color:rgba(74,222,128,0.4);color:#4ade80;">Approve</button>'
+            + '<button class="ds-icon-btn danger" data-action="reject-pending" data-id="' + r.id + '">Reject</button>'
+          + '</td>'
+        + '</tr>').join('')
+      : '<tr><td colspan="7" class="empty">No pending submissions</td></tr>';
+  }
+
+  function renderReports() {
+    const q = searchInput.value.trim().toLowerCase();
+    const tbody = document.getElementById('dsReportsBody');
+    const rows = sceneryReports.filter(r => {
+      const s = r.scenery || {};
+      return matchesQuery(s.icao || '', q) || matchesQuery(s.name || '', q) || matchesQuery(r.reason || '', q);
+    });
+    if (activeTab() === 'reports') countEl.textContent = rows.length + ' / ' + sceneryReports.length + ' reports';
+    tbody.innerHTML = rows.length
+      ? rows.map(r => {
+          const s = r.scenery || {};
+          const date = new Date(r.reportedAt).toLocaleDateString('en-GB');
+          const nameHtml = s.url
+            ? '<a href="' + s.url + '" target="_blank">' + escapeHtml(s.name || '-') + '</a>'
+            : escapeHtml(s.name || '-');
+          const reasonHtml = '<span class="ds-report-reason-badge">' + escapeHtml(r.reason) + '</span>'
+            + (r.details ? '<div class="ds-report-details">' + escapeHtml(r.details) + '</div>' : '');
+          return '<tr>'
+            + '<td><strong>' + escapeHtml(s.icao || '-') + '</strong></td>'
+            + '<td>' + (s.sim ? '<span class="sim-pill">' + escapeHtml(s.sim) + '</span>' : '-') + '</td>'
+            + '<td>' + nameHtml + '</td>'
+            + '<td>' + reasonHtml + '</td>'
+            + '<td class="hide-mobile">CID ' + r.reportedBy + '</td>'
+            + '<td class="hide-mobile">' + date + '</td>'
+            + '<td>'
+              + (s.id ? '<button class="ds-icon-btn" data-action="edit-scenery" data-id="' + s.id + '">Edit</button>' : '')
+              + (s.id ? '<button class="ds-icon-btn danger" data-action="delete-scenery-from-report" data-id="' + s.id + '" data-report-id="' + r.id + '">Delete</button>' : '')
+              + '<button class="ds-icon-btn" data-action="dismiss-report" data-id="' + r.id + '">Dismiss</button>'
+            + '</td>'
+          + '</tr>';
+        }).join('')
+      : '<tr><td colspan="7" class="empty">No open reports</td></tr>';
+  }
+
+  function refreshBadges() {
+    const pb = document.getElementById('dsPendingBadge');
+    const rb = document.getElementById('dsReportsBadge');
+    if (pendingScenery.length) { pb.textContent = pendingScenery.length; pb.style.display = ''; } else pb.style.display = 'none';
+    if (sceneryReports.length) { rb.textContent = sceneryReports.length; rb.style.display = ''; } else rb.style.display = 'none';
+  }
+
+  function renderActive() {
+    const t = activeTab();
+    if (t === 'docs') renderDocs();
+    else if (t === 'scenery') renderScenery();
+    else if (t === 'pending') renderPending();
+    else if (t === 'reports') renderReports();
+  }
+
+  // Tabs
+  tabs.forEach(btn => btn.addEventListener('click', () => {
+    tabs.forEach(b => b.classList.toggle('active', b === btn));
+    panels.forEach(p => p.classList.toggle('active', p.dataset.panel === btn.dataset.tab));
+    renderActive();
+  }));
+
+  // Search filters whichever tab is active
+  searchInput.addEventListener('input', renderActive);
+
+  // Load data for all four tabs in parallel.
+  Promise.all([
+    fetch('/admin/api/documents-all').then(r => r.json()),
+    fetch('/admin/api/scenery-all').then(r => r.json()),
+    fetch('/admin/api/scenery/pending').then(r => r.json()),
+    fetch('/admin/api/scenery/reports').then(r => r.json())
+  ]).then(([d, s, p, rep]) => {
+    allDocs         = d.docs || [];
+    allScenery      = s.scenery || [];
+    pendingScenery  = Array.isArray(p) ? p : (p.scenery || p.pending || []);
+    sceneryReports  = Array.isArray(rep) ? rep : (rep.reports || []);
+    renderDocs();
+    renderScenery();
+    renderPending();
+    renderReports();
+    refreshBadges();
+  });
+
+  // Action handler — edit + delete for both tables
+  document.addEventListener('click', async e => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const id = Number(btn.dataset.id);
+    const action = btn.dataset.action;
+
+    if (action === 'edit-doc') {
+      const d = allDocs.find(x => x.id === id);
+      if (!d) return;
+      document.getElementById('dsDocId').value = d.id;
+      document.getElementById('dsDocIcao').value = d.icao;
+      document.getElementById('dsDocFilename').value = d.filename;
+      document.getElementById('dsDocEventId').value = d.eventId == null ? '' : String(d.eventId);
+      document.getElementById('dsDocEditModal').classList.remove('hidden');
+    } else if (action === 'delete-doc') {
+      const d = allDocs.find(x => x.id === id);
+      if (!d) return;
+      if (!confirm('Delete document "' + d.displayName + '" for ' + d.icao + '?')) return;
+      const r = await fetch('/admin/api/documents/' + id, { method: 'DELETE' });
+      if (!r.ok) return alert('Delete failed');
+      allDocs = allDocs.filter(x => x.id !== id);
+      renderDocs();
+    } else if (action === 'edit-scenery') {
+      const s = allScenery.find(x => x.id === id);
+      if (!s) return;
+      document.getElementById('dsSceneryId').value = s.id;
+      document.getElementById('dsScenerySim').value = s.sim;
+      document.getElementById('dsSceneryName').value = s.name;
+      document.getElementById('dsSceneryDeveloper').value = s.developer || '';
+      document.getElementById('dsSceneryStore').value = s.store || '';
+      document.getElementById('dsSceneryUrl').value = s.url;
+      document.getElementById('dsSceneryType').value = s.type;
+      document.getElementById('dsSceneryEditModal').classList.remove('hidden');
+    } else if (action === 'delete-scenery') {
+      const s = allScenery.find(x => x.id === id);
+      if (!s) return;
+      if (!confirm('Delete scenery "' + s.name + '" for ' + s.icao + '?')) return;
+      const r = await fetch('/admin/api/scenery/' + id + '/reject', { method: 'POST' });
+      if (!r.ok) return alert('Delete failed');
+      allScenery = allScenery.filter(x => x.id !== id);
+      renderScenery();
+    } else if (action === 'approve-pending') {
+      if (!confirm('Approve this submission?')) return;
+      const r = await fetch('/admin/api/scenery/' + id + '/approve', { method: 'POST' });
+      if (!r.ok) return alert('Approve failed');
+      pendingScenery = pendingScenery.filter(x => x.id !== id);
+      // Approved items move into all-scenery; refresh that.
+      const fresh = await fetch('/admin/api/scenery-all').then(x => x.json());
+      allScenery = fresh.scenery || [];
+      renderPending(); renderScenery(); refreshBadges();
+    } else if (action === 'reject-pending') {
+      if (!confirm('Reject (delete) this submission?')) return;
+      const r = await fetch('/admin/api/scenery/' + id + '/reject', { method: 'POST' });
+      if (!r.ok) return alert('Reject failed');
+      pendingScenery = pendingScenery.filter(x => x.id !== id);
+      renderPending(); refreshBadges();
+    } else if (action === 'delete-scenery-from-report') {
+      if (!confirm('Delete this scenery? The report will also be marked resolved.')) return;
+      const reportId = Number(btn.dataset.reportId);
+      const r1 = await fetch('/admin/api/scenery/' + id + '/reject', { method: 'POST' });
+      if (!r1.ok) return alert('Delete failed');
+      await fetch('/admin/api/scenery/reports/' + reportId + '/resolve', { method: 'POST' });
+      sceneryReports = sceneryReports.filter(x => x.id !== reportId);
+      allScenery = allScenery.filter(x => x.id !== id);
+      renderReports(); renderScenery(); refreshBadges();
+    } else if (action === 'dismiss-report') {
+      if (!confirm('Dismiss this report?')) return;
+      const r = await fetch('/admin/api/scenery/reports/' + id + '/resolve', { method: 'POST' });
+      if (!r.ok) return alert('Dismiss failed');
+      sceneryReports = sceneryReports.filter(x => x.id !== id);
+      renderReports(); refreshBadges();
+    }
+  });
+
+  // Doc edit form
+  document.getElementById('dsDocEditCancel').addEventListener('click', () =>
+    document.getElementById('dsDocEditModal').classList.add('hidden'));
+  document.getElementById('dsDocEditForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const id = Number(document.getElementById('dsDocId').value);
+    const body = {
+      icao: document.getElementById('dsDocIcao').value.toUpperCase().trim(),
+      filename: document.getElementById('dsDocFilename').value.trim(),
+      eventId: document.getElementById('dsDocEventId').value || null
+    };
+    const r = await fetch('/admin/api/documents/' + id + '/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    if (!r.ok) return alert('Save failed');
+    document.getElementById('dsDocEditModal').classList.add('hidden');
+    // Refresh
+    const d = await fetch('/admin/api/documents-all').then(x => x.json());
+    allDocs = d.docs || [];
+    renderDocs();
+  });
+
+  // Scenery edit form
+  document.getElementById('dsSceneryEditCancel').addEventListener('click', () =>
+    document.getElementById('dsSceneryEditModal').classList.add('hidden'));
+  document.getElementById('dsSceneryEditForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const id = Number(document.getElementById('dsSceneryId').value);
+    const body = {
+      sim: document.getElementById('dsScenerySim').value,
+      name: document.getElementById('dsSceneryName').value.trim(),
+      developer: document.getElementById('dsSceneryDeveloper').value.trim(),
+      store: document.getElementById('dsSceneryStore').value.trim(),
+      url: document.getElementById('dsSceneryUrl').value.trim(),
+      type: document.getElementById('dsSceneryType').value
+    };
+    const r = await fetch('/admin/api/scenery/' + id + '/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    if (!r.ok) return alert('Save failed');
+    document.getElementById('dsSceneryEditModal').classList.add('hidden');
+    const s = await fetch('/admin/api/scenery-all').then(x => x.json());
+    allScenery = s.scenery || [];
+    renderScenery();
+  });
+
+})();
+</script>
+`;
+  res.send(renderLayout({ title: 'Documents & Scenery', user, isAdmin: true, content, layoutClass: 'dashboard-full' }));
+});
+
 app.get('/admin/documentation-access', requireAdmin, (req, res) => {
   res.redirect('/admin/access-management');
 });
@@ -8297,7 +8981,7 @@ app.get('/admin/access-management', requireAdmin, (req, res) => {
 </div>
 
 <!-- ====== TAB 1: PENDING REQUESTS ====== -->
-<div id="tab-requests" class="access-tab-content active">
+<div id="tab-requests" class="access-tab-content doc-access-requests active">
 
   <div class="requests-subtabs">
     <button class="requests-subtab active" data-subtab="doc-requests">Document Upload</button>
@@ -10115,6 +10799,12 @@ function buildAccessEmail({ userName, isDeny, permissions, deniedPattern, existi
 
 
 app.get('/admin/scenery', requireAdmin, (req, res) => {
+  // Consolidated into Documents & Scenery — keep the old URL working.
+  return res.redirect('/admin/documents-scenery');
+});
+
+// Old /admin/scenery page kept below for reference (unused).
+app.get('/admin/scenery-legacy', requireAdmin, (req, res) => {
   const user = req.session.user?.data || null;
 
   const content = `
@@ -10779,13 +11469,22 @@ app.get('/icao/:icao', async (req, res) => {
   const isWorldFlight = hasOutboundFlow(icao);
   const wfLeg = getWorldFlightLegForAirport(icao); // whatever function you already use
 
-  
+
   const isLoggedIn = Boolean(req.session?.user?.data);
+  const cid = Number(req.session?.user?.data?.cid) || null;
+  const isAdmin = cid ? isAdminUser(cid) : false;
 
   const documents = await prisma.airportDocument.findMany({
     where: { icao },
     orderBy: { uploadedAt: 'desc' }
   });
+  const airportRow = await prisma.airport.findUnique({
+    where: { icao },
+    select: { name: true }
+  });
+  const airportName = airportRow?.name || '';
+  // US airports use a "K" prefix on the ICAO (KLAX, KJFK) — display the 3-letter FAA code instead.
+  const displayIcao = (icao.length === 4 && icao.startsWith('K')) ? icao.slice(1) : icao;
   // Find ALL WF legs involving this airport
   const activeEvent = wfEvents.find(e => e.id === activeEventId);
   const activeEventName = activeEvent ? activeEvent.name : 'WorldFlight';
@@ -10819,192 +11518,279 @@ app.get('/icao/:icao', async (req, res) => {
   })();
   </script>
 
-  ${wfInvolved && isPageEnabled('wf-portal-banner') ? '<div style="padding:14px 20px;background:linear-gradient(135deg,rgba(56,189,248,0.1),rgba(139,92,246,0.08));border:1px solid rgba(56,189,248,0.25);border-radius:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">'
-    + '<div>'
-    + '<div style="font-size:16px;font-weight:800;color:var(--accent);margin-bottom:2px;">' + activeEventName + '!</div>'
-    + '<div style="font-size:13px;color:var(--muted);">This airport has been selected to take part in ' + activeEventName + (wfDeparture && wfArrival ? ' as both a departure and arrival airfield' : wfDeparture ? ' as a departure airfield' : ' as an arrival airfield') + '.</div>'
-    + '</div>'
-    + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
-    + wfButtons.map(function(b) { return '<a href="' + b.href + '" class="sector-details-btn" style="text-decoration:none;padding:8px 16px;font-size:13px;">' + b.label + '</a>'; }).join('')
-    + '</div></div>' : ''}
 
 
-  <section class="card">
+  <script>
+    window.IS_LOGGED_IN = ${req.session?.user?.data ? 'true' : 'false'};
+    window.IS_WORLD_FLIGHT = ${isWorldFlight ? 'true' : 'false'};
+    window.ICAO = "${icao}";
+    window.WF_LEG = ${wfLeg ? JSON.stringify(wfLeg) : 'null'};
+    window.VATSIM_USER = ${req.session?.user?.data ? JSON.stringify({
+      cid: req.session.user.data.cid,
+      nameFirst: req.session.user.data.personal?.name_first || '',
+      nameLast: req.session.user.data.personal?.name_last || '',
+      email: req.session.user.data.personal?.email || ''
+    }) : 'null'};
+  </script>
+  <script>
+  (function waitForIo() {
+    if (typeof io === 'undefined') { setTimeout(waitForIo, 50); return; }
+    window.socket = io({ query: { icao: window.ICAO } });
+  })();
+  </script>
 
-  <div class="icao-top-row two-cols">
+  <section class="card icao-portal-header">
+    <div class="icao-portal-title">
+      <span class="icao-portal-icao">${displayIcao}</span>
+      ${airportName ? `<span class="icao-portal-name">${airportName}</span>` : ''}
+    </div>
+    ${wfInvolved && isPageVisibleTo('wf-portal-banner', isAdmin) ? `
+    <div class="icao-portal-wf">
+      <div class="icao-portal-wf-text">${displayIcao} has been selected as ${wfDeparture && wfArrival ? 'a departure and arrival airport' : wfDeparture ? 'a departure airport' : 'an arrival airport'} for <strong>${activeEventName}</strong></div>
+      <div class="icao-portal-sectors">
+        ${wfButtons.map(b => `<a href="${b.href}" class="sector-details-btn ${b.type === 'arr' ? 'sector-details-btn--arr' : 'sector-details-btn--dep'}" style="text-decoration:none;padding:12px 22px;font-size:15px;">${b.label}</a>`).join('')}
+      </div>
+    </div>
+    ` : `
+    <div class="icao-portal-no-wf">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <span>Not on this year's <strong>${activeEventName}</strong> route</span>
+    </div>
+    `}
+  </section>
 
-    <!-- DEPARTURES TABLE (commented out)
-    <div class="icao-deps">
-  <div class="deps-scroll">
-    <table class="departures-table departures-table--compact">
-      <thead>
-        <tr>
-          <th class="col-sts">STS</th>
-          <th>Callsign</th>
-          <th>A/C</th>
-          <th>Dest</th>
-          <th>ATC Route</th>
-        </tr>
-      </thead>
-      <tbody id="upcomingDepartures"></tbody>
-    </table>
-  </div>
-</div>
-    -->
-
-    <!-- LEFT: Online Controllers -->
-    <div class="controllers-card">
-    <h3 class="controllers-heading">Online Controllers <span class="controllers-src">(VATSIM)</span></h3>
-    <div class="controllers-scroll">
-    <ul id="onlineControllers" class="atc-list">
-  <li class="atc-empty">Loading ATC...</li>
-</ul>
-</div>
-</div>
-
-
-    <!-- RIGHT: Map -->
-    <div class="icao-map">
-  <div id="icaoMap" data-icao="${icao}"></div>
-
-  <div class="map-overlay-controls">
-    <button
-      id="expandMapBtn"
-      class="map-overlay-btn"
-      title="Expand map"
-      aria-label="Expand map"
-    >
-      ⤢
-    </button>
-
-    <button
-      id="toggleMapThemeBtn"
-      class="map-overlay-btn"
-      title="Toggle map theme"
-      aria-label="Toggle map theme"
-    >
-      <svg viewBox="0 0 24 24" width="14" height="14" class="theme-icon">
-  <!-- Sun -->
-  <g class="sun">
-    <circle cx="12" cy="12" r="4" />
-    <line x1="12" y1="2"  x2="12" y2="5" />
-    <line x1="12" y1="19" x2="12" y2="22" />
-    <line x1="2"  y1="12" x2="5"  y2="12" />
-    <line x1="19" y1="12" x2="22" y2="12" />
-    <line x1="4.5" y1="4.5" x2="6.5" y2="6.5" />
-    <line x1="17.5" y1="17.5" x2="19.5" y2="19.5" />
-    <line x1="17.5" y1="6.5" x2="19.5" y2="4.5" />
-    <line x1="4.5" y1="19.5" x2="6.5" y2="17.5" />
-  </g>
-
-  <!-- Moon -->
-  <path
-    class="moon"
-    d="M21 12.79A9 9 0 1111.21 3
-       7 7 0 0021 12.79z"
-  />
-</svg>
-
-
-
-    </button>
-  </div>
-</div>
-
-
+  <div class="icao-tabs" role="tablist">
+    <button class="icao-tab active" data-tab="map" role="tab" type="button">Map, Controllers &amp; ATIS</button>
+    <button class="icao-tab" data-tab="docs" role="tab" type="button">Pilot Documents &amp; Scenery</button>
   </div>
 
-</section>
-<section class="card hidden" id="airportAtisCard">
-  <div class="atis-container">
-    <div class="atis-letter" id="atisLetter">?</div>
-
-
-    <div class="atis-body">
-      <div class="atis-header">
-        <span class="atis-source" id="atisSource"></span>
+  <div class="icao-tab-panel active" data-panel="map">
+    <div class="icao-portal-grid">
+      <div class="icao-portal-left">
+        <section class="card icao-portal-map-card">
+          <div class="icao-map">
+            <div id="icaoMap" data-icao="${icao}"></div>
+            <div class="map-overlay-controls">
+              <button id="expandMapBtn" class="map-overlay-btn" title="Expand map" aria-label="Expand map">⤢</button>
+            </div>
+          </div>
+        </section>
       </div>
 
-      <pre class="atis-text" id="atisText"></pre>
+      <div class="icao-portal-right">
+        <section class="card hidden" id="airportAtisCard">
+          <div class="atis-container">
+            <div class="atis-letter" id="atisLetter">?</div>
+            <div class="atis-body">
+              <div class="atis-header">
+                <span class="atis-source" id="atisSource"></span>
+              </div>
+              <pre class="atis-text" id="atisText"></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="controllers-card">
+            <h3 class="controllers-heading" style="margin-top:0;">Online Controllers <span class="controllers-src">(VATSIM)</span></h3>
+            <div class="controllers-scroll">
+              <ul id="onlineControllers" class="atc-list">
+                <li class="atc-empty">Loading ATC...</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
-</section>
 
-<section class="card">
-  <h2>Airport Documentation</h2>
+  <div class="icao-tab-panel" data-panel="docs">
+    <section class="card">
+      <h2 style="margin-top:0;">Pilot Documents</h2>
+      <table class="docs-table">
+        <thead>
+          <tr>
+            <th>File Name</th>
+            <th>Type</th>
+            <th>Validity</th>
+            <th class="hide-mobile">Last Updated</th>
+            <th>Submitted By</th>
+          </tr>
+        </thead>
+        <tbody id="airportDocs"></tbody>
+      </table>
+      <button class="action-btn hidden" id="openUploadDoc" data-icao="${icao}">➕ Upload Document</button>
+      <button class="action-btn hidden" id="requestDocAccess" data-icao="${icao}">🔐 Request access to upload documents</button>
+    </section>
 
-  <table class="docs-table">
-    <thead>
-      <tr>
-        <th>File Name</th>
-        <th>Type</th>
-        <th class="hide-mobile">Last Updated</th>
-        <th>Submitted By</th>
-      </tr>
-    </thead>
-    <tbody id="airportDocs"></tbody>
-  </table>
-<button
-  class="action-btn hidden"
-  id="openUploadDoc"
-  data-icao="${icao}"
->
-  ➕ Upload Document
-</button>
-<script>
-  window.IS_LOGGED_IN = ${req.session?.user?.data ? 'true' : 'false'};
-  window.IS_WORLD_FLIGHT = ${isWorldFlight ? 'true' : 'false'};
-  window.ICAO = "${icao}";
-  window.WF_LEG = ${wfLeg ? JSON.stringify(wfLeg) : 'null'};
-</script>
-<script>
-(function waitForIo() {
-  if (typeof io === 'undefined') {
-    setTimeout(waitForIo, 50);
-    return;
-  }
+    <section class="card" style="margin-top:16px;">
+      <h2 style="margin-top:0;">Available Scenery</h2>
+      <table class="docs-table" id="availableScenery">
+        <thead>
+          <tr>
+            <th>Sim</th>
+            <th>Name</th>
+            <th class="hide-mobile">Developer</th>
+            <th class="hide-mobile">Store</th>
+            <th>Type</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="sceneryRows">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+      <button id="openSceneryModal" class="action-btn">➕ Submit scenery for this airport</button>
+      <div id="sceneryLoginHint" class="login-hint hidden">
+        Log in to submit scenery for this airport
+      </div>
+    </section>
+  </div>
 
-  // Create ICAO-scoped socket for this page
-  window.socket = io({
-    query: { icao: window.ICAO }
-  });
-})();
-</script>
+  <style>
+    .icao-portal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .icao-portal-title {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+      margin: 0;
+    }
+    .icao-portal-icao {
+      font-size: 28px;
+      font-weight: 800;
+      color: var(--accent);
+      letter-spacing: 1px;
+      line-height: 1;
+      padding-bottom: 4px;
+      border-bottom: 2px solid var(--text);
+    }
+    .icao-portal-name {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.2;
+    }
+    .icao-portal-wf {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+    }
+    .icao-portal-wf-text {
+      font-size: 13px;
+      color: var(--muted);
+      text-align: right;
+    }
+    .icao-portal-wf-text strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+    .icao-portal-sectors {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .icao-portal-no-wf {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 22px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 15px;
+    }
+    .icao-portal-no-wf svg { color: var(--muted); flex-shrink: 0; width: 22px; height: 22px; }
+    .icao-portal-no-wf strong { color: var(--text); font-weight: 700; }
+    @media (max-width: 700px) {
+      .icao-portal-wf {
+        align-items: flex-start;
+        width: 100%;
+      }
+      .icao-portal-wf-text {
+        text-align: left;
+      }
+    }
 
-<button
-  class="action-btn hidden"
-  id="requestDocAccess"
-  data-icao="${icao}"
->
-  🔐 Request access to upload documents
-</button>
+    .icao-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      flex-wrap: wrap;
+    }
+    .icao-tab {
+      background: transparent;
+      border: 0;
+      padding: 10px 18px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      white-space: nowrap;
+      transition: color .15s, border-color .15s;
+    }
+    .icao-tab:hover { color: var(--text); }
+    .icao-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .icao-tab-panel { display: none; }
+    .icao-tab-panel.active { display: block; }
 
-
-
-
-
-</section>
-
-<script>
-  window.IS_LOGGED_IN = ${req.session?.user?.data ? 'true' : 'false'};
-  window.VATSIM_USER = ${req.session?.user?.data ? JSON.stringify({
-    cid: req.session.user.data.cid,
-    nameFirst: req.session.user.data.personal?.name_first || '',
-    nameLast: req.session.user.data.personal?.name_last || '',
-    email: req.session.user.data.personal?.email || ''
-  }) : 'null'};
-</script>
-
-<section class="card">
-  <h2>Available Scenery</h2>
-  <div id="availableScenery"></div>
-  <button id="openSceneryModal" class="action-btn">
-  ➕ Submit scenery for this airport
-</button>
-<div id="sceneryLoginHint" class="login-hint hidden">
-  Log in to submit scenery for this airport
-</div>
-</section>
+    .icao-portal-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+    .icao-portal-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .icao-portal-right { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .icao-portal-map-card {
+      padding: 12px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 360px;
+    }
+    .icao-portal-map-card .icao-map { flex: 1; min-height: 0; }
+    .icao-portal-map-card #icaoMap { height: 100%; }
+    .icao-portal-grid .atc-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    @media (max-width: 900px) {
+      .icao-portal-grid { grid-template-columns: 1fr; }
+      .icao-portal-map-card { min-height: 0; }
+      .icao-portal-map-card #icaoMap { height: 360px; }
+    }
+  </style>
+  <script>
+    (function() {
+      var tabs = document.querySelectorAll('.icao-tab');
+      var panels = document.querySelectorAll('.icao-tab-panel');
+      tabs.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var target = btn.dataset.tab;
+          tabs.forEach(function(b) { b.classList.toggle('active', b === btn); });
+          panels.forEach(function(p) { p.classList.toggle('active', p.dataset.panel === target); });
+          if (target === 'map' && window._icaoMapInstance) {
+            setTimeout(function() { window._icaoMapInstance.invalidateSize(); }, 50);
+          }
+        });
+      });
+    })();
+  </script>
 
 <div id="sceneryModal" class="modal hidden">
   <div class="modal-backdrop"></div>
@@ -11374,15 +12160,17 @@ function loadAirportDocs(icao) {
       const docs = data.docs;
 
       tbody.innerHTML = docs.length
-        ? docs.map(d =>
-            '<tr>' +
+        ? docs.map(d => {
+            const scopeClass = 'doc-scope doc-scope-' + d.scope;
+            return '<tr>' +
               '<td><a href="' + d.url + '" target="_blank">' + d.filename + '</a></td>' +
               '<td>' + d.type + '</td>' +
+              '<td><span class="' + scopeClass + '">' + d.scopeLabel + '</span></td>' +
               '<td class="hide-mobile">' + new Date(d.updated).toLocaleDateString('en-GB') + '</td>' +
               '<td>' + d.submittedBy + '</td>' +
-            '</tr>'
-          ).join('')
-        : '<tr><td colspan="4" class="empty">No documentation available</td></tr>';
+            '</tr>';
+          }).join('')
+        : '<tr><td colspan="5" class="empty">No documentation available</td></tr>';
     });
 }
 
@@ -11671,8 +12459,9 @@ if (!window.IS_LOGGED_IN && hint) {
 (function () {
   const icao = "${icao}";
   const container = document.getElementById('availableScenery');
+  const tbody = document.getElementById('sceneryRows');
 
-  if (!container) return;
+  if (!container || !tbody) return;
 
   fetch('/api/icao/' + icao + '/scenery-links')
     .then(res => res.json())
@@ -11683,48 +12472,30 @@ if (!window.IS_LOGGED_IN && hint) {
         .concat((data.p3d || []).map(r => Object.assign({}, r, { sim: 'P3D' })));
 
       if (!rows.length) {
-        container.innerHTML =
-          '<div class="empty">No scenery available</div>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No scenery available</td></tr>';
         return;
       }
 
-      container.innerHTML =
-        '<table class="admin-table scenery-table">' +
-          '<thead>' +
-            '<tr>' +
-              '<th>Sim</th>' +
-              '<th>Name</th>' +
-              '<th class="hide-mobile">Developer</th>' +
-              '<th class="hide-mobile">Store</th>' +
-              '<th>Type</th>' +
-              '<th></th>' +
-            '</tr>' +
-          '</thead>' +
-          '<tbody>' +
-            rows.map(r =>
-  '<tr>' +
-    '<td><span class="sim-pill">' + r.sim + '</span></td>' +
-    '<td><a href="' + r.url + '" target="_blank" rel="noopener">' +
-      r.name +
-    '</a></td>' +
-    '<td class="hide-mobile">' + (r.developer || '-') + '</td>' +
-    '<td class="hide-mobile">' + (r.store || '-') + '</td>' +
-    '<td>' +
-      '<span class="type-pill ' + r.type.toLowerCase() + '">' +
-        r.type +
-      '</span>' +
-    '</td>' +
-    '<td>' +
-      '<button class="scenery-report-btn" data-id="' + r.id + '" data-name="' + (r.name || '').replace(/"/g, '&quot;') + '" title="Report an issue">' +
-        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>' +
-      '</button>' +
-    '</td>' +
-  '</tr>'
-).join('')
- +
-          '</tbody>' +
-        '</table>';
-
+      tbody.innerHTML = rows.map(r =>
+        '<tr>' +
+          '<td><span class="sim-pill">' + r.sim + '</span></td>' +
+          '<td><a href="' + r.url + '" target="_blank" rel="noopener">' +
+            r.name +
+          '</a></td>' +
+          '<td class="hide-mobile">' + (r.developer || '-') + '</td>' +
+          '<td class="hide-mobile">' + (r.store || '-') + '</td>' +
+          '<td>' +
+            '<span class="type-pill ' + r.type.toLowerCase() + '">' +
+              r.type +
+            '</span>' +
+          '</td>' +
+          '<td>' +
+            '<button class="scenery-report-btn" data-id="' + r.id + '" data-name="' + (r.name || '').replace(/"/g, '&quot;') + '" title="Report an issue">' +
+              '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>' +
+            '</button>' +
+          '</td>' +
+        '</tr>'
+      ).join('');
 
       // Hide report buttons if not logged in
       if (!window.IS_LOGGED_IN) {
@@ -11748,8 +12519,7 @@ if (!window.IS_LOGGED_IN && hint) {
       });
     })
     .catch(() => {
-      container.innerHTML =
-        '<div class="empty">Failed to load scenery</div>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">Failed to load scenery</td></tr>';
     });
 })();
 </script>
@@ -12822,11 +13592,18 @@ app.get('/api/icao/:icao/docs', async (req, res) => {
   try {
     const icao = req.params.icao.toUpperCase();
     const user = req.session?.user?.data || null;
+    const isAdmin = user ? isAdminUser(Number(user.cid)) : false;
 
-    const docs = await prisma.airportDocument.findMany({
+    const allDocs = await prisma.airportDocument.findMany({
       where: { icao },
       orderBy: { uploadedAt: 'desc' }
     });
+
+    // Non-admins only see permanent docs + docs tagged to the currently active event.
+    // Admins see everything (archived event docs are flagged separately).
+    const docs = isAdmin
+      ? allDocs
+      : allDocs.filter(d => d.eventId == null || d.eventId === activeEventId);
 
     const users = await prisma.user.findMany({
       where: {
@@ -12838,21 +13615,35 @@ app.get('/api/icao/:icao/docs', async (req, res) => {
       users.map(u => [u.cid, u.name])
     );
 
+    // Map of eventId → event name so we can label the scope badges.
+    const eventNameMap = Object.fromEntries(wfEvents.map(e => [e.id, e.name]));
+
     const canUpload = user
       ? await canEditDocumentation(user.cid, icao)
       : false;
 
     res.json({
   canUpload,
-  docs: docs.map(d => ({
-    filename: d.filename.replace(/\.[^/.]+$/, ''), // ❌ extension removed
-    url: `/uploads/${icao}/${encodeURIComponent(d.filename)}`,
-    type: getFileType(d.filename),                  // ✅ real type
-    updated: d.uploadedAt,
-    submittedBy: userMap[d.uploadedBy]
-      ? `${userMap[d.uploadedBy]} (${d.uploadedBy})`
-      : String(d.uploadedBy)
-  }))
+  docs: docs.map(d => {
+    let scope = 'permanent';
+    let scopeLabel = 'Permanent';
+    if (d.eventId != null) {
+      const isActive = d.eventId === activeEventId;
+      scope = isActive ? 'event-active' : 'event-archived';
+      scopeLabel = eventNameMap[d.eventId] || ('Event ' + d.eventId);
+    }
+    return {
+      filename: d.filename.replace(/\.[^/.]+$/, ''),
+      url: `/uploads/${icao}/${encodeURIComponent(d.filename)}`,
+      type: getFileType(d.filename),
+      updated: d.uploadedAt,
+      submittedBy: userMap[d.uploadedBy]
+        ? `${userMap[d.uploadedBy]} (${d.uploadedBy})`
+        : String(d.uploadedBy),
+      scope,
+      scopeLabel
+    };
+  })
 });
 
   } catch (err) {
@@ -15117,18 +15908,33 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
     if (info && info.exists) airacAlert = !info.valid || info.daysLeft <= 2;
   } catch (e) {}
 
+  const adminSvg = (paths) => `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  const adminIcons = {
+    schedule:    adminSvg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
+    users:       adminSvg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
+    image:       adminSvg('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>'),
+    key:         adminSvg('<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3 1-3-3-1Z"/>'),
+    globe:       adminSvg('<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/>'),
+    bulb:        adminSvg('<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.7.6 1 1.5 1 2.3v1h6v-1c0-.8.3-1.7 1-2.3A7 7 0 0 0 12 2Z"/>'),
+    mail:        adminSvg('<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>'),
+    settings:    adminSvg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>'),
+    compass:     adminSvg('<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>'),
+    flask:       adminSvg('<path d="M9 2v6L3.5 17.5A2.5 2.5 0 0 0 6 21h12a2.5 2.5 0 0 0 2.5-3.5L15 8V2"/><path d="M8 2h8"/><path d="M6.5 14h11"/>'),
+    headphones:  adminSvg('<path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3Z"/>')
+  };
+
   const allSections = [
-    { key: 'wf-schedule', title: 'WF Schedule / Flow', desc: 'Manage the WorldFlight schedule, departure flows, flow types, dates, and ATC routes.', icon: '🛠️', href: '/wf-schedule', badge: null },
-    { key: 'official-teams', title: 'Official Teams', desc: 'Manage official teams and WF affiliates with active participation toggles.', icon: '👥', href: '/official-teams', badge: null },
-    { key: 'scenery', title: 'Scenery Submissions', desc: 'Review and approve or reject pending scenery submissions from the community.', icon: '🗺️', href: '/admin/scenery', badge: sceneryCount > 0 ? sceneryCount : null },
-    { key: 'access-management', title: 'Access Management', desc: 'Manage user permissions, document upload requests, and staff access requests.', icon: '🔑', href: '/admin/access-management', badge: (docAccessCount + staffAccessCount) > 0 ? (docAccessCount + staffAccessCount) : null },
-    { key: 'visited-airports', title: 'Visited Airports', desc: 'Manage which airports have been visited by year and ICAO code.', icon: '🌍', href: '/admin/visited-airports', badge: null },
-    { key: 'suggestions', title: 'Suggestions', desc: 'View and manage community airport suggestions.', icon: '💡', href: '/admin/suggestions', badge: null },
-    { key: 'mailing-list', title: 'Mailing List', desc: 'Send route announcement emails to subscribers.', icon: '📧', href: '/admin/mailing-list', badge: null },
-    { key: 'settings', title: 'Page Visibility', desc: 'Control page visibility for pilots and controllers.', icon: '⚙️', href: '/admin/settings', badge: null },
-    { key: 'airac', title: 'AIRAC Data', desc: 'Upload and manage navigation data (waypoints, airways) for route planning.', icon: '🧭', href: '/admin/airac', badge: airacAlert ? '!' : null },
-    { key: 'test-pilots', title: 'Test Pilot Data', desc: 'Generate fake pilot departures at WF airports for testing.', icon: '🧪', href: '/admin/test-pilots', badge: null },
-    { key: 'controller-pack', title: 'Controller Pack', desc: 'Generate EuroScope controller pack files for WorldFlight airports.', icon: '🎮', href: '/admin/controller-pack', badge: null }
+    { key: 'wf-schedule', title: 'WF Schedule / Flow', desc: 'Manage the WorldFlight schedule, departure flows, flow types, dates, and ATC routes.', icon: adminIcons.schedule, href: '/wf-schedule', badge: null },
+    { key: 'official-teams', title: 'Official Teams', desc: 'Manage official teams and WF affiliates with active participation toggles.', icon: adminIcons.users, href: '/official-teams', badge: null },
+    { key: 'documents-scenery', title: 'Documents & Scenery', desc: 'Manage all uploaded documents and scenery — pending submissions, reports, edits and deletions in one place.', icon: adminIcons.image, href: '/admin/documents-scenery', badge: sceneryCount > 0 ? sceneryCount : null },
+    { key: 'access-management', title: 'Access Management', desc: 'Manage user permissions, document upload requests, and staff access requests.', icon: adminIcons.key, href: '/admin/access-management', badge: (docAccessCount + staffAccessCount) > 0 ? (docAccessCount + staffAccessCount) : null },
+    { key: 'visited-airports', title: 'Visited Airports', desc: 'Manage which airports have been visited by year and ICAO code.', icon: adminIcons.globe, href: '/admin/visited-airports', badge: null },
+    { key: 'suggestions', title: 'Suggestions', desc: 'View and manage community airport suggestions.', icon: adminIcons.bulb, href: '/admin/suggestions', badge: null },
+    { key: 'mailing-list', title: 'Mailing List', desc: 'Send route announcement emails to subscribers.', icon: adminIcons.mail, href: '/admin/mailing-list', badge: null },
+    { key: 'settings', title: 'Page Visibility', desc: 'Control page visibility for pilots and controllers.', icon: adminIcons.settings, href: '/admin/settings', badge: null },
+    { key: 'airac', title: 'AIRAC Data', desc: 'Upload and manage navigation data (waypoints, airways) for route planning.', icon: adminIcons.compass, href: '/admin/airac', badge: airacAlert ? '!' : null },
+    { key: 'test-pilots', title: 'Test Pilot Data', desc: 'Generate fake pilot departures at WF airports for testing.', icon: adminIcons.flask, href: '/admin/test-pilots', badge: null },
+    { key: 'controller-pack', title: 'Controller Pack', desc: 'Generate EuroScope controller pack files for WorldFlight airports.', icon: adminIcons.headphones, href: '/admin/controller-pack', badge: null }
   ];
 
   // Super admins see all sections; granular admins see only their permitted pages
@@ -15197,8 +16003,10 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
         align-items: center;
         justify-content: center;
         border-radius: 10px;
-        background: rgba(255,255,255,0.04);
+        background: rgba(56,189,248,0.08);
+        color: var(--accent, #38bdf8);
       }
+      .cp-card-icon svg { display: block; }
       .cp-card-body {
         flex: 1;
         min-width: 0;
@@ -16958,7 +17766,7 @@ firstRowInputs.forEach(function(input) {
     mapModal.classList.remove('hidden');
 
     if (!leafletMap) {
-      leafletMap = L.map('suggestMap', { zoomControl: true }).setView([20, 0], 2);
+      leafletMap = L.map('suggestMap', { zoomControl: true, scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false }).setView([20, 0], 2);
       wfAddTileLayer(leafletMap, { maxZoom: 18 });
 
       var colorMap = { green: '#22c55e', amber: '#f59e0b', red: '#ef4444' };
@@ -17089,7 +17897,7 @@ function greatCircleArc(lat1, lon1, lat2, lon2, numPoints) {
         if (placeholder) placeholder.style.display = 'none';
 
         if (!legMap) {
-          legMap = L.map('addLegMap', { zoomControl: false, attributionControl: false }).setView([0, 0], 2);
+          legMap = L.map('addLegMap', { zoomControl: true, attributionControl: false, scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false }).setView([0, 0], 2);
           wfAddTileLayer(legMap, { maxZoom: 18 });
 
           // Load FIR boundaries
@@ -19531,19 +20339,34 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
   const isAdmin = isAdminUser(user.cid);
 
-  const pages = [
-    { key: 'schedule',        label: 'WF Schedule',         icon: '🏠', desc: 'Main event schedule with slot booking' },
-    { key: 'world-map',       label: 'Route Map',           icon: '🗺️', desc: 'Interactive world map with live flights' },
-    { key: 'my-slots',        label: 'My Slots / Bookings', icon: '✈️', desc: 'Personal slot and booking overview' },
-    { key: 'atc',             label: 'WF Flow Control',  icon: '🎧', desc: 'Controller departure management view' },
-    { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' },
-    { key: 'airspace',        label: 'Airspace Management',  icon: '🌐', desc: 'FIR staffing requirements and timelines' },
-    { key: 'wf-portal-banner', label: 'Portal - Airport Selected for WF', icon: '✈️', desc: 'WorldFlight event banner on airport portal pages' },
-    { key: 'book-slot',       label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
+  const pageGroups = [
+    {
+      title: 'Pages',
+      hint: 'Top-level pages — disabled ones are hidden from navigation and return 403.',
+      items: [
+        { key: 'schedule',        label: 'WF Schedule',         icon: '🏠', desc: 'Main event schedule with slot booking' },
+        { key: 'world-map',       label: 'Route Map',           icon: '🗺️', desc: 'Interactive world map with live flights' },
+        { key: 'my-slots',        label: 'My Slots / Bookings', icon: '✈️', desc: 'Personal slot and booking overview' },
+        { key: 'atc',             label: 'WF Flow Control',     icon: '🎧', desc: 'Controller departure management view' },
+        { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' },
+        { key: 'airspace',        label: 'Airspace Management', icon: '🌐', desc: 'FIR staffing requirements and timelines' }
+      ]
+    },
+    {
+      title: 'Page Features',
+      hint: 'Granular toggles for elements inside other pages.',
+      items: [
+        { key: 'wf-portal-banner',  label: 'Portal - Airport Selected for WF', icon: '✈️', desc: 'WorldFlight event banner on airport portal pages' },
+        { key: 'flow-restrictions', label: 'Flow Restrictions on Sector Details', icon: '🚦', desc: 'When off, the sector page shows a placeholder instead of flow info' },
+        { key: 'book-slot',         label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
+      ]
+    }
   ];
 
-  const toggleRows = pages.map(p => {
-    const enabled = isPageEnabled(p.key);
+  const renderRow = (p) => {
+    const mode = getPageMode(p.key);
+    const opt = (value, label) =>
+      `<button type="button" class="vis-seg ${mode === value ? 'active' : ''}" data-page="${p.key}" data-mode="${value}">${label}</button>`;
     return `
       <div class="settings-row" data-page="${p.key}">
         <div class="settings-row-info">
@@ -19554,91 +20377,89 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
           </div>
         </div>
         <div class="settings-row-controls">
-          <span class="vis-pill ${enabled ? 'vis-on' : 'vis-off'}" data-page="${p.key}">
-            ${enabled ? 'Visible' : 'Hidden'}
-          </span>
-          <label class="toggle-switch">
-            <input type="checkbox" data-page="${p.key}" ${enabled ? 'checked' : ''} />
-            <span class="toggle-slider"></span>
-          </label>
+          <div class="vis-segctrl" data-page="${p.key}">
+            ${opt('visible', 'Visible')}
+            ${opt('admin-only', 'Admin')}
+            ${opt('hidden', 'Hidden')}
+          </div>
         </div>
       </div>`;
-  }).join('');
+  };
+
+  const toggleRows = pageGroups.map(g => `
+    <div class="settings-group">
+      <div class="settings-group-header">
+        <span class="settings-group-title">${g.title}</span>
+        <span class="settings-group-hint">${g.hint}</span>
+      </div>
+      <div class="settings-list">
+        ${g.items.map(renderRow).join('')}
+      </div>
+    </div>
+  `).join('');
 
   const siteGatePasswordSet = !!SITE_PASSWORD;
   const content = `
     <section class="card card-full">
-      <h2>Site Password</h2>
-      <p class="settings-subtitle">
-        When enabled, visitors must enter the shared access password before reaching the login page or any content.
-        The password itself is read from the <code>SITE_PASSWORD</code> environment variable and is never stored in the database.
-      </p>
+      <h2>Site</h2>
 
-      <div class="settings-row">
-        <div class="settings-row-info">
-          <span class="settings-row-icon">🔒</span>
-          <div>
-            <div class="settings-row-label">Password Gate</div>
-            <div class="settings-row-desc">${siteGatePasswordSet
-              ? 'Require the site password before any page or login path is accessible.'
-              : '<span style="color:#f87171;">SITE_PASSWORD env var is not set — the gate cannot be enabled. Set it in Railway then restart.</span>'}</div>
+      <div class="settings-list">
+        <div class="settings-row">
+          <div class="settings-row-info">
+            <span class="settings-row-icon">🔒</span>
+            <div>
+              <div class="settings-row-label">Password Gate</div>
+              <div class="settings-row-desc">${siteGatePasswordSet
+                ? 'Require <code>SITE_PASSWORD</code> before any page is accessible.'
+                : '<span style="color:#f87171;">SITE_PASSWORD env var is not set — gate cannot be enabled.</span>'}</div>
+            </div>
+          </div>
+          <div class="settings-row-controls">
+            <span class="vis-pill ${siteGate.enabled ? 'vis-on' : 'vis-off'}" id="siteGatePill">
+              ${siteGate.enabled ? 'Enabled' : 'Disabled'}
+            </span>
+            <label class="toggle-switch" ${siteGatePasswordSet ? '' : 'style="opacity:0.4;pointer-events:none;"'}>
+              <input type="checkbox" id="siteGateToggle" ${siteGate.enabled ? 'checked' : ''} ${siteGatePasswordSet ? '' : 'disabled'} />
+              <span class="toggle-slider"></span>
+            </label>
           </div>
         </div>
-        <div class="settings-row-controls">
-          <span class="vis-pill ${siteGate.enabled ? 'vis-on' : 'vis-off'}" id="siteGatePill">
-            ${siteGate.enabled ? 'Enabled' : 'Disabled'}
-          </span>
-          <label class="toggle-switch" ${siteGatePasswordSet ? '' : 'style="opacity:0.4;pointer-events:none;"'}>
-            <input type="checkbox" id="siteGateToggle" ${siteGate.enabled ? 'checked' : ''} ${siteGatePasswordSet ? '' : 'disabled'} />
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-    </section>
 
-    <section class="card card-full">
-      <h2>Site Banner</h2>
-      <p class="settings-subtitle">
-        Display an announcement banner at the top of every page.
-      </p>
-
-      <div class="settings-row">
-        <div class="settings-row-info">
-          <span class="settings-row-icon">📢</span>
-          <div>
-            <div class="settings-row-label">Banner Enabled</div>
-            <div class="settings-row-desc">Toggle the site-wide announcement banner</div>
+        <div class="settings-row">
+          <div class="settings-row-info">
+            <span class="settings-row-icon">📢</span>
+            <div>
+              <div class="settings-row-label">Site Banner</div>
+              <div class="settings-row-desc">Site-wide announcement banner at the top of every page.</div>
+            </div>
           </div>
-        </div>
-        <div class="settings-row-controls">
-          <span class="vis-pill ${siteBanner.enabled ? 'vis-on' : 'vis-off'}" id="bannerPill">
-            ${siteBanner.enabled ? 'Visible' : 'Hidden'}
-          </span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="bannerToggle" ${siteBanner.enabled ? 'checked' : ''} />
-            <span class="toggle-slider"></span>
-          </label>
+          <div class="settings-row-controls">
+            <span class="vis-pill ${siteBanner.enabled ? 'vis-on' : 'vis-off'}" id="bannerPill">
+              ${siteBanner.enabled ? 'Visible' : 'Hidden'}
+            </span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="bannerToggle" ${siteBanner.enabled ? 'checked' : ''} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
         </div>
       </div>
 
-      <div style="margin-top:16px;">
-        <label style="display:block;font-size:13px;color:var(--muted);margin-bottom:6px;">Banner Text</label>
-        <div style="display:flex;gap:8px;">
-          <input type="text" id="bannerTextInput" value="${(siteBanner.text || '').replace(/"/g, '&quot;')}" placeholder="Enter banner message..." style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,0.04);color:var(--text);font-size:14px;" />
-          <button id="bannerTextSave" class="action-btn primary" style="white-space:nowrap;">Save Text</button>
-        </div>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
+        <label style="font-size:12px;color:var(--muted);white-space:nowrap;">Banner Text</label>
+        <input type="text" id="bannerTextInput" value="${(siteBanner.text || '').replace(/"/g, '&quot;')}" placeholder="Enter banner message..." style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,0.04);color:var(--text);font-size:14px;" />
+        <button id="bannerTextSave" class="action-btn primary" style="white-space:nowrap;">Save</button>
       </div>
     </section>
 
     <section class="card card-full">
       <h2>Page Visibility</h2>
       <p class="settings-subtitle">
-        Control which pages are visible to pilots and controllers.
-        Disabled pages are hidden from navigation and return 403 for non-admin users.
+        Control which pages and page features are visible to pilots and controllers.
         Admins always have access.
       </p>
 
-      <div class="settings-list">
+      <div class="settings-groups">
         ${toggleRows}
       </div>
     </section>
@@ -19652,9 +20473,41 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
       }
 
       .settings-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      @media (max-width: 800px) {
+        .settings-list { grid-template-columns: 1fr; }
+      }
+
+      .settings-groups {
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+      }
+      .settings-group {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .settings-group-header {
         display: flex;
         flex-direction: column;
         gap: 2px;
+        padding: 0 4px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .settings-group-title {
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+      .settings-group-hint {
+        font-size: 12px;
+        color: var(--muted);
       }
 
       .settings-row {
@@ -19719,6 +20572,35 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         color: #f87171;
       }
 
+      /* 3-way segmented control for page visibility */
+      .vis-segctrl {
+        display: inline-flex;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 2px;
+        gap: 2px;
+      }
+      .vis-seg {
+        background: transparent;
+        border: 0;
+        padding: 5px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        cursor: pointer;
+        transition: background .15s, color .15s;
+      }
+      .vis-seg:hover { color: var(--text); }
+      .vis-seg.active {
+        background: var(--accent, #3b82f6);
+        color: #fff;
+      }
+      .vis-seg[data-mode="hidden"].active { background: #ef4444; }
+      .vis-seg[data-mode="admin-only"].active { background: #f59e0b; color: #1f1107; }
+      .vis-seg.is-pending { opacity: 0.6; }
+
       .toggle-switch {
         position: relative;
         display: inline-block;
@@ -19751,23 +20633,25 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
     </style>
 
     <script>
-      document.querySelectorAll('.toggle-switch input[data-page]').forEach(cb => {
-        cb.addEventListener('change', async () => {
-          const key = cb.dataset.page;
-          const enabled = cb.checked;
-          const pill = document.querySelector('.vis-pill[data-page="' + key + '"]');
+      document.querySelectorAll('.vis-segctrl').forEach(group => {
+        group.addEventListener('click', async (e) => {
+          const btn = e.target.closest('.vis-seg');
+          if (!btn || btn.classList.contains('active')) return;
+          const key = btn.dataset.page;
+          const mode = btn.dataset.mode;
+          const buttons = group.querySelectorAll('.vis-seg');
 
+          buttons.forEach(b => b.classList.add('is-pending'));
           const res = await fetch('/api/admin/page-visibility', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key, enabled })
+            body: JSON.stringify({ key, mode })
           });
+          buttons.forEach(b => b.classList.remove('is-pending'));
 
           if (res.ok) {
-            pill.textContent = enabled ? 'Visible' : 'Hidden';
-            pill.className = 'vis-pill ' + (enabled ? 'vis-on' : 'vis-off');
+            buttons.forEach(b => b.classList.toggle('active', b === btn));
           } else {
-            cb.checked = !enabled;
             alert('Failed to update');
           }
         });
@@ -19871,20 +20755,24 @@ app.post('/api/admin/banner', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/page-visibility', requireAdmin, async (req, res) => {
-  const { key, enabled } = req.body;
-  if (!PAGE_KEYS.includes(key) || typeof enabled !== 'boolean') {
-    return res.status(400).json({ error: 'Invalid key or value' });
+  const { key, mode } = req.body;
+  const VALID_MODES = ['visible', 'hidden', 'admin-only'];
+  if (!PAGE_KEYS.includes(key) || !VALID_MODES.includes(mode)) {
+    return res.status(400).json({ error: 'Invalid key or mode' });
   }
+
+  // Keep the legacy `enabled` boolean in sync so older code paths keep working.
+  const enabled = mode === 'visible';
 
   await prisma.pageVisibility.upsert({
     where: { key },
-    update: { enabled },
-    create: { key, enabled }
+    update: { mode, enabled },
+    create: { key, mode, enabled }
   });
 
-  pageVisibility[key] = enabled;
+  pageVisibility[key] = mode;
 
-  // Clean up fake data when fake-pilots is disabled
+  // Clean up fake data when fake-pilots is disabled (any non-visible mode)
   if (key === 'fake-pilots' && !enabled) {
     // Remove fake bookings
     for (const bk of Object.keys(tobtBookingsByKey)) {
@@ -19982,12 +20870,13 @@ app.get('/admin/test-pilots', requireAdmin, (req, res) => {
 
 app.post('/admin/api/test-pilots/toggle', requireAdmin, express.json(), async (req, res) => {
   const enabled = !!req.body.enabled;
+  const mode = enabled ? 'visible' : 'hidden';
   await prisma.pageVisibility.upsert({
     where: { key: 'fake-pilots' },
-    update: { enabled },
-    create: { key: 'fake-pilots', enabled }
+    update: { enabled, mode },
+    create: { key: 'fake-pilots', enabled, mode }
   });
-  pageVisibility['fake-pilots'] = enabled;
+  pageVisibility['fake-pilots'] = mode;
 
   if (!enabled) {
     for (const bk of Object.keys(tobtBookingsByKey)) {
@@ -22364,20 +23253,50 @@ app.get('/airport-portal', (req, res) => {
           required
           autocomplete="off"
         />
-        <button type="submit">Open Portal</button>
+        <button type="submit" id="portalSubmit">Open Portal</button>
       </form>
+      <div id="portalError" style="margin-top:12px;color:#f87171;font-size:13px;min-height:18px;"></div>
     </section>
 
     <script>
-    document.getElementById('portalForm').addEventListener('submit', function(e) {
-      e.preventDefault();
-      var raw = document.getElementById('portalIcao').value.trim().toUpperCase();
-      var icao = null;
-      if (/^[A-Z]{3}$/.test(raw)) { icao = 'K' + raw; }
-      else if (/^[A-Z]{4}$/.test(raw)) { icao = raw; }
-      else { alert('Please enter a valid ICAO (e.g. LAX or KLAX)'); return; }
-      window.location.href = '/icao/' + icao;
-    });
+    (function() {
+      var form = document.getElementById('portalForm');
+      var input = document.getElementById('portalIcao');
+      var btn = document.getElementById('portalSubmit');
+      var err = document.getElementById('portalError');
+
+      function showErr(msg) { err.textContent = msg || ''; }
+
+      input.addEventListener('input', function() { showErr(''); });
+
+      form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        var raw = input.value.trim().toUpperCase();
+        var icao = null;
+        if (/^[A-Z]{3}$/.test(raw)) icao = 'K' + raw;
+        else if (/^[A-Z]{4}$/.test(raw)) icao = raw;
+        else { showErr('Please enter a 3- or 4-letter ICAO (e.g. LAX or KLAX).'); return; }
+
+        btn.disabled = true;
+        var prevLabel = btn.textContent;
+        btn.textContent = 'Checking…';
+        try {
+          var res = await fetch('/api/airport-visits/' + icao);
+          if (!res.ok) throw new Error('lookup_failed');
+          var data = await res.json();
+          if (!data.exists) {
+            showErr(icao + ' is not a known airport. Please check the ICAO and try again.');
+            return;
+          }
+          window.location.href = '/icao/' + icao;
+        } catch (e) {
+          showErr('Could not verify that airport right now. Please try again.');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = prevLabel;
+        }
+      });
+    })();
     </script>
   `;
 
@@ -22390,9 +23309,109 @@ app.get('/airport-portal', (req, res) => {
   }));
 });
 
-app.get('/atc', requireLogin, requirePageEnabled('atc'), (req, res) => {
-  if (!req.session.user || !req.session.user.data) {
-    return res.redirect('/');
+app.get('/atc', requirePageEnabled('atc'), (req, res) => {
+  // For non-logged-in users we render a placeholder shell with the login
+  // overlay on top. We DO NOT include any real flow data — the blur is
+  // cosmetic only and could be removed via DevTools, so the actual content
+  // must be a non-sensitive stub.
+  if (!req.session?.user?.data) {
+    if (req.session) req.session.returnTo = '/atc';
+    // Static demo content. Everything below is hard-coded sample data — no real
+    // pilots, CIDs, or live state. The cosmetic blur sits over this on top, but
+    // even if a viewer removes the blur in DevTools all they see is the demo.
+    const demoTobts = ['15:13','15:53','16:01','16:09','16:17','16:33','16:41','16:49','16:57','17:05'];
+    const demoPilots = [
+      { status: 'Slotted', callsign: 'BAW47C',  type: 'B738/M', dest: 'EKCH', tobt: '16:25' },
+      { status: 'No Slot', callsign: 'BAW988G', type: 'B738/M', dest: 'EKCH', tobt: '--' },
+      { status: 'Slotted', callsign: 'ACA3786', type: 'A21N/M', dest: 'EKCH', tobt: '17:24' },
+      { status: 'Slotted', callsign: 'BAW4266', type: 'B39M/M', dest: 'EKCH', tobt: '17:30' },
+      { status: 'Slotted', callsign: 'SAS4083', type: 'A20N/M', dest: 'EKCH', tobt: '15:37' }
+    ];
+    const placeholderContent = `
+      <section class="card card-full" aria-hidden="true">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+          <span style="display:inline-flex;align-items:center;justify-content:center;padding:6px 14px;border-radius:8px;background:rgba(56,189,248,0.12);color:var(--accent);font-weight:800;letter-spacing:1px;">EGLL</span>
+          <h2 style="margin:0;">Ground Departures</h2>
+        </div>
+
+        <div style="border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px;background:rgba(255,255,255,0.02);">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:14px;">
+            <strong style="font-family:monospace;">EGLL &rarr; EKCH</strong>
+            <span style="color:#4ade80;font-weight:600;">Slotted</span>
+            <span style="color:var(--muted);font-size:12px;">7 dep/hr</span>
+          </div>
+          <div style="margin-top:6px;font-size:13px;color:var(--text);">Tue 3rd Nov &mdash; Dep Window 15:05 - 17:05 UTC</div>
+          <div style="margin-top:8px;font-family:monospace;font-size:11px;color:var(--muted);word-break:break-all;">BPK6J BPK Q295 PAAVO M604 GIVPO DCT VENAS DCT LARGA DCT SOPTO DCT DOREV DCT TESPI TESP4A</div>
+        </div>
+
+        <div style="padding:10px 14px;margin-bottom:14px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;color:#fbbf24;text-align:center;font-size:13px;">
+          Sign in to view live ATC connections and editing controls.
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:12px;margin-bottom:16px;">
+          <div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:rgba(255,255,255,0.02);min-height:200px;">
+            <div style="font-size:13px;font-weight:700;color:var(--accent);letter-spacing:0.6px;margin-bottom:10px;">UPCOMING START</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;padding:6px 0;border-bottom:1px solid var(--border);">
+              <span>Callsign</span><span>Target Start</span><span>Started</span>
+            </div>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:rgba(255,255,255,0.02);min-height:200px;">
+            <div style="font-size:13px;font-weight:700;color:var(--accent);letter-spacing:0.6px;margin-bottom:10px;">RECENTLY STARTED</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;padding:6px 0;border-bottom:1px solid var(--border);">
+              <span>Callsign</span><span>Started At</span><span>Actions</span>
+            </div>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:rgba(255,255,255,0.02);min-height:200px;">
+            <div style="font-size:13px;font-weight:700;color:var(--accent);letter-spacing:0.6px;margin-bottom:4px;">AVAILABLE WF TOBTS</div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Click to assign</div>
+            <div style="display:grid;grid-template-columns:repeat(6, minmax(0, 1fr));gap:6px;">
+              ${demoTobts.map(t => `<div style="border:1px solid rgba(56,189,248,0.3);border-radius:6px;padding:8px 4px;text-align:center;background:rgba(56,189,248,0.05);">
+                <div style="font-family:monospace;font-weight:700;color:var(--accent);font-size:13px;">${t}</div>
+                <div style="font-size:10px;color:var(--muted);margin-top:2px;">EKCH</div>
+              </div>`).join('')}
+            </div>
+          </div>
+        </div>
+
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="text-align:left;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">
+              <th style="padding:10px 8px;border-bottom:1px solid var(--border);">Status</th>
+              <th style="padding:10px 8px;border-bottom:1px solid var(--border);">Callsign</th>
+              <th style="padding:10px 8px;border-bottom:1px solid var(--border);">A/C Type</th>
+              <th style="padding:10px 8px;border-bottom:1px solid var(--border);">Dest</th>
+              <th style="padding:10px 8px;border-bottom:1px solid var(--border);">WF TOBT</th>
+              <th style="padding:10px 8px;border-bottom:1px solid var(--border);">TSAT</th>
+              <th style="padding:10px 8px;border-bottom:1px solid var(--border);">ATC Route</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${demoPilots.map(p => {
+              const slotColor = p.status === 'No Slot' ? '#f87171' : '#4ade80';
+              const slotBg = p.status === 'No Slot' ? 'rgba(248,113,113,0.12)' : 'rgba(74,222,128,0.12)';
+              return `<tr>
+                <td style="padding:12px 8px;border-bottom:1px solid var(--border);"><span style="display:inline-block;padding:3px 10px;border-radius:6px;background:${slotBg};color:${slotColor};font-weight:600;font-size:12px;">${p.status}</span></td>
+                <td style="padding:12px 8px;border-bottom:1px solid var(--border);font-weight:700;color:var(--accent);">${p.callsign}</td>
+                <td style="padding:12px 8px;border-bottom:1px solid var(--border);">${p.type}</td>
+                <td style="padding:12px 8px;border-bottom:1px solid var(--border);">${p.dest}</td>
+                <td style="padding:12px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-weight:700;">${p.tobt}</td>
+                <td style="padding:12px 8px;border-bottom:1px solid var(--border);color:var(--muted);">--</td>
+                <td style="padding:12px 8px;border-bottom:1px solid var(--border);color:var(--accent);">Click to expand</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </section>`;
+    return res.send(renderLayout({
+      title: 'WF Flow Control',
+      user: null,
+      isAdmin: false,
+      content: placeholderContent,
+      layoutClass: 'dashboard-full',
+      pageVisibility,
+      siteBanner,
+      loginOverlay: true
+    }));
   }
 
   const user = req.session.user.data;
