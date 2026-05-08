@@ -2972,6 +2972,29 @@ tr:hover .row-actions {
 .ot-th-center,
 .ot-cell-active { text-align: center; width: 80px; }
 .ot-cell-active .wf-check { margin: 0; }
+.mm-active-static,
+.mm-inactive-static {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 12px;
+}
+.mm-active-static {
+  background: color-mix(in srgb, #4ade80 18%, transparent);
+  color: #4ade80;
+}
+.mm-inactive-static {
+  background: color-mix(in srgb, #ef4444 18%, transparent);
+  color: #f87171;
+}
+.mm-inactive-row td { opacity: 0.55; }
+.mm-inactive-row td.ot-cell-active { opacity: 1; }
+.ot-table tbody tr.mm-inactive-row:hover td,
+.ot-table tbody tr.mm-inactive-row:nth-child(even) td { background: transparent; }
 
 .ot-simtype {
   display: inline-flex;

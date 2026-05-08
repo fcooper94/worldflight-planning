@@ -234,7 +234,12 @@
       "Bash(node --check index.js)",
       "Bash(node --check layout.js)",
       "Bash(node --check public/slot-banners.js)",
-      "Bash(export PROD_URL=$\\(grep '^PROD_DATABASE_URL=' .env.dev)"
+      "Bash(export PROD_URL=$\\(grep '^PROD_DATABASE_URL=' .env.dev)",
+      "Bash(mv affiliate-banner.JPG affiliate-banner-temp.jpg)",
+      "Bash(mv affiliate-banner-temp.jpg affiliate-banner.jpg)",
+      "Bash(git ls-files *)",
+      "Bash(cd /c/dev/WorldFlight-Planning && ls public | grep -i banner)",
+      "Read(//c/c/dev/WorldFlight-Planning/**)"
     ]
   }
 }

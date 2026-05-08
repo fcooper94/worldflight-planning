@@ -15611,14 +15611,20 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   // that's the affiliate's main CID, not the admin's.
   const viewedCid = readOnly ? Number(affiliate?.cid || 0) : cid;
 
-  // Member name resolution (main CID + AffiliateMember rows)
-  let memberOptions = [];
+  // Member name resolution (main CID + AffiliateMember rows).
+  // Pull every member regardless of active flag so the Our Members table can
+  // show inactive ones with a red cross. memberOptions (used for the schedule
+  // claim dropdown) stays filtered to active only.
+  let memberOptions = [];   // active members — fed to the claim-select dropdown
+  let allMembers = [];       // every member including inactive — fed to the table
   let claimByNumber = {};
   let memberCount = 0;
   if (affiliate) {
     const memberRows = await prisma.affiliateMember.findMany({
-      where: { affiliateId: affiliate.id, active: true }
+      where: { affiliateId: affiliate.id }
     });
+    const activeByCid = {};
+    memberRows.forEach(m => { activeByCid[Number(m.cid)] = m.active !== false; });
     const allMemberCids = [...new Set([Number(affiliate.cid), ...memberRows.map(m => Number(m.cid))])];
     memberCount = allMemberCids.length;
 
@@ -15636,9 +15642,18 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
     });
     if (!nameByCid[cid] && user?.personal?.name_full) nameByCid[cid] = user.personal.name_full;
 
-    memberOptions = allMemberCids
-      .map(c => ({ cid: c, name: nameByCid[c] || ('CID ' + c), isMain: c === Number(affiliate.cid) }))
+    allMembers = allMemberCids
+      .map(c => {
+        const isMain = c === Number(affiliate.cid);
+        return {
+          cid: c,
+          name: nameByCid[c] || ('CID ' + c),
+          isMain,
+          active: isMain ? true : (activeByCid[c] !== false)
+        };
+      })
       .sort((a, b) => (b.isMain - a.isMain) || a.name.localeCompare(b.name));
+    memberOptions = allMembers.filter(m => m.active);
 
     const claims = await prisma.affiliateSectorClaim.findMany({
       where: { affiliateId: affiliate.id }
@@ -15713,16 +15728,17 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
       ` : ''}
 
       ${affiliate ? `
-      <section class="card aff-identity-card">
-        <div class="aff-identity-icon">
-          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
-        </div>
-        <div class="aff-identity-main">
-          <div class="aff-identity-name">${escapeHtml(affiliate.callsign || '')}</div>
-          <div class="aff-identity-meta">
-            <span class="ot-simtype" data-sim="${escapeHtml((affiliate.simType || '').toUpperCase())}">${escapeHtml(affiliate.simType || '—')}</span>
-            ${sinceYear ? `<span class="ot-since">Affiliate since ${sinceYear}</span>` : ''}
-            <span class="aff-member-count">${memberCount} ${memberCount === 1 ? 'member' : 'members'}</span>
+      <section class="card side-label-card aff-identity-card">
+        <span class="card-side-label">WF Affiliate</span>
+        <div class="card-side-body aff-identity-body">
+          <div class="aff-identity-main">
+            <div class="aff-identity-eyebrow">Official WorldFlight Affiliate</div>
+            <div class="aff-identity-name">${escapeHtml(affiliate.callsign || '')}</div>
+            <div class="aff-identity-meta">
+              <span class="ot-simtype" data-sim="${escapeHtml((affiliate.simType || '').toUpperCase())}">${escapeHtml(affiliate.simType || '—')}</span>
+              ${sinceYear ? `<span class="ot-since">Affiliate since ${sinceYear}</span>` : ''}
+              <span class="aff-member-count">${memberCount} ${memberCount === 1 ? 'member' : 'members'}</span>
+            </div>
           </div>
         </div>
       </section>
@@ -15786,7 +15802,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
       <div class="affiliate-hq-side">
         <section class="card affiliate-banner-card">
           <div class="affiliate-banner-wrap">
-            <img src="/affiliate-banner.png" alt="WorldFlight Affiliate" class="affiliate-banner" />
+            <img src="/affiliate-banner.jpg" alt="WorldFlight Affiliate" class="affiliate-banner" />
           </div>
         </section>
 
@@ -15846,7 +15862,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
             <h3 class="section-title" style="margin:0;">Our Members</h3>
             <span class="aff-member-count">${memberCount} ${memberCount === 1 ? 'member' : 'members'}</span>
           </header>
-          ${memberOptions.length === 0 ? `
+          ${allMembers.length === 0 ? `
             <div class="ot-empty">
               <div class="ot-empty-title">No members yet</div>
               <div class="ot-empty-sub">Use the My Members page to add CIDs.</div>
@@ -15858,14 +15874,18 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                   <tr>
                     <th>Name</th>
                     <th>CID</th>
+                    <th class="ot-th-center">Active</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  ${memberOptions.map(m => `
-                    <tr>
+                  ${allMembers.map(m => `
+                    <tr${!m.active ? ' class="mm-inactive-row"' : ''}>
                       <td class="ot-cell-name">${escapeHtml(m.name)}</td>
                       <td class="ot-cell-cid">${m.cid}</td>
+                      <td class="ot-cell-active">${m.active
+                        ? '<span class="mm-active-static" title="Active">✓</span>'
+                        : '<span class="mm-inactive-static" title="Inactive">✕</span>'}</td>
                       <td style="text-align:right;">
                         ${m.isMain ? `<span class="aff-main-badge">Main</span>` : ''}
                       </td>
@@ -16048,35 +16068,50 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
       .aff-readonly-text strong { color: #fbbf24; }
       .aff-readonly-banner .ot-btn { margin-left: auto; }
 
-      /* Identity card */
+      /* Identity card — hero treatment */
       .aff-identity-card {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        padding: 18px 22px;
+        --card-stripe: #a78bfa;
+        position: relative;
       }
-      .aff-identity-icon {
-        width: 52px;
-        height: 52px;
-        flex-shrink: 0;
-        border-radius: 12px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        background: color-mix(in srgb, var(--accent) 14%, transparent);
-        color: var(--accent);
-        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      .aff-identity-card::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 640px 260px at 92% 0%, color-mix(in srgb, var(--card-stripe) 14%, transparent), transparent 70%),
+          linear-gradient(180deg, color-mix(in srgb, var(--card-stripe) 5%, transparent), transparent 60%);
+        pointer-events: none;
+        border-radius: var(--radius);
       }
-      .aff-identity-main { min-width: 0; }
+      .aff-identity-card .card-side-body {
+        flex-direction: row;
+        align-items: center;
+        gap: 22px;
+        padding: 38px 28px 26px;
+        position: relative;
+        z-index: 1;
+        min-height: 0;
+      }
+      .aff-identity-main { min-width: 0; flex: 1; }
+      .aff-identity-eyebrow {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
       .aff-identity-name {
         font-family: 'JetBrains Mono', ui-monospace, monospace;
-        font-size: 22px;
-        font-weight: 700;
+        font-size: 38px;
+        font-weight: 800;
         letter-spacing: 0.04em;
-        color: var(--accent);
+        line-height: 1.05;
+        color: var(--text);
+        margin-bottom: 14px;
+        word-break: break-word;
       }
       .aff-identity-meta {
-        margin-top: 6px;
         display: flex;
         align-items: center;
         gap: 8px;
@@ -16091,6 +16126,16 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
         border-radius: 999px;
         background: rgba(255,255,255,0.05);
         color: var(--muted);
+      }
+      [data-theme="light"] .aff-member-count { background: rgba(15,23,42,0.06); }
+
+      @media (max-width: 640px) {
+        .aff-identity-card .card-side-body {
+          flex-direction: column;
+          align-items: flex-start;
+          padding: 38px 20px 22px;
+        }
+        .aff-identity-name { font-size: 28px; }
       }
 
       /* 2-col welcome + (banner+members) row */
@@ -17015,7 +17060,7 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
 
   const owned = await prisma.affiliate.findMany({
     where: { cid, hasMembers: true },
-    select: { id: true, callsign: true, simType: true },
+    select: { id: true, callsign: true, simType: true, cid: true },
     orderBy: { callsign: 'asc' }
   });
 
@@ -17027,8 +17072,11 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
       })
     : [];
 
-  // Resolve member names — User table → mailing list → fallback empty
-  const memberCids = [...new Set(members.map(m => m.cid))];
+  // Resolve names for added members AND each affiliate's main CID
+  const memberCids = [...new Set([
+    ...members.map(m => m.cid),
+    ...owned.map(a => Number(a.cid))
+  ])];
   const nameByCid = {};
   if (memberCids.length) {
     const [users, mailSubs] = await Promise.all([
@@ -17042,17 +17090,30 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
       const nm = [s.firstName, s.lastName].filter(Boolean).join(' ').trim();
       if (nm) nameByCid[c] = nm;
     });
+    if (!nameByCid[cid] && user?.personal?.name_full) nameByCid[cid] = user.personal.name_full;
   }
 
   const membersByAff = {};
-  ids.forEach(id => { membersByAff[id] = []; });
+  // Seed each affiliate's list with the Main CID as a non-removable owner row
+  owned.forEach(a => {
+    membersByAff[a.id] = [{
+      cid: Number(a.cid),
+      name: nameByCid[Number(a.cid)] || '',
+      active: true,
+      addedAt: null,
+      isMain: true
+    }];
+  });
   members.forEach(m => {
-    if (!membersByAff[m.affiliateId]) membersByAff[m.affiliateId] = [];
+    // Skip if this CID is already shown as Main (avoids duplicate row)
+    const aff = owned.find(a => a.id === m.affiliateId);
+    if (aff && Number(aff.cid) === Number(m.cid)) return;
     membersByAff[m.affiliateId].push({
       cid: m.cid,
       name: nameByCid[m.cid] || '',
       active: m.active !== false,
-      addedAt: m.addedAt
+      addedAt: m.addedAt,
+      isMain: false
     });
   });
 
@@ -17107,21 +17168,29 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
                   </thead>
                   <tbody>
                     ${list.map(m => `
-                      <tr data-member-cid="${m.cid}">
+                      <tr data-member-cid="${m.cid}"${m.isMain ? ' class="mm-main-row"' : ''}>
                         <td class="ot-cell-cid">${m.cid}</td>
                         <td class="ot-cell-name">${escapeHtml(m.name || '—')}</td>
-                        <td><span class="ot-muted">${new Date(m.addedAt).toISOString().slice(0,10)}</span></td>
+                        <td>${m.isMain
+                          ? '<span class="ot-muted">—</span>'
+                          : `<span class="ot-muted">${new Date(m.addedAt).toISOString().slice(0,10)}</span>`}</td>
                         <td class="ot-cell-active">
-                          <input
-                            type="checkbox"
-                            class="mm-active-toggle wf-check"
-                            data-aff-id="${a.id}"
-                            data-cid="${m.cid}"
-                            ${m.active ? 'checked' : ''}
-                          />
+                          ${m.isMain ? `
+                            <span class="mm-active-static" title="Main CID is always active">✓</span>
+                          ` : `
+                            <input
+                              type="checkbox"
+                              class="mm-active-toggle wf-check"
+                              data-aff-id="${a.id}"
+                              data-cid="${m.cid}"
+                              ${m.active ? 'checked' : ''}
+                            />
+                          `}
                         </td>
                         <td class="ot-cell-actions">
-                          <button class="ot-btn ot-btn-danger mm-remove-btn" data-aff-id="${a.id}" data-cid="${m.cid}">Remove</button>
+                          ${m.isMain
+                            ? '<span class="aff-main-badge">Main</span>'
+                            : `<button class="ot-btn ot-btn-danger mm-remove-btn" data-aff-id="${a.id}" data-cid="${m.cid}">Remove</button>`}
                         </td>
                       </tr>
                     `).join('')}
@@ -17180,6 +17249,21 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
         flex-wrap: wrap;
       }
       .mm-callsign { font-size: 16px; }
+
+      /* Main CID row — non-removable */
+      .mm-main-row td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+      .aff-main-badge {
+        display: inline-flex;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: color-mix(in srgb, var(--accent) 15%, transparent);
+        color: var(--accent);
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+      }
       .mm-count {
         font-size: 11px;
         font-weight: 700;
