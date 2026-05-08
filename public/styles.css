@@ -3024,7 +3024,26 @@ tr:hover .row-actions {
   border-color: rgba(239,68,68,0.35);
 }
 .ot-btn-danger:hover { background: rgba(239,68,68,0.18); border-color: #ef4444; color: #fff; }
-.ot-btn + .ot-btn { margin-left: 6px; }
+.ot-btn-icon { padding: 5px 8px; text-decoration: none; }
+.ot-btn-icon svg { display: block; }
+.ot-btn + .ot-btn,
+.ot-btn-icon + .ot-btn { margin-left: 6px; }
+
+/* Subtle inline "open in new tab" icon next to a name/callsign cell */
+.ot-open-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  padding: 3px;
+  border-radius: 4px;
+  color: var(--muted);
+  text-decoration: none;
+  vertical-align: middle;
+  transition: color .15s, background .15s;
+}
+.ot-open-link:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ot-open-link svg { display: block; }
 
 .ot-empty {
   padding: 56px 16px;

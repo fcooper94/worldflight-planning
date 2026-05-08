@@ -15587,12 +15587,29 @@ async function resolveUserAffiliate(cid) {
   return aff;
 }
 
-app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
+app.get('/affiliates/hq', requireLogin, async (req, res) => {
   const user = req.session.user.data;
   const cid = Number(user.cid);
   const isAdmin = isAdminUser(cid);
 
-  const affiliate = await resolveUserAffiliate(cid);
+  // Admin read-only override: /affiliates/hq?id=N opens any affiliate's HQ.
+  // Read-only when the admin isn't the main CID of the requested affiliate.
+  const requestedId = Number(req.query.id) || null;
+  let affiliate;
+  let readOnly = false;
+  if (requestedId && isAdmin) {
+    affiliate = await prisma.affiliate.findUnique({ where: { id: requestedId } });
+    if (!affiliate) return renderForbidden(req, res, 'Affiliate not found.');
+    readOnly = (Number(affiliate.cid) !== cid);
+  } else {
+    if (!isAffiliate(cid)) {
+      return renderForbidden(req, res, 'This page is for WF affiliates only.');
+    }
+    affiliate = await resolveUserAffiliate(cid);
+  }
+  // CID whose presence/stats the page should reflect. In read-only mode
+  // that's the affiliate's main CID, not the admin's.
+  const viewedCid = readOnly ? Number(affiliate?.cid || 0) : cid;
 
   // Member name resolution (main CID + AffiliateMember rows)
   let memberOptions = [];
@@ -15642,7 +15659,7 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
   // Live VATSIM presence — pilot or controller, otherwise offline
   let livePresence = { kind: 'offline', label: 'Offline', detail: '—' };
   if (isSolo) {
-    const pilotMatch = (cachedPilots || []).find(p => Number(p.cid) === cid);
+    const pilotMatch = (cachedPilots || []).find(p => Number(p.cid) === viewedCid);
     if (pilotMatch) {
       const fp = pilotMatch.flight_plan || {};
       const route = fp.departure && fp.arrival ? ` (${fp.departure} → ${fp.arrival})` : '';
@@ -15652,7 +15669,7 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
         detail: `${pilotMatch.callsign}${route}`
       };
     } else {
-      const atcMatch = (cachedControllers || []).find(c => Number(c.cid) === cid);
+      const atcMatch = (cachedControllers || []).find(c => Number(c.cid) === viewedCid);
       if (atcMatch) {
         const freq = atcMatch.frequency && atcMatch.frequency !== '199.998' ? ` · ${atcMatch.frequency}` : '';
         livePresence = {
@@ -15686,6 +15703,14 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
 
   const content = `
     <div class="affiliate-hq-wrap">
+
+      ${readOnly ? `
+      <section class="card aff-readonly-banner">
+        <span class="aff-readonly-badge">Admin · Read-only view</span>
+        <span class="aff-readonly-text">Viewing <strong>${escapeHtml(affiliate.callsign || '')}</strong> as administrator. No actions are available.</span>
+        <a href="/official-teams" class="ot-btn">← Back to Affiliates</a>
+      </section>
+      ` : ''}
 
       ${affiliate ? `
       <section class="card aff-identity-card">
@@ -15765,7 +15790,7 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
           </div>
         </section>
 
-        ${isSolo ? `
+        ${isSolo && !readOnly ? `
         <section class="card aff-stats-card">
           <header class="aff-members-header">
             <h3 class="section-title" style="margin:0;">My VATSIM Stats</h3>
@@ -15902,7 +15927,15 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
                   <tr data-sector="${escapeHtml(r.number)}">
                     <td><span class="ot-cell-callsign">${escapeHtml(r.number)}</span></td>
                     <td>
-                      ${isSolo ? (released ? `
+                      ${readOnly ? (() => {
+                        if (isSolo) {
+                          if (released) return '<span class="ot-muted">Released</span>';
+                          return `<span class="aff-solo-row"><span class="aff-solo-pilot"><span class="aff-solo-pilot-name">${escapeHtml(soloPilot ? soloPilot.name : '')}</span><span class="aff-solo-pilot-cid">${soloPilot ? soloPilot.cid : ''}</span></span></span>`;
+                        }
+                        if (!claimedCid) return '<span class="ot-muted">— Unclaimed —</span>';
+                        const m = memberOptions.find(x => x.cid === claimedCid);
+                        return m ? `<span>${escapeHtml(m.name)} · ${m.cid}</span>` : `<span class="ot-muted">CID ${claimedCid}</span>`;
+                      })() : (isSolo ? (released ? `
                         <button type="button" class="aff-solo-restore" data-sector="${escapeHtml(r.number)}">Unassigned</button>
                       ` : `
                         <span class="aff-solo-row">
@@ -15920,7 +15953,7 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
                           <option value="">— Unclaimed —</option>
                           ${memberOptions.map(m => `<option value="${m.cid}" ${claimedCid === m.cid ? 'selected' : ''}>${escapeHtml(m.name)} · ${m.cid}</option>`).join('')}
                         </select>
-                      `}
+                      `)}
                     </td>
                     <td><span class="flowtype-pill flowtype-${flow.cls}">${escapeHtml(flow.label)}</span></td>
                     <td><span class="aff-flow-status aff-flow-${status.kind}">${
@@ -15984,6 +16017,36 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
         flex-direction: column;
         gap: 16px;
       }
+
+      /* Read-only admin banner */
+      .aff-readonly-banner {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 18px;
+        flex-wrap: wrap;
+        background: color-mix(in srgb, #f59e0b 10%, transparent);
+        border: 1px solid color-mix(in srgb, #f59e0b 32%, transparent);
+      }
+      .aff-readonly-badge {
+        display: inline-flex;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: rgba(245,158,11,0.15);
+        color: #fbbf24;
+        border: 1px solid rgba(245,158,11,0.4);
+      }
+      .aff-readonly-text {
+        flex: 1;
+        font-size: 13px;
+        color: var(--text);
+      }
+      .aff-readonly-text strong { color: #fbbf24; }
+      .aff-readonly-banner .ot-btn { margin-left: auto; }
 
       /* Identity card */
       .aff-identity-card {
@@ -16838,7 +16901,8 @@ app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
     </script>
   `;
 
-  res.send(renderLayout({ title: 'Affiliate HQ', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+  const pageTitle = readOnly ? `${affiliate?.callsign || 'Affiliate'} - HQ (Admin View)` : 'Affiliate HQ';
+  res.send(renderLayout({ title: pageTitle, user, isAdmin, content, layoutClass: 'dashboard-full' }));
 });
 
 // Solo affiliate: release this sector (delete booking, mark released) or restore (recreate booking).
@@ -19133,7 +19197,12 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
             <tbody>
               ${affiliates.map(a => `
                 <tr data-affiliate-id="${a.id}">
-                  <td class="ot-cell-name"><span class="ot-cell-callsign">${escapeHtml(a.callsign)}</span></td>
+                  <td class="ot-cell-name">
+                    <span class="ot-cell-callsign">${escapeHtml(a.callsign)}</span>
+                    <a class="ot-open-link" href="/affiliates/hq?id=${a.id}" target="_blank" rel="noopener" title="Open Affiliate HQ (read-only)" aria-label="Open Affiliate HQ">
+                      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    </a>
+                  </td>
                   <td>
                     <span class="ot-simtype" data-sim="${escapeHtml((a.simType || '').toUpperCase())}">${escapeHtml(a.simType || '—')}</span>
                   </td>
@@ -19691,14 +19760,18 @@ app.post('/api/admin/affiliates', requireAdmin, async (req, res) => {
     }
   });
 
-  // Auto-grant WF_AFFILIATE role to the linked CID.
+  // Auto-grant WF_AFFILIATE role to the linked CID — but skip admins so
+  // creating an affiliate on behalf of someone doesn't put an "Affiliate HQ"
+  // entry in the admin's own sidebar.
   const cidNum = Number(cid);
-  await prisma.userAdditionalRole.upsert({
-    where: { cid_role: { cid: cidNum, role: 'WF_AFFILIATE' } },
-    update: {},
-    create: { cid: cidNum, role: 'WF_AFFILIATE' }
-  });
-  affiliateCids.add(cidNum);
+  if (!isAdminUser(cidNum)) {
+    await prisma.userAdditionalRole.upsert({
+      where: { cid_role: { cid: cidNum, role: 'WF_AFFILIATE' } },
+      update: {},
+      create: { cid: cidNum, role: 'WF_AFFILIATE' }
+    });
+    affiliateCids.add(cidNum);
+  }
   await loadAffiliateOwners();
 
   // If participating, fill in any leftover slots after teams have been assigned.
@@ -19769,6 +19842,18 @@ app.patch('/api/admin/affiliates/:id', requireAdmin, async (req, res) => {
   if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
   await prisma.affiliate.update({ where: { id }, data });
+
+  // If the main CID changed, grant WF_AFFILIATE to the new owner so they
+  // get the Affiliate HQ sidebar entry. Skip admins (they shouldn't pick up
+  // an Affiliate role just from being assigned as Main).
+  if (data.cid !== undefined && Number.isFinite(data.cid) && !isAdminUser(data.cid)) {
+    await prisma.userAdditionalRole.upsert({
+      where: { cid_role: { cid: data.cid, role: 'WF_AFFILIATE' } },
+      update: {},
+      create: { cid: data.cid, role: 'WF_AFFILIATE' }
+    });
+    affiliateCids.add(data.cid);
+  }
   await loadAffiliateOwners();
 
   // If they just turned on participation, run auto-assignment (teams first, then affiliates).

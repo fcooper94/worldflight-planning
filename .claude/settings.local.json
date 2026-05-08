@@ -233,7 +233,8 @@
       "Bash(curl -s -X POST \"https://overpass-api.de/api/interpreter\" --data-urlencode 'data=[out:json][timeout:60];area[icao=\"KDEN\"]->.airport;\\(way\\(area.airport\\)[aeroway=parking_position];\\);out body geom;')",
       "Bash(node --check index.js)",
       "Bash(node --check layout.js)",
-      "Bash(node --check public/slot-banners.js)"
+      "Bash(node --check public/slot-banners.js)",
+      "Bash(export PROD_URL=$\\(grep '^PROD_DATABASE_URL=' .env.dev)"
     ]
   }
 }

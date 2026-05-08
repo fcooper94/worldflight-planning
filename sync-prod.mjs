@@ -130,9 +130,22 @@ await pullTable({
 
 await pullTable({
   table: 'Affiliate',
-  cols: ['id', 'callsign', 'simType', 'cid', 'participatingWf26', 'createdAt'],
-  boolCols: ['participatingWf26'],
+  cols: ['id', 'callsign', 'simType', 'cid', 'sinceYear', 'hasMembers', 'participatingWf26', 'createdAt'],
+  boolCols: ['hasMembers', 'participatingWf26'],
   dateCols: ['createdAt']
+});
+
+await pullTable({
+  table: 'AffiliateMember',
+  cols: ['id', 'affiliateId', 'cid', 'active', 'addedAt'],
+  boolCols: ['active'],
+  dateCols: ['addedAt']
+});
+
+await pullTable({
+  table: 'AffiliateSectorClaim',
+  cols: ['id', 'affiliateId', 'sectorNumber', 'cid', 'claimedAt'],
+  dateCols: ['claimedAt']
 });
 
 await pullTable({
@@ -158,7 +171,7 @@ await pullTable({
 
 await pullTable({
   table: 'UserAdditionalRole',
-  cols: ['id', 'cid', 'role', 'teamName', 'canEditBookings', 'canManageMembers',
+  cols: ['id', 'cid', 'role', 'teamName', 'sinceYear', 'canEditBookings', 'canManageMembers',
          'participating', 'createdAt'],
   boolCols: ['canEditBookings', 'canManageMembers', 'participating'],
   dateCols: ['createdAt']
