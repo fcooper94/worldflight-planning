@@ -364,6 +364,8 @@ function renderLayout(opts) {
     siteBanner,
     isMaster: cid ? isMasterUser(cid) : false,
     isTeamMember: cid ? isTeamMember(cid) : false,
+    isAffiliate: cid ? isAffiliate(cid) : false,
+    canManageAffiliateMembers: cid ? canManageAffiliateMembers(cid) : false,
     activeEvent: active ? { id: active.id, name: active.name, year: active.year } : null
   });
 }
@@ -384,6 +386,7 @@ const allTobtSlots = {}; // slotKey -> { from, to, dateUtc, depTimeUtc, tobt }
 
 
 let cachedPilots = [];
+let cachedControllers = [];
 
 async function refreshPilots() {
   try {
@@ -391,6 +394,7 @@ async function refreshPilots() {
       'https://data.vatsim.net/v3/vatsim-data.json'
     );
     cachedPilots = res.data.pilots || [];
+    cachedControllers = res.data.controllers || [];
 
     if (isPageEnabled('fake-pilots')) {
       try {
@@ -402,11 +406,12 @@ async function refreshPilots() {
         // Fall back to real data
       }
     } else {
-      console.log('[VATSIM] Pilots refreshed:', cachedPilots.length);
+      console.log('[VATSIM] Pilots refreshed:', cachedPilots.length, 'Controllers:', cachedControllers.length);
     }
   } catch (err) {
     console.error('[VATSIM] Failed to refresh pilots:', err.message);
     cachedPilots = [];
+    cachedControllers = [];
   }
 }
 
@@ -655,7 +660,14 @@ io.use((socket, next) => {
 
 
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'book-slot', 'airspace', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions', 'atc-route'];
+
+// Per-key default mode used when no DB row exists yet. Most keys default to
+// 'visible'; ATC Route defaults to 'hidden' because routes are typically
+// released before they're confirmed with controllers.
+const PAGE_DEFAULT_MODE = {
+  'atc-route': 'hidden'
+};
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
 // Division → ICAO prefix mapping for document upload permissions
@@ -696,9 +708,9 @@ async function loadPageVisibility() {
     pageVisibility[r.key] = mode;
     found.add(r.key);
   }
-  // default missing keys to visible
+  // default missing keys (most to 'visible'; per-key overrides via PAGE_DEFAULT_MODE)
   for (const k of PAGE_KEYS) {
-    if (!found.has(k)) pageVisibility[k] = 'visible';
+    if (!found.has(k)) pageVisibility[k] = PAGE_DEFAULT_MODE[k] || 'visible';
   }
   console.log('[PAGE VIS] Loaded page visibility:', pageVisibility);
 }
@@ -1703,12 +1715,104 @@ function hasAdminPageAccess(cid, pageKey) {
   return !!perms && perms.has(pageKey);
 }
 
+// Branded 403 response. JSON for API clients (Accept: application/json),
+// HTML for browsers. Browsers send Accept including */*, so prefer html when both match.
+function renderForbidden(req, res, message) {
+  const wantsHtml = req.accepts(['html', 'json']) === 'html';
+  if (!wantsHtml) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const user = req.session?.user?.data || null;
+  const cid = Number(user?.cid) || null;
+  const isAdmin = cid ? isAdminUser(cid) : false;
+  const reason = message || 'You do not have permission to access this page.';
+  const displayName = user ? (user.personal?.name_full || ('CID ' + user.cid)) : '';
+  const content = `
+    <div class="forbidden-page">
+      <div class="forbidden-card">
+        <div class="forbidden-icon">
+          <svg viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+          </svg>
+        </div>
+        <div class="forbidden-code">403</div>
+        <h1 class="forbidden-title">Access Forbidden</h1>
+        <p class="forbidden-message">${escapeHtml(reason)}</p>
+        ${user ? `<p class="forbidden-cid">Logged in as <strong>${escapeHtml(displayName)}</strong></p>` : ''}
+        <div class="forbidden-actions">
+          <a href="/" class="action-btn primary">Back to Dashboard</a>
+          ${user ? `<a href="/logout" class="action-btn">Logout</a>` : `<a href="/auth/login" class="action-btn">Login</a>`}
+        </div>
+      </div>
+    </div>
+    <style>
+      .forbidden-page {
+        min-height: 60vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px 16px;
+      }
+      .forbidden-card {
+        max-width: 520px;
+        width: 100%;
+        text-align: center;
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 48px 32px;
+        box-shadow: 0 14px 40px rgba(0,0,0,0.30);
+      }
+      [data-theme="light"] .forbidden-card { background: rgba(15,23,42,0.025); }
+      .forbidden-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 88px;
+        height: 88px;
+        border-radius: 50%;
+        background: rgba(239,68,68,0.12);
+        color: #f87171;
+        margin: 0 auto 18px;
+      }
+      .forbidden-code {
+        font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.5em;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .forbidden-title {
+        margin: 0 0 12px;
+        font-size: 26px;
+        font-weight: 700;
+        color: var(--text);
+      }
+      .forbidden-message {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .forbidden-cid { margin: 0 0 22px; font-size: 12px; color: var(--muted); }
+      .forbidden-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+    </style>
+  `;
+  return res.status(403).send(renderLayout({ title: 'Access Forbidden', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+}
+
 /** Middleware: require any admin access */
 function requireAdmin(req, res, next) {
   const cid = req.session?.user?.data?.cid;
   if (!cid || !isAdminUser(cid)) {
-    if (req.accepts('json')) return res.status(403).json({ error: 'Forbidden' });
-    return res.status(403).send('<h1>403 Forbidden</h1><p>You do not have admin access.</p>');
+    return renderForbidden(req, res, 'You do not have admin access.');
   }
   next();
 }
@@ -1718,8 +1822,7 @@ function requireAdminPage(pageKey) {
   return function(req, res, next) {
     const cid = req.session?.user?.data?.cid;
     if (!cid || !hasAdminPageAccess(cid, pageKey)) {
-      if (req.accepts('json')) return res.status(403).json({ error: 'Forbidden' });
-      return res.status(403).send('<h1>403 Forbidden</h1><p>You do not have access to this page.</p>');
+      return renderForbidden(req, res, 'You do not have access to this admin page.');
     }
     next();
   };
@@ -1744,8 +1847,55 @@ function isTeamMember(cid) {
 function requireTeamMember(req, res, next) {
   const cid = Number(req.session?.user?.data?.cid);
   if (!cid || !isTeamMember(cid)) {
-    if (req.accepts('html')) return res.status(403).send('Forbidden');
-    return res.status(403).json({ error: 'Forbidden' });
+    return renderForbidden(req, res, 'This page is for WF team members only.');
+  }
+  next();
+}
+
+/* ===== WF AFFILIATE MEMBERSHIP ===== */
+const affiliateCids = new Set();
+const affiliateOwnerCids = new Set(); // CIDs that own >=1 Affiliate with hasMembers=true
+
+async function loadAffiliates() {
+  try {
+    const rows = await prisma.userAdditionalRole.findMany({ where: { role: 'WF_AFFILIATE' } });
+    affiliateCids.clear();
+    rows.forEach(r => affiliateCids.add(r.cid));
+    console.log(`[AFFILIATE] Loaded ${affiliateCids.size} WF affiliates`);
+  } catch (e) {}
+}
+
+async function loadAffiliateOwners() {
+  try {
+    const rows = await prisma.affiliate.findMany({
+      where: { hasMembers: true },
+      select: { cid: true }
+    });
+    affiliateOwnerCids.clear();
+    rows.forEach(r => { if (r.cid) affiliateOwnerCids.add(Number(r.cid)); });
+  } catch (e) {}
+}
+
+function isAffiliate(cid) {
+  return !!cid && affiliateCids.has(Number(cid));
+}
+
+function canManageAffiliateMembers(cid) {
+  return !!cid && affiliateOwnerCids.has(Number(cid));
+}
+
+function requireAffiliate(req, res, next) {
+  const cid = Number(req.session?.user?.data?.cid);
+  if (!cid || !isAffiliate(cid)) {
+    return renderForbidden(req, res, 'This page is for WF affiliates only.');
+  }
+  next();
+}
+
+function requireAffiliateOwner(req, res, next) {
+  const cid = Number(req.session?.user?.data?.cid);
+  if (!cid || !canManageAffiliateMembers(cid)) {
+    return renderForbidden(req, res, 'This page is only available to affiliate Main CIDs.');
   }
   next();
 }
@@ -1892,6 +2042,325 @@ async function autoAssignTeamBookings({ reason = '' } = {}) {
     console.error('[AUTO-TEAM] Failed:', e);
     return 0;
   }
+}
+
+/* ===== AFFILIATE AUTO-ASSIGNMENT =====
+   Runs AFTER team auto-assignment so Official Teams get first pick of slots.
+   For each participating Affiliate, books one slot per flow-restricted sector
+   under the affiliate's main CID + callsign:
+     - BOOKING_ONLY: takes a booking-only slot (capacity-checked)
+     - SLOTTED: picks the spare TOBT closest to the sector's dep_time_utc
+*/
+async function autoAssignAffiliateBookings({ reason = '' } = {}) {
+  try {
+    const affRows = await prisma.affiliate.findMany({
+      where: { participatingWf26: true },
+      select: { id: true, cid: true, callsign: true }
+    });
+
+    let created = 0;
+    for (const aff of affRows) {
+      const cidNum = Number(aff.cid);
+      const callsign = String(aff.callsign || '').toUpperCase();
+      if (!cidNum || !callsign) continue;
+
+      // Solo-released sectors (sentinel cid=0) — opted out by main user
+      const releasedRows = await prisma.affiliateSectorClaim.findMany({
+        where: { affiliateId: aff.id, cid: 0 },
+        select: { sectorNumber: true }
+      }).catch(() => []);
+      const releasedSet = new Set(releasedRows.map(r => r.sectorNumber));
+
+      for (const row of adminSheetCache) {
+        if (releasedSet.has(row.number)) continue;
+
+        const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
+        if (flow === 'NONE') continue;
+
+        const sectorPrefix = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
+
+        // Skip if this CID already has a booking for this sector
+        const alreadyBooked = Object.values(tobtBookingsByKey).some(b =>
+          b && Number(b.cid) === cidNum && typeof b.slotKey === 'string' && b.slotKey.startsWith(sectorPrefix)
+        );
+        if (alreadyBooked) continue;
+
+        let slotKey = null;
+        let tobt = null;
+
+        if (flow === 'BOOKING_ONLY') {
+          const cap = getBookingOnlyCapacity(row.from, row.to);
+          if (cap.total > 0 && cap.remaining <= 0) continue;
+          slotKey = `${sectorPrefix}|BOOKING_ONLY`;
+        } else if (flow === 'SLOTTED') {
+          const sectorSlotPrefix = `${sectorPrefix}|`;
+          const [dh, dm] = row.dep_time_utc.split(':').map(Number);
+          const depMin = dh * 60 + dm;
+          let best = null;
+          let bestDiff = Infinity;
+          for (const [k, s] of Object.entries(allTobtSlots)) {
+            if (!k.startsWith(sectorSlotPrefix)) continue;
+            if (tobtBookingsByKey[k]) continue; // taken
+            const [th, tm] = s.tobt.split(':').map(Number);
+            const diff = Math.abs((th * 60 + tm) - depMin);
+            if (diff < bestDiff) { best = s; bestDiff = diff; }
+          }
+          if (!best) continue;
+          tobt = best.tobt;
+          slotKey = `${sectorPrefix}|${tobt}`;
+        }
+        if (!slotKey) continue;
+
+        try {
+          await prisma.tobtBooking.create({
+            data: {
+              slotKey,
+              cid: cidNum,
+              callsign,
+              from: row.from,
+              to: row.to,
+              dateUtc: row.date_utc,
+              depTimeUtc: row.dep_time_utc,
+              tobtTimeUtc: tobt
+            }
+          });
+        } catch (err) {
+          continue; // unique-constraint race — skip
+        }
+
+        const bookingData = {
+          slotKey,
+          cid: cidNum,
+          callsign,
+          from: row.from,
+          to: row.to,
+          dateUtc: row.date_utc,
+          depTimeUtc: row.dep_time_utc,
+          tobtTimeUtc: tobt,
+          createdAtISO: new Date().toISOString()
+        };
+        const bookingKey = `${cidNum}:${slotKey}`;
+        tobtBookingsByKey[bookingKey] = bookingData;
+        tobtBookingsByKey[slotKey] = bookingData;
+        if (!tobtBookingsByCid[cidNum]) tobtBookingsByCid[cidNum] = new Set();
+        tobtBookingsByCid[cidNum].add(bookingKey);
+        created++;
+      }
+    }
+
+    if (created > 0) {
+      console.log(`[AUTO-AFF] Assigned ${created} bookings${reason ? ' (' + reason + ')' : ''}`);
+      try { io.emit('bookingCreated', { autoAssigned: created }); } catch {}
+    }
+    return created;
+  } catch (e) {
+    console.error('[AUTO-AFF] Failed:', e);
+    return 0;
+  }
+}
+
+// Helper: run team assignment first, then affiliate (teams have priority)
+async function autoAssignTeamThenAffiliate(opts = {}) {
+  try { await autoAssignTeamBookings(opts); } catch (e) { /* logged inside */ }
+  try { await autoAssignAffiliateBookings(opts); } catch (e) { /* logged inside */ }
+}
+
+// Flow type for the sector — same labels as the main /schedule page.
+function getFlowRestriction(scheduleRow) {
+  if (!scheduleRow) return { type: 'NONE', label: 'None', cls: 'none' };
+  const flow = sharedFlowTypes[`${scheduleRow.from}-${scheduleRow.to}`] || 'NONE';
+  if (flow === 'SLOTTED')      return { type: 'SLOTTED',      label: 'Slotted',      cls: 'slotted' };
+  if (flow === 'BOOKING_ONLY') return { type: 'BOOKING_ONLY', label: 'Booking Only', cls: 'booking_only' };
+  return { type: 'NONE', label: 'None', cls: 'none' };
+}
+
+// SimBrief URL for an affiliate sector. Honours the claimed pilot's
+// booking (TOBT if any) and embeds the WF Affiliate remarks.
+function buildAffiliateSimbriefUrl(scheduleRow, affiliate, claimedCid, includeRoute = true) {
+  if (!scheduleRow) return '';
+  const flow = sharedFlowTypes[`${scheduleRow.from}-${scheduleRow.to}`] || 'NONE';
+  const sectorPrefix = `${scheduleRow.from}-${scheduleRow.to}|${scheduleRow.date_utc}|${scheduleRow.dep_time_utc}`;
+  let booking = null;
+  if (claimedCid) {
+    booking = Object.values(tobtBookingsByKey).find(b =>
+      b && Number(b.cid) === Number(claimedCid) && typeof b.slotKey === 'string' && b.slotKey.startsWith(sectorPrefix)
+    ) || null;
+  }
+  const tobt = booking?.tobtTimeUtc || null;
+
+  const remarkParts = ['WorldFlight Affiliate'];
+  if (flow !== 'NONE') {
+    if (tobt) remarkParts.push(`WF TOBT/${String(tobt).replace(':', '')}z`);
+    else if (booking) remarkParts.push('WF Booking Confirmed');
+  }
+  remarkParts.push('WWW.PLANNING.WORLDFLIGHT.CENTER');
+  const remark = remarkParts.join(' - ');
+
+  const callsign = String(affiliate?.callsign || '').toUpperCase();
+  const params = new URLSearchParams({
+    orig: scheduleRow.from || '',
+    dest: scheduleRow.to || '',
+    route: includeRoute && scheduleRow.atc_route && scheduleRow.atc_route !== '-' ? scheduleRow.atc_route : '',
+    callsign,
+    manualrmk: remark
+  });
+  const depSrc = tobt || scheduleRow.dep_time_utc;
+  if (depSrc) {
+    const [hh, mm] = String(depSrc).split(':');
+    if (hh) params.set('deph', hh);
+    if (mm) params.set('depm', mm);
+  }
+  return 'https://dispatch.simbrief.com/options/custom?' + params.toString();
+}
+
+// Booking status for the claimed pilot on this sector.
+//   - NONE flow                                  → '—'
+//   - claimed pilot has booking with a TOBT      → 'TOBT HHMMz'
+//   - claimed pilot has booking without TOBT     → 'Booking Confirmed'
+//   - everything else                            → '—'
+function getFlowStatus(scheduleRow, claimedCid) {
+  if (!scheduleRow) return { text: '—', kind: 'empty' };
+  const flow = sharedFlowTypes[`${scheduleRow.from}-${scheduleRow.to}`] || 'NONE';
+  if (flow === 'NONE') return { text: '—', kind: 'empty' };
+  if (!claimedCid) return { text: '—', kind: 'empty' };
+  const sectorPrefix = `${scheduleRow.from}-${scheduleRow.to}|${scheduleRow.date_utc}|${scheduleRow.dep_time_utc}`;
+  const booking = Object.values(tobtBookingsByKey).find(b =>
+    b && Number(b.cid) === Number(claimedCid) && typeof b.slotKey === 'string' && b.slotKey.startsWith(sectorPrefix)
+  );
+  if (!booking) return { text: '—', kind: 'empty' };
+  if (booking.tobtTimeUtc) {
+    const t = String(booking.tobtTimeUtc);
+    return { text: `TOBT ${t}z`, kind: 'tobt', label: 'TOBT', time: `${t}z` };
+  }
+  return { text: 'Booking Confirmed', kind: 'confirmed' };
+}
+
+// When a pilot is claimed for an affiliate sector, ensure that pilot holds the
+// booking/TOBT for that sector. If the affiliate already has a booking for
+// the sector (held by main CID or another member), transfer it to the new pilot;
+// otherwise try to create a fresh booking using the same SLOTTED/BOOKING_ONLY
+// logic as auto-assignment.
+async function assignAffiliatePilotToSector(affiliate, scheduleRow, claimCid) {
+  if (!affiliate || !scheduleRow || !claimCid) return;
+  const newCid = Number(claimCid);
+  if (!Number.isFinite(newCid)) return;
+
+  const sectorPrefix = `${scheduleRow.from}-${scheduleRow.to}|${scheduleRow.date_utc}|${scheduleRow.dep_time_utc}`;
+  const callsign = String(affiliate.callsign || '').toUpperCase();
+
+  // Build set of CIDs in this affiliate (main + members)
+  const memberRows = await prisma.affiliateMember.findMany({
+    where: { affiliateId: affiliate.id }
+  }).catch(() => []);
+  const affCids = [Number(affiliate.cid), ...memberRows.map(m => Number(m.cid))].filter(Number.isFinite);
+
+  // Look for an existing booking for this sector held by anyone in the affiliate
+  const existing = await prisma.tobtBooking.findFirst({
+    where: {
+      cid: { in: affCids },
+      slotKey: { startsWith: sectorPrefix }
+    }
+  });
+
+  if (existing) {
+    if (Number(existing.cid) === newCid) return; // already correct
+    const oldCid = Number(existing.cid);
+    await prisma.tobtBooking.update({
+      where: { id: existing.id },
+      data: { cid: newCid, callsign }
+    });
+
+    // In-memory caches
+    const oldBookingKey = `${oldCid}:${existing.slotKey}`;
+    const newBookingKey = `${newCid}:${existing.slotKey}`;
+    const memBooking = tobtBookingsByKey[oldBookingKey] || tobtBookingsByKey[existing.slotKey] || existing;
+    const updated = {
+      slotKey: existing.slotKey,
+      cid: newCid,
+      callsign,
+      from: existing.from,
+      to: existing.to,
+      dateUtc: existing.dateUtc,
+      depTimeUtc: existing.depTimeUtc,
+      tobtTimeUtc: existing.tobtTimeUtc,
+      createdAtISO: memBooking.createdAtISO || new Date().toISOString()
+    };
+    delete tobtBookingsByKey[oldBookingKey];
+    if (tobtBookingsByCid[oldCid]) tobtBookingsByCid[oldCid].delete(oldBookingKey);
+    tobtBookingsByKey[newBookingKey] = updated;
+    tobtBookingsByKey[existing.slotKey] = updated;
+    if (!tobtBookingsByCid[newCid]) tobtBookingsByCid[newCid] = new Set();
+    tobtBookingsByCid[newCid].add(newBookingKey);
+
+    try { io.emit('bookingUpdated', { slotKey: existing.slotKey }); } catch {}
+    return;
+  }
+
+  // No existing booking — create one for the pilot using the auto-assign logic
+  const flow = sharedFlowTypes[`${scheduleRow.from}-${scheduleRow.to}`] || 'NONE';
+  if (flow === 'NONE') return;
+
+  let slotKey = null;
+  let tobt = null;
+
+  if (flow === 'BOOKING_ONLY') {
+    const cap = getBookingOnlyCapacity(scheduleRow.from, scheduleRow.to);
+    if (cap.total > 0 && cap.remaining <= 0) return;
+    slotKey = `${sectorPrefix}|BOOKING_ONLY`;
+  } else if (flow === 'SLOTTED') {
+    const sectorSlotPrefix = `${sectorPrefix}|`;
+    const [dh, dm] = scheduleRow.dep_time_utc.split(':').map(Number);
+    const depMin = dh * 60 + dm;
+    let best = null;
+    let bestDiff = Infinity;
+    for (const [k, s] of Object.entries(allTobtSlots)) {
+      if (!k.startsWith(sectorSlotPrefix)) continue;
+      if (tobtBookingsByKey[k]) continue; // taken
+      const [th, tm] = s.tobt.split(':').map(Number);
+      const diff = Math.abs((th * 60 + tm) - depMin);
+      if (diff < bestDiff) { best = s; bestDiff = diff; }
+    }
+    if (!best) return;
+    tobt = best.tobt;
+    slotKey = `${sectorPrefix}|${tobt}`;
+  }
+  if (!slotKey) return;
+
+  try {
+    await prisma.tobtBooking.create({
+      data: {
+        slotKey,
+        cid: newCid,
+        callsign,
+        from: scheduleRow.from,
+        to: scheduleRow.to,
+        dateUtc: scheduleRow.date_utc,
+        depTimeUtc: scheduleRow.dep_time_utc,
+        tobtTimeUtc: tobt
+      }
+    });
+  } catch (err) {
+    return; // unique-constraint race
+  }
+
+  const bookingData = {
+    slotKey,
+    cid: newCid,
+    callsign,
+    from: scheduleRow.from,
+    to: scheduleRow.to,
+    dateUtc: scheduleRow.date_utc,
+    depTimeUtc: scheduleRow.dep_time_utc,
+    tobtTimeUtc: tobt,
+    createdAtISO: new Date().toISOString()
+  };
+  const bookingKey = `${newCid}:${slotKey}`;
+  tobtBookingsByKey[bookingKey] = bookingData;
+  tobtBookingsByKey[slotKey] = bookingData;
+  if (!tobtBookingsByCid[newCid]) tobtBookingsByCid[newCid] = new Set();
+  tobtBookingsByCid[newCid].add(bookingKey);
+
+  try { io.emit('bookingCreated', { slotKey }); } catch {}
 }
 
 /* ===== BOOKING-ONLY CAPACITY ===== */
@@ -2094,33 +2563,37 @@ function setBootstrapStatus(step, label) {
 // Pre-fetch ground GeoJSON for every airport in the active event schedule.
 // Sequential — Overpass rate-limits parallel hits, and cache hits return
 // instantly anyway, so the only slow case is first-ever startup.
+//
+// The public loading screen sees `setBootstrapStatus`, so the user-facing
+// label uses the sector number (e.g. "WF2601") rather than the ICAO — we
+// don't want to leak the route via the startup screen before release.
 async function prefetchGroundForActiveSchedule() {
-  const icaos = new Set();
-  for (const r of (adminSheetCache || [])) {
-    if (r.from) icaos.add(String(r.from).toUpperCase());
-    if (r.to) icaos.add(String(r.to).toUpperCase());
-  }
-  const list = [...icaos].filter(i => /^[A-Z]{4}$/.test(i));
-  const total = list.length;
+  const rows = (adminSheetCache || []).filter(r => r.from && r.to && r.number);
+  const total = rows.length;
   if (!total) {
-    console.log('[GROUND PREFETCH] no airports in active schedule, skipping');
+    console.log('[GROUND PREFETCH] no sectors in active schedule, skipping');
     return;
   }
+  const seen = new Set();
   let done = 0, hit = 0, fetched = 0, failed = 0;
-  for (const icao of list) {
+  for (const row of rows) {
     done++;
-    setBootstrapStatus(9, `Pre-fetching airport ground layouts (${done}/${total}): ${icao}`);
-    const cacheFile = path.join(__dirname, 'data', 'ground', `${icao}.json`);
-    const wasCached = fs.existsSync(cacheFile);
-    try {
-      await getAirportGround(icao);
-      if (wasCached) hit++; else fetched++;
-    } catch (err) {
-      failed++;
-      console.warn('[GROUND PREFETCH]', icao, '-', err.message);
+    setBootstrapStatus(9, `Pre-fetching airport ground layouts (${done}/${total}): ${row.number}`);
+    for (const icao of [String(row.from).toUpperCase(), String(row.to).toUpperCase()]) {
+      if (!/^[A-Z]{4}$/.test(icao) || seen.has(icao)) continue;
+      seen.add(icao);
+      const cacheFile = path.join(__dirname, 'data', 'ground', `${icao}.json`);
+      const wasCached = fs.existsSync(cacheFile);
+      try {
+        await getAirportGround(icao);
+        if (wasCached) hit++; else fetched++;
+      } catch (err) {
+        failed++;
+        console.warn('[GROUND PREFETCH]', icao, '-', err.message);
+      }
     }
   }
-  console.log(`[GROUND PREFETCH] done: ${total} airports — ${hit} cached, ${fetched} newly fetched, ${failed} failed`);
+  console.log(`[GROUND PREFETCH] done: ${seen.size} airports across ${total} sectors — ${hit} cached, ${fetched} newly fetched, ${failed} failed`);
 }
 
 async function bootstrap() {
@@ -2136,6 +2609,8 @@ async function bootstrap() {
   await loadSiteGate();
   await loadMasterUsers();
   await loadTeamMembers();
+  await loadAffiliates();
+  await loadAffiliateOwners();
   await loadAdminPermissions();
 
   setBootstrapStatus(4, 'Loading event schedule');
@@ -2171,9 +2646,9 @@ await (async () => {
 
   rebuildAllTobtSlots();       // 🔑 NOW WORKS
 
-  // Auto-assign bookings/slots for all participating teams. Idempotent:
-  // skips any sector+cid already booked, so safe to re-run any time.
-  autoAssignTeamBookings({ reason: 'startup' }).catch(() => {});
+  // Auto-assign bookings/slots for all participating teams (first), then
+  // affiliates fill remaining slots. Both are idempotent — safe to re-run.
+  autoAssignTeamThenAffiliate({ reason: 'startup' }).catch(() => {});
 
   // Pre-warm FIR analysis cache in background
   buildFirAnalysis().then(() => console.log('[AIRSPACE] FIR analysis cache warmed')).catch(() => {});
@@ -5189,7 +5664,7 @@ socket.on('updateDepFlowType', async ({ sector, flowtype, eventId: clientEventId
   io.emit('depFlowTypeUpdated', { sector: key, flowtype: normalized, eventId: evtId });
 
   if (isActiveEvent && (normalized === 'SLOTTED' || normalized === 'BOOKING_ONLY')) {
-    autoAssignTeamBookings({ reason: `flow ${normalized} set for ${key}` }).catch(() => {});
+    autoAssignTeamThenAffiliate({ reason: `flow ${normalized} set for ${key}` }).catch(() => {});
   }
 });
 
@@ -7334,6 +7809,18 @@ if (process.env.DEV_MODE === 'true') {
       },
       oauth: { token_valid: true },
       _label: 'Matt Collier — Normal User'
+    },
+    {
+      cid: 1567574,
+      personal: { name_first: 'Mats', name_last: 'Kronberg', name_full: 'Mats Kronberg' },
+      vatsim: {
+        rating: { id: 1, short: 'OBS', long: 'Observer' },
+        pilotrating: { id: 0, short: 'NEW', long: 'Basic Member' },
+        division: { id: 'SCA', name: 'Scandinavia' },
+        region: { id: 'EMEA', name: 'Europe, Middle East and Africa' }
+      },
+      oauth: { token_valid: true },
+      _label: 'Mats Kronberg — Normal User'
     }
   ];
 
@@ -7567,7 +8054,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
               <div><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);">Block Time</div><div style="font-size:15px;font-weight:600;color:var(--text);">${leg ? leg.block_time || '-' : '-'}</div></div>
             </div>
           </div>
-          ${leg && leg.atc_route ? '<div style="border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">ATC Route</div><div style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text);word-break:break-all;">' + leg.atc_route + '</div></div>' : ''}
+          ${(isAdmin || isPageEnabled('atc-route')) && leg && leg.atc_route ? '<div style="border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">ATC Route</div><div style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text);word-break:break-all;">' + leg.atc_route + '</div></div>' : ''}
         </div>
         ${!isPageVisibleTo('flow-restrictions', isAdmin) ? `
         <div class="sector-banner sector-banner-flow-full" style="width:calc(40% - 8px);min-width:250px;flex-direction:column;justify-content:center;padding:16px;box-sizing:border-box;">
@@ -7621,7 +8108,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22h20"/><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 00-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>
             <div class="sector-banner-text"><span class="sector-banner-label">Arrival</span><span class="sector-banner-icao">${toIcao} Portal</span></div>
           </a>
-          ${leg ? '<a href="https://dispatch.simbrief.com/options/custom?orig=' + fromIcao + '&dest=' + toIcao + '&route=' + encodeURIComponent(leg.atc_route || '') + '&manualrmk=' + encodeURIComponent('Route validated from www.worldflight.center') + '" target="_blank" rel="noopener" class="sector-banner sector-banner-sb"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg><div class="sector-banner-text"><span class="sector-banner-label">Flight Planning</span><span class="sector-banner-icao" style="color:#4ade80;">Plan with SimBrief</span></div></a>' : ''}
+          ${leg ? '<a href="https://dispatch.simbrief.com/options/custom?orig=' + fromIcao + '&dest=' + toIcao + '&route=' + encodeURIComponent((isAdmin || isPageEnabled('atc-route')) ? (leg.atc_route || '') : '') + '&manualrmk=' + encodeURIComponent('Route validated from www.worldflight.center') + '" target="_blank" rel="noopener" class="sector-banner sector-banner-sb"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg><div class="sector-banner-text"><span class="sector-banner-label">Flight Planning</span><span class="sector-banner-icao" style="color:#4ade80;">Plan with SimBrief</span></div></a>' : ''}
         </div>
       </div>
 
@@ -7631,7 +8118,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
     document.addEventListener('DOMContentLoaded', function() {
       var fromIcao = '${fromIcao}';
       var toIcao = '${toIcao}';
-      var route = ${leg ? JSON.stringify(leg.atc_route || '') : "''"};
+      var route = ${leg && (isAdmin || isPageEnabled('atc-route')) ? JSON.stringify(leg.atc_route || '') : "''"};
 
       var map = L.map('sectorMap', {
         zoomControl: false,
@@ -8016,6 +8503,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   const isLoggedIn = !!cid;
   const myBookings = cid ? tobtBookingsByCid[cid] : null;
   const showBookSlot = isAdmin || isPageEnabled('book-slot');
+  const showAtcRoute = isAdmin || isPageEnabled('atc-route');
 
   // Team-booking context for booking-only flow (same resolution as /sector)
   let teamBookingContext = null;
@@ -8055,7 +8543,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
             <th class="col-date">Date</th>
             <th class="col-window">Dep Window <span class="col-help" title="There is no published departure time.&#10;Please aim to depart within this window." style="cursor:help;color:var(--muted);">?</span></th>
             <th class="col-block">Block</th>
-            <th class="col-route">ATC Route</th>
+            ${showAtcRoute ? '<th class="col-route">ATC Route</th>' : ''}
             ${showBookSlot ? '<th class="col-book">Book</th>' : ''}
             <th class="col-details"></th>
             <!-- <th class="col-plan">Plan</th> -->
@@ -8075,7 +8563,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
 
             return `
             <tr>
-              <td class="col-wf-sector"><button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${escapeHtml(r.atc_route)}">${r.number}</button></td>
+              <td class="col-wf-sector"><button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${showAtcRoute ? escapeHtml(r.atc_route) : ''}">${r.number}</button></td>
 
               <td class="col-from">
                 <a href="/icao/${r.from}">${r.from}</a>
@@ -8089,6 +8577,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
               <td class="col-window">${buildTimeWindow(r.dep_time_utc)}</td>
               <td class="col-block">${r.block_time}</td>
 
+              ${showAtcRoute ? `
               <td class="col-route">
                 <div class="route-collapsible">
                   <span class="route-text collapsed">
@@ -8098,7 +8587,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
                     Expand
                   </button>
                 </div>
-              </td>
+              </td>` : ''}
 
               <!-- ✅ BOOK (combined booking type + action) -->
               ${showBookSlot ? (() => {
@@ -8233,7 +8722,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
 </td>
               -->
               <td class="col-details">
-                <button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${escapeHtml(r.atc_route)}">Sector Details</button>
+                <button class="sector-details-btn" data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${showAtcRoute ? escapeHtml(r.atc_route) : ''}">Sector Details</button>
               </td>
             </tr>
             `;
@@ -9335,6 +9824,12 @@ app.get('/admin/access-management', requireAdmin, (req, res) => {
           <option value="">Select team...</option>
         </select>
       </div>
+      <div id="wfAffiliatePicker" style="display:none;margin-top:10px;align-items:center;gap:8px;">
+        <label style="font-size:12px;color:var(--muted);">Affiliate:</label>
+        <select id="wfAffiliateSelect" style="padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;min-width:280px;">
+          <option value="">Select affiliate...</option>
+        </select>
+      </div>
     </div>
 
     <div id="adminAccessSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;">
@@ -10060,11 +10555,33 @@ document.addEventListener('DOMContentLoaded', function () {
           addlSection.style.display = '';
           var currentRoles = data.additionalRoles || [];
           var teamPicker = document.getElementById('wfTeamPicker');
+          var affPicker = document.getElementById('wfAffiliatePicker');
+          var linkedAffIds = (data.linkedAffiliateIds || []).map(Number);
 
           // Clone team <select> first to drop any stale listeners from a prior search
           var oldTeamSelect = document.getElementById('wfTeamSelect');
           var teamSelect = oldTeamSelect.cloneNode(true);
           oldTeamSelect.parentNode.replaceChild(teamSelect, oldTeamSelect);
+
+          // Clone affiliate <select> too
+          var oldAffSelect = document.getElementById('wfAffiliateSelect');
+          var affSelect = oldAffSelect.cloneNode(true);
+          oldAffSelect.parentNode.replaceChild(affSelect, oldAffSelect);
+
+          async function ensureAffiliatesLoaded() {
+            if (affSelect.dataset.loaded === '1') return;
+            try {
+              var r = await fetch('/admin/api/affiliates-list', { credentials: 'same-origin' });
+              var rows = await r.json();
+              rows.forEach(function(a) {
+                var opt = document.createElement('option');
+                opt.value = String(a.id);
+                opt.textContent = a.callsign + ' — ' + (a.simType || '') + ' (CID: ' + a.cid + ')';
+                affSelect.appendChild(opt);
+              });
+              affSelect.dataset.loaded = '1';
+            } catch (e) {}
+          }
 
           async function ensureTeamsLoaded() {
             if (teamSelect.dataset.loaded === '1') return;
@@ -10081,9 +10598,10 @@ document.addEventListener('DOMContentLoaded', function () {
             } catch (e) {}
           }
 
-          async function toggleRole(role, enabled, teamName) {
+          async function toggleRole(role, enabled, extra) {
             var body = { cid: Number(data.cid), role: role, enabled: enabled };
-            if (teamName) body.teamName = teamName;
+            if (extra && extra.teamName) body.teamName = extra.teamName;
+            if (extra && extra.sinceYear) body.sinceYear = extra.sinceYear;
             var r = await fetch('/admin/api/user-additional-roles/toggle', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -10122,6 +10640,28 @@ document.addEventListener('DOMContentLoaded', function () {
                   catch (err) { this.checked = true; teamPicker.style.display = 'flex'; }
                 }
               });
+            } else if (role === 'WF_AFFILIATE') {
+              if (box.checked) {
+                ensureAffiliatesLoaded().then(function() {
+                  affSelect.value = linkedAffIds.length ? String(linkedAffIds[0]) : '';
+                });
+                affPicker.style.display = 'flex';
+              } else {
+                affPicker.style.display = 'none';
+                affSelect.value = '';
+              }
+              box.addEventListener('change', async function() {
+                if (this.checked) {
+                  // Reveal the picker; don't persist until an affiliate is linked.
+                  await ensureAffiliatesLoaded();
+                  affSelect.value = '';
+                  affPicker.style.display = 'flex';
+                } else {
+                  affPicker.style.display = 'none';
+                  try { await toggleRole('WF_AFFILIATE', false); }
+                  catch (err) { this.checked = true; affPicker.style.display = 'flex'; }
+                }
+              });
             } else {
               box.addEventListener('change', async function() {
                 var wasChecked = !this.checked;
@@ -10133,8 +10673,25 @@ document.addEventListener('DOMContentLoaded', function () {
 
           teamSelect.addEventListener('change', async function() {
             if (!this.value) return;
-            try { await toggleRole('WF_TEAM', true, this.value); }
+            try { await toggleRole('WF_TEAM', true, { teamName: this.value }); }
             catch (err) {}
+          });
+
+          affSelect.addEventListener('change', async function() {
+            if (!this.value) return;
+            var affiliateId = Number(this.value);
+            try {
+              // Re-link this affiliate row to the searched user, then grant role.
+              var patchRes = await fetch('/api/admin/affiliates/' + affiliateId, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ cid: Number(data.cid) })
+              });
+              if (!patchRes.ok) throw new Error('link failed');
+              await toggleRole('WF_AFFILIATE', true);
+              affSelect.dataset.loaded = ''; // force re-fetch to refresh CID labels
+            } catch (err) {}
           });
 
           // ===== Admin Access Section =====
@@ -10257,6 +10814,7 @@ document.addEventListener('DOMContentLoaded', function () {
           document.getElementById('additionalRolesSection').style.display = 'none';
           document.getElementById('adminAccessSection').style.display = 'none';
           document.getElementById('wfTeamPicker').style.display = 'none';
+          document.getElementById('wfAffiliatePicker').style.display = 'none';
           updateAddSection('division', data.pattern);
           var docs = data.docPermissions || [];
           var firs = data.firAccess || [];
@@ -10598,18 +11156,33 @@ app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
   // Check if it's a CID (all digits)
   if (/^\d+$/.test(q)) {
     const cid = Number(q);
-    const [docPerms, staffReqs, anyStaffReq, anyDocReq, addlRoles] = await Promise.all([
+    const [docPerms, staffReqs, anyStaffReq, anyDocReq, addlRoles, userRow, mailSub, linkedAffiliates] = await Promise.all([
       prisma.documentationPermission.findMany({ where: { cid } }),
       prisma.staffAccessRequest.findMany({ where: { cid, status: 'APPROVED' } }),
       prisma.staffAccessRequest.findFirst({ where: { cid }, orderBy: { createdAt: 'desc' } }),
       prisma.documentationAccessRequest.findFirst({ where: { cid }, orderBy: { createdAt: 'desc' } }),
-      prisma.userAdditionalRole.findMany({ where: { cid } })
+      prisma.userAdditionalRole.findMany({ where: { cid } }),
+      prisma.user.findUnique({ where: { cid } }).catch(() => null),
+      prisma.mailingListSubscriber.findFirst({ where: { cid } }).catch(() => null),
+      prisma.affiliate.findMany({ where: { cid }, select: { id: true } }).catch(() => [])
     ]);
-    const userName = anyStaffReq?.name || anyDocReq?.name || null;
+    const mailName = mailSub ? [mailSub.firstName, mailSub.lastName].filter(Boolean).join(' ').trim() : '';
+    let userName =
+      userRow?.name ||
+      anyStaffReq?.name ||
+      anyDocReq?.name ||
+      mailName ||
+      null;
+    if (!userName) {
+      // Last resort: VATSIM public member endpoint (cached 24h)
+      const vatsimName = await fetchVatsimName(cid);
+      if (vatsimName) userName = vatsimName;
+    }
     const userRole = anyStaffReq?.role || anyDocReq?.role || null;
     const hasGlobal = docPerms.some(r => r.pattern === '****');
     const isMaster = masterUserCids.has(cid);
     const wfTeamRow = addlRoles.find(r => r.role === 'WF_TEAM');
+    const wfAffiliateRow = addlRoles.find(r => r.role === 'WF_AFFILIATE');
     const cidAdminPerms = adminPermissions.get(cid);
     return res.json({
       _searchType: 'cid',
@@ -10620,6 +11193,8 @@ app.get('/admin/api/documentation/search', requireAdmin, async (req, res) => {
       masterUser: isMaster,
       additionalRoles: addlRoles.map(r => r.role),
       wfTeamName: wfTeamRow?.teamName ?? null,
+      wfAffiliateSince: wfAffiliateRow?.sinceYear ?? null,
+      linkedAffiliateIds: linkedAffiliates.map(a => a.id),
       docPermissions: docPerms.filter(r => r.pattern !== '****'),
       firAccess: staffReqs,
       isSuperAdmin: isSuperAdmin(cid),
@@ -13801,6 +14376,14 @@ app.get('/admin/api/official-teams', requireAdmin, async (req, res) => {
   res.json(names);
 });
 
+app.get('/admin/api/affiliates-list', requireAdmin, async (req, res) => {
+  const rows = await prisma.affiliate.findMany({
+    select: { id: true, callsign: true, simType: true, cid: true },
+    orderBy: { callsign: 'asc' }
+  });
+  res.json(rows);
+});
+
 app.post('/admin/api/user-additional-roles/toggle', requireAdmin, async (req, res) => {
   const cid = Number(req.body?.cid);
   const role = String(req.body?.role || '');
@@ -13820,9 +14403,11 @@ app.post('/admin/api/user-additional-roles/toggle', requireAdmin, async (req, re
       create: { cid, role, ...data }
     });
     if (role === 'WF_TEAM') teamMemberCids.add(cid);
+    if (role === 'WF_AFFILIATE') affiliateCids.add(cid);
   } else {
     await prisma.userAdditionalRole.deleteMany({ where: { cid, role } });
     if (role === 'WF_TEAM') teamMemberCids.delete(cid);
+    if (role === 'WF_AFFILIATE') affiliateCids.delete(cid);
   }
   res.json({ ok: true });
 });
@@ -14050,6 +14635,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
   const isAdminFlag = isAdminUser(cid);
   const showArrival = isAdminFlag || isPageEnabled('arrival-info');
   const showDeparture = isAdminFlag || isPageEnabled('departure-info');
+  const showAtcRoute = isAdminFlag || isPageEnabled('atc-route');
 
   res.json({
     arrival: (showArrival && arrivalLeg) ? {
@@ -14059,7 +14645,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
       dep_time_utc: arrivalLeg.dep_time_utc,
       arr_time_utc: arrivalLeg.arr_time_utc,
       window: arrivalWindow,
-      atcRoute: arrivalLeg.atc_route,
+      atcRoute: showAtcRoute ? arrivalLeg.atc_route : '',
 
       hasSlots: arrivalHasSlots,
       fullyBooked: arrivalFullyBooked,
@@ -14072,7 +14658,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
       dateUtc: departureLeg.date_utc,
       dep_time_utc: departureLeg.dep_time_utc,
       window: departureWindow,
-      atcRoute: departureLeg.atc_route,
+      atcRoute: showAtcRoute ? departureLeg.atc_route : '',
 
       hasSlots: departureHasSlots,
       fullyBooked: departureFullyBooked,
@@ -14982,6 +15568,1802 @@ app.post('/api/tobt/update-callsign', requireLogin, async (req, res) => {
 
 
 
+/* ===== AFFILIATE HQ ===== */
+// Resolve "the user's primary affiliate":
+//   1. Affiliate where user is the main CID (lowest id wins if multiple)
+//   2. Otherwise, Affiliate the user belongs to as an AffiliateMember
+async function resolveUserAffiliate(cid) {
+  let aff = await prisma.affiliate.findFirst({
+    where: { cid },
+    orderBy: { id: 'asc' }
+  });
+  if (!aff) {
+    const m = await prisma.affiliateMember.findFirst({
+      where: { cid },
+      orderBy: { id: 'asc' }
+    });
+    if (m) aff = await prisma.affiliate.findUnique({ where: { id: m.affiliateId } });
+  }
+  return aff;
+}
+
+app.get('/affiliates/hq', requireLogin, requireAffiliate, async (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  const isAdmin = isAdminUser(cid);
+
+  const affiliate = await resolveUserAffiliate(cid);
+
+  // Member name resolution (main CID + AffiliateMember rows)
+  let memberOptions = [];
+  let claimByNumber = {};
+  let memberCount = 0;
+  if (affiliate) {
+    const memberRows = await prisma.affiliateMember.findMany({
+      where: { affiliateId: affiliate.id, active: true }
+    });
+    const allMemberCids = [...new Set([Number(affiliate.cid), ...memberRows.map(m => Number(m.cid))])];
+    memberCount = allMemberCids.length;
+
+    const [users, mailSubs] = await Promise.all([
+      prisma.user.findMany({ where: { cid: { in: allMemberCids } }, select: { cid: true, name: true } }).catch(() => []),
+      prisma.mailingListSubscriber.findMany({ where: { cid: { in: allMemberCids } }, select: { cid: true, firstName: true, lastName: true } }).catch(() => [])
+    ]);
+    const nameByCid = {};
+    users.forEach(u => { if (u.name) nameByCid[Number(u.cid)] = u.name; });
+    mailSubs.forEach(s => {
+      const c = Number(s.cid);
+      if (nameByCid[c]) return;
+      const nm = [s.firstName, s.lastName].filter(Boolean).join(' ').trim();
+      if (nm) nameByCid[c] = nm;
+    });
+    if (!nameByCid[cid] && user?.personal?.name_full) nameByCid[cid] = user.personal.name_full;
+
+    memberOptions = allMemberCids
+      .map(c => ({ cid: c, name: nameByCid[c] || ('CID ' + c), isMain: c === Number(affiliate.cid) }))
+      .sort((a, b) => (b.isMain - a.isMain) || a.name.localeCompare(b.name));
+
+    const claims = await prisma.affiliateSectorClaim.findMany({
+      where: { affiliateId: affiliate.id }
+    }).catch(() => []);
+    claims.forEach(cl => { claimByNumber[cl.sectorNumber] = Number(cl.cid); });
+  }
+
+  // Solo "released" sectors — persisted as a claim with cid=0 sentinel
+  const releasedSectorSet = new Set();
+  if (affiliate && !affiliate.hasMembers) {
+    Object.entries(claimByNumber).forEach(([n, c]) => { if (c === 0) releasedSectorSet.add(n); });
+  }
+
+  const sinceYear = affiliate?.sinceYear || null;
+  const isSolo = !!(affiliate && !affiliate.hasMembers);
+  const soloPilot = isSolo ? memberOptions.find(m => m.isMain) || null : null;
+
+  // Live VATSIM presence — pilot or controller, otherwise offline
+  let livePresence = { kind: 'offline', label: 'Offline', detail: '—' };
+  if (isSolo) {
+    const pilotMatch = (cachedPilots || []).find(p => Number(p.cid) === cid);
+    if (pilotMatch) {
+      const fp = pilotMatch.flight_plan || {};
+      const route = fp.departure && fp.arrival ? ` (${fp.departure} → ${fp.arrival})` : '';
+      livePresence = {
+        kind: 'pilot',
+        label: 'Online · Flying',
+        detail: `${pilotMatch.callsign}${route}`
+      };
+    } else {
+      const atcMatch = (cachedControllers || []).find(c => Number(c.cid) === cid);
+      if (atcMatch) {
+        const freq = atcMatch.frequency && atcMatch.frequency !== '199.998' ? ` · ${atcMatch.frequency}` : '';
+        livePresence = {
+          kind: 'atc',
+          label: 'Online · Controlling',
+          detail: `${atcMatch.callsign}${freq}`
+        };
+      }
+    }
+  }
+  const showSchedule = isAdmin || isPageEnabled('schedule');
+  const showAtcRoute = isAdmin || isPageEnabled('atc-route');
+  const scheduleRows = showSchedule ? (adminSheetCache || []).filter(r => r.from && r.to && r.number) : [];
+
+  function timeWindow(hhmm) {
+    const m = (hhmm || '').match(/^(\d{2}):?(\d{2})$/);
+    if (!m) return hhmm || '';
+    let mins = parseInt(m[1]) * 60 + parseInt(m[2]);
+    const lo = (mins - 60 + 1440) % 1440;
+    const hi = (mins + 60) % 1440;
+    const fmt = v => `${String(Math.floor(v / 60)).padStart(2, '0')}${String(v % 60).padStart(2, '0')}`;
+    return `${fmt(lo)}-${fmt(hi)}z`;
+  }
+
+  // Use the module-level getFlowStatus
+  const flowStatus = getFlowStatus;
+
+  const memberOptsHtml = memberOptions
+    .map(m => `<option value="${m.cid}">${escapeHtml(m.name)}${m.isMain ? ' (main)' : ''}</option>`)
+    .join('');
+
+  const content = `
+    <div class="affiliate-hq-wrap">
+
+      ${affiliate ? `
+      <section class="card aff-identity-card">
+        <div class="aff-identity-icon">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+        </div>
+        <div class="aff-identity-main">
+          <div class="aff-identity-name">${escapeHtml(affiliate.callsign || '')}</div>
+          <div class="aff-identity-meta">
+            <span class="ot-simtype" data-sim="${escapeHtml((affiliate.simType || '').toUpperCase())}">${escapeHtml(affiliate.simType || '—')}</span>
+            ${sinceYear ? `<span class="ot-since">Affiliate since ${sinceYear}</span>` : ''}
+            <span class="aff-member-count">${memberCount} ${memberCount === 1 ? 'member' : 'members'}</span>
+          </div>
+        </div>
+      </section>
+      ` : ''}
+
+      <div class="affiliate-hq">
+      <section class="card affiliate-welcome-card">
+        <h2 class="aff-welcome-title">Welcome</h2>
+        <p class="aff-welcome-lead">
+          Thank you for being a WorldFlight Affiliate and being part of our community! Our affiliates
+          are an essential part of the WorldFlight community — helping to grow awareness, raise funds
+          for charity, and share the spirit of aviation with pilots and supporters around the world.
+        </p>
+        <p class="aff-welcome-lead">
+          To ensure that every affiliate maintains the same high standards and represents the
+          WorldFlight name with pride, each affiliate group or individual is expected to sign up to
+          the following charter:
+        </p>
+
+        <ol class="aff-charter">
+          <li>
+            <h4>Professionalism and Skill</h4>
+            <p>Affiliates will aim to maintain a good standard of piloting, following their own
+              procedures and remaining courteous and competent in all interactions. This helps ensure
+              that we are welcomed in any airspace we visit, reflecting positively on the wider
+              WorldFlight community.</p>
+          </li>
+          <li>
+            <h4>Respect for VATSIM and ATC</h4>
+            <p>Affiliates understand that VATSIM experiences extremely high traffic levels during
+              WorldFlight week. Courtesy and patience are essential — controllers volunteer their
+              time to make this event possible, and affiliates should always show appreciation and
+              professionalism.</p>
+          </li>
+          <li>
+            <h4>No Preferential Treatment</h4>
+            <p>Affiliates will not request or expect any kind of special treatment from ATC or other
+              pilots. WorldFlight Affiliates are community participants, not official WorldFlight
+              teams, and share the same airspace and service as all other pilots.</p>
+          </li>
+          <li>
+            <h4>Public Conduct and Streaming</h4>
+            <p>When streaming or posting content publicly, affiliates will represent the WorldFlight
+              community in a respectful, positive, and family-friendly manner, mindful that they are
+              ambassadors for the event and its charity goals.</p>
+          </li>
+          <li>
+            <h4>Community Spirit</h4>
+            <p>Affiliates' number one priority is to support the WorldFlight event and its charities.
+              The goal is to help raise awareness, funds, and enthusiasm for aviation while celebrating
+              the teamwork and camaraderie that make WorldFlight special.</p>
+          </li>
+          <li>
+            <h4>Fun and Friendship</h4>
+            <p>Above all, affiliates are here to have fun, share a passion for flight simulation, and
+              make lasting friendships around the world while helping raise money for great causes.</p>
+          </li>
+        </ol>
+      </section>
+
+      <div class="affiliate-hq-side">
+        <section class="card affiliate-banner-card">
+          <div class="affiliate-banner-wrap">
+            <img src="/affiliate-banner.png" alt="WorldFlight Affiliate" class="affiliate-banner" />
+          </div>
+        </section>
+
+        ${isSolo ? `
+        <section class="card aff-stats-card">
+          <header class="aff-members-header">
+            <h3 class="section-title" style="margin:0;">My VATSIM Stats</h3>
+            <a href="https://stats.vatsim.net/stats/${cid}" target="_blank" rel="noopener" class="aff-stats-link">View on VATSIM →</a>
+          </header>
+          <div class="aff-stats-grid">
+            <div class="aff-stat">
+              <div class="aff-stat-label">CID</div>
+              <div class="aff-stat-value mono">${cid}</div>
+            </div>
+            <div class="aff-stat">
+              <div class="aff-stat-label">Name</div>
+              <div class="aff-stat-value">${escapeHtml(user?.personal?.name_full || '—')}</div>
+            </div>
+            <div class="aff-stat">
+              <div class="aff-stat-label">Controller Rating</div>
+              <div class="aff-stat-value">
+                <span class="aff-rating-pill">${escapeHtml(user?.vatsim?.rating?.short || '—')}</span>
+                <span class="aff-rating-long">${escapeHtml(user?.vatsim?.rating?.long || '')}</span>
+              </div>
+            </div>
+            <div class="aff-stat">
+              <div class="aff-stat-label">Pilot Rating</div>
+              <div class="aff-stat-value">
+                <span class="aff-rating-pill">${escapeHtml(user?.vatsim?.pilotrating?.short || '—')}</span>
+                <span class="aff-rating-long">${escapeHtml(user?.vatsim?.pilotrating?.long || '')}</span>
+              </div>
+            </div>
+            <div class="aff-stat">
+              <div class="aff-stat-label">Division</div>
+              <div class="aff-stat-value">${escapeHtml(user?.vatsim?.division?.name || user?.vatsim?.division?.id || '—')}</div>
+            </div>
+            <div class="aff-stat">
+              <div class="aff-stat-label">Region</div>
+              <div class="aff-stat-value">${escapeHtml(user?.vatsim?.region?.name || user?.vatsim?.region?.id || '—')}</div>
+            </div>
+            <div class="aff-stat">
+              <div class="aff-stat-label">Live Status</div>
+              <div class="aff-stat-value">
+                <span class="aff-status-dot aff-status-${livePresence.kind}"></span>
+                ${escapeHtml(livePresence.label)}
+              </div>
+            </div>
+            <div class="aff-stat">
+              <div class="aff-stat-label">${livePresence.kind === 'atc' ? 'Position' : 'Callsign'}</div>
+              <div class="aff-stat-value mono">${escapeHtml(livePresence.detail || '—')}</div>
+            </div>
+          </div>
+        </section>
+        ` : `
+        <section class="card aff-members-card">
+          <header class="aff-members-header">
+            <h3 class="section-title" style="margin:0;">Our Members</h3>
+            <span class="aff-member-count">${memberCount} ${memberCount === 1 ? 'member' : 'members'}</span>
+          </header>
+          ${memberOptions.length === 0 ? `
+            <div class="ot-empty">
+              <div class="ot-empty-title">No members yet</div>
+              <div class="ot-empty-sub">Use the My Members page to add CIDs.</div>
+            </div>
+          ` : `
+            <div class="ot-table-wrap">
+              <table class="ot-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>CID</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${memberOptions.map(m => `
+                    <tr>
+                      <td class="ot-cell-name">${escapeHtml(m.name)}</td>
+                      <td class="ot-cell-cid">${m.cid}</td>
+                      <td style="text-align:right;">
+                        ${m.isMain ? `<span class="aff-main-badge">Main</span>` : ''}
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          `}
+        </section>
+        `}
+      </div>
+      </div>
+
+      ${affiliate ? `
+      <section class="card aff-schedule-card">
+        <header class="aff-schedule-header">
+          <h3 class="section-title" style="margin:0;">${isSolo ? 'My Bookings &amp; Slots' : 'Assign Pilots / Our Bookings &amp; Slots'}</h3>
+          ${showSchedule ? `<a href="/schedule" class="aff-schedule-link">View full schedule</a>` : ''}
+        </header>
+
+        ${!showSchedule ? `
+          <div class="ot-empty">
+            <div class="ot-empty-title">Route not yet announced</div>
+            <div class="ot-empty-sub">The full WorldFlight 2026 schedule will appear here once published.</div>
+          </div>
+        ` : !scheduleRows.length ? `
+          <div class="ot-empty">
+            <div class="ot-empty-title">No sectors loaded</div>
+            <div class="ot-empty-sub">Check back soon — schedule data hasn't been loaded yet.</div>
+          </div>
+        ` : `
+          <div class="ot-table-wrap">
+            <table class="ot-table">
+              <thead>
+                <tr>
+                  <th>Sector</th>
+                  <th>Pilot</th>
+                  <th>Flow Restrictions</th>
+                  <th>Status</th>
+                  ${showAtcRoute ? '<th>ATC Route</th>' : ''}
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Date</th>
+                  <th>Dep Window</th>
+                  <th>Arr Window</th>
+                  <th>Plan</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${scheduleRows.map(r => {
+                  const released = releasedSectorSet.has(r.number);
+                  const claimedCid = isSolo
+                    ? (released ? null : (soloPilot ? soloPilot.cid : null))
+                    : (claimByNumber[r.number] || null);
+                  const flow = getFlowRestriction(r);
+                  const status = flowStatus(r, claimedCid);
+                  return `
+                  <tr data-sector="${escapeHtml(r.number)}">
+                    <td><span class="ot-cell-callsign">${escapeHtml(r.number)}</span></td>
+                    <td>
+                      ${isSolo ? (released ? `
+                        <button type="button" class="aff-solo-restore" data-sector="${escapeHtml(r.number)}">Unassigned</button>
+                      ` : `
+                        <span class="aff-solo-row">
+                          <span class="aff-solo-pilot">
+                            <span class="aff-solo-pilot-name">${escapeHtml(soloPilot ? soloPilot.name : '')}</span>
+                            <span class="aff-solo-pilot-cid">${soloPilot ? soloPilot.cid : ''}</span>
+                          </span>
+                          <span class="aff-solo-x-host">
+                            <span class="aff-solo-x" data-sector="${escapeHtml(r.number)}" role="button" tabindex="0" aria-label="Remove yourself from this sector">×</span>
+                            <span class="aff-solo-x-tip">If you are not flying this sector, please remove yourself to release any bookings / slots.</span>
+                          </span>
+                        </span>
+                      `) : `
+                        <select class="claim-select" data-sector="${escapeHtml(r.number)}">
+                          <option value="">— Unclaimed —</option>
+                          ${memberOptions.map(m => `<option value="${m.cid}" ${claimedCid === m.cid ? 'selected' : ''}>${escapeHtml(m.name)} · ${m.cid}</option>`).join('')}
+                        </select>
+                      `}
+                    </td>
+                    <td><span class="flowtype-pill flowtype-${flow.cls}">${escapeHtml(flow.label)}</span></td>
+                    <td><span class="aff-flow-status aff-flow-${status.kind}">${
+                      status.kind === 'tobt'
+                        ? `<span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-help">?<span class="tobt-tooltip">This is a TOBT (Target Off-Blocks Time).<br>Please connect at least 30 minutes before this time.<br>You should be ready to push at this time.<br><b>The actual push time may differ depending on<br>ramp and airfield congestion.</b></span></span>`
+                        : escapeHtml(status.text)
+                    }</span></td>
+                    ${showAtcRoute ? `<td>${(() => {
+                      const sbUrl = buildAffiliateSimbriefUrl(r, affiliate, claimedCid, showAtcRoute);
+                      const sbAttr = sbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+                      return r.atc_route && r.atc_route !== '-'
+                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}">ATC Route</button>`
+                        : `<span class="ot-muted">—</span>`;
+                    })()}</td>` : ''}
+                    <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a></td>
+                    <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a></td>
+                    <td><span class="ot-muted">${escapeHtml(r.date_utc || '')}</span></td>
+                    <td><span class="ot-muted">${timeWindow(r.dep_time_utc)}</span></td>
+                    <td><span class="ot-muted">${timeWindow(r.arr_time_utc)}</span></td>
+                    <td>${(() => {
+                      const sbUrl = buildAffiliateSimbriefUrl(r, affiliate, claimedCid, showAtcRoute);
+                      const sbAttr = sbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+                      return `<a class="aff-route-btn aff-sb-btn" href="${sbAttr}" target="_blank" rel="noopener">Plan with SimBrief</a>`;
+                    })()}</td>
+                  </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        `}
+      </section>
+      ` : ''}
+
+      <div id="affRouteModal" class="aff-route-modal" hidden>
+        <div class="aff-route-modal-backdrop"></div>
+        <div class="aff-route-modal-card" role="dialog" aria-modal="true" aria-labelledby="affRouteModalTitle">
+          <header class="aff-route-modal-header">
+            <div>
+              <div class="aff-route-modal-eyebrow">ATC Route</div>
+              <h3 id="affRouteModalTitle" class="aff-route-modal-title"><span id="affRouteModalSector">—</span></h3>
+            </div>
+            <button type="button" class="aff-route-modal-close" id="affRouteModalClose" aria-label="Close">×</button>
+          </header>
+          <pre class="aff-route-modal-body" id="affRouteModalBody"></pre>
+          <footer class="aff-route-modal-footer">
+            <button type="button" class="ot-btn" id="affRouteModalCopy">Copy to Clipboard</button>
+            <a id="affRouteModalSimbrief" class="aff-route-btn aff-sb-btn" href="#" target="_blank" rel="noopener">Plan with SimBrief</a>
+            <button type="button" class="ot-btn" id="affRouteModalDismiss">Close</button>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      .affiliate-hq-wrap {
+        width: 100%;
+        max-width: 2200px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      /* Identity card */
+      .aff-identity-card {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 18px 22px;
+      }
+      .aff-identity-icon {
+        width: 52px;
+        height: 52px;
+        flex-shrink: 0;
+        border-radius: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+        color: var(--accent);
+        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+      .aff-identity-main { min-width: 0; }
+      .aff-identity-name {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+      }
+      .aff-identity-meta {
+        margin-top: 6px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .aff-member-count {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.05);
+        color: var(--muted);
+      }
+
+      /* 2-col welcome + (banner+members) row */
+      .affiliate-hq {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: stretch;
+      }
+      .affiliate-hq > .card,
+      .affiliate-hq > .affiliate-hq-side { min-width: 0; }
+      .affiliate-hq-side {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        height: 100%;
+        min-height: 0;
+      }
+      .affiliate-hq-side > .affiliate-banner-card { flex: 0 0 auto; }
+      .affiliate-hq-side > .aff-members-card,
+      .affiliate-hq-side > .aff-stats-card {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .aff-members-card .ot-table-wrap {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+
+      .aff-members-card { padding: 22px; }
+      .aff-stats-card { padding: 22px; }
+      .aff-stats-link {
+        font-size: 12px;
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .aff-stats-link:hover { text-decoration: underline; }
+      .aff-stats-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px 18px;
+        margin-top: 6px;
+      }
+      .aff-stat {
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.018);
+      }
+      [data-theme="light"] .aff-stat { background: rgba(15,23,42,0.022); }
+      .aff-stat-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+      .aff-stat-value {
+        font-size: 14px;
+        color: var(--text);
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .aff-stat-value.mono {
+        font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      .aff-rating-pill {
+        display: inline-flex;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 11px;
+        font-weight: 700;
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+        color: var(--accent);
+        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+      .aff-rating-long {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .aff-status-dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: rgba(148,163,184,0.45);
+        flex-shrink: 0;
+      }
+      .aff-status-pilot,
+      .aff-status-atc {
+        background: #22c55e;
+        box-shadow: 0 0 0 3px rgba(34,197,94,0.18), 0 0 8px rgba(34,197,94,0.55);
+        animation: aff-pulse 2.4s ease-in-out infinite;
+      }
+      .aff-status-atc { background: #818cf8; box-shadow: 0 0 0 3px rgba(129,140,248,0.18), 0 0 8px rgba(129,140,248,0.55); }
+      .aff-status-offline { background: rgba(148,163,184,0.4); }
+      @keyframes aff-pulse {
+        0%, 100% { transform: scale(1); }
+        50%      { transform: scale(1.15); }
+      }
+
+      @media (max-width: 720px) {
+        .aff-stats-grid { grid-template-columns: 1fr; }
+      }
+      .aff-members-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .aff-main-badge {
+        display: inline-flex;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: color-mix(in srgb, var(--accent) 15%, transparent);
+        color: var(--accent);
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+      }
+
+      .affiliate-banner-card {
+        padding: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .affiliate-banner-wrap {
+        position: relative;
+        width: 760px;
+        max-width: 100%;
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 6px 22px rgba(0,0,0,0.30);
+      }
+      .affiliate-banner { display: block; width: 100%; height: auto; }
+
+      /* Welcome card */
+      .affiliate-welcome-card { padding: 28px 32px; }
+      .aff-welcome-title {
+        margin: 0 0 14px;
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--accent);
+        letter-spacing: -0.01em;
+      }
+      .aff-welcome-lead {
+        margin: 0 0 12px;
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1.65;
+      }
+      .aff-welcome-lead:last-of-type { margin-bottom: 22px; }
+
+      /* Charter list */
+      .aff-charter {
+        list-style: none;
+        counter-reset: charter;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 14px;
+      }
+      .aff-charter li {
+        counter-increment: charter;
+        position: relative;
+        padding: 16px 18px 16px 56px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.018);
+      }
+      [data-theme="light"] .aff-charter li { background: rgba(15,23,42,0.022); }
+      .aff-charter li::before {
+        content: counter(charter);
+        position: absolute;
+        left: 14px;
+        top: 14px;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+      .aff-charter li h4 {
+        margin: 0 0 6px;
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text);
+        letter-spacing: 0.01em;
+      }
+      .aff-charter li p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      /* Schedule card */
+      .aff-schedule-card { padding: 22px; }
+      .aff-schedule-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .aff-schedule-link {
+        font-size: 13px;
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .aff-schedule-link:hover { text-decoration: underline; }
+      .aff-icao-link {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .aff-icao-link:hover { text-decoration: underline; }
+
+      .claim-select {
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        appearance: none;
+        width: 100%;
+        min-width: 240px;
+        padding: 8px 34px 8px 12px;
+        background-color: var(--panel2);
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+        background-size: 14px;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 500;
+        font-family: inherit;
+        cursor: pointer;
+        transition: border-color .15s, box-shadow .15s, background-color .15s;
+      }
+      .claim-select:hover {
+        border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+      }
+      .claim-select:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+      }
+      .claim-select.has-claim {
+        border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+        background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .claim-select option {
+        background: var(--panel);
+        color: var(--text);
+        padding: 8px 10px;
+        font-weight: 500;
+      }
+      .claim-select option[value=""] {
+        color: var(--muted);
+        font-style: italic;
+      }
+      [data-theme="light"] .claim-select {
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+      }
+      .claim-saving { opacity: 0.55; pointer-events: none; }
+
+      /* Solo affiliate: pilot is fixed (the main CID) */
+      .aff-solo-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .aff-solo-pilot {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+      .aff-solo-pilot-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .aff-solo-pilot-cid {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 12px;
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Red X to release the sector — wrapped in a host span so the tooltip
+         can be a sibling (no quirks with position:fixed inside a button) */
+      .aff-solo-x-host {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+      }
+      .aff-solo-x {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: rgba(239,68,68,0.12);
+        border: 1px solid rgba(239,68,68,0.45);
+        color: #fca5a5;
+        font-size: 16px;
+        font-weight: 800;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0;
+        user-select: none;
+        transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
+      }
+      .aff-solo-x:hover {
+        background: rgba(239,68,68,0.25);
+        border-color: #ef4444;
+        color: #fff;
+        box-shadow: 0 0 0 3px rgba(239,68,68,0.18);
+      }
+      .aff-solo-x:focus-visible {
+        outline: 2px solid #ef4444;
+        outline-offset: 2px;
+      }
+      .aff-solo-x-tip {
+        position: absolute;
+        bottom: calc(100% + 10px);
+        left: 50%;
+        margin-left: -130px;
+        width: 260px;
+        padding: 10px 14px;
+        background: var(--panel, #1e293b);
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 8px;
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1.5;
+        color: #e2e8f0;
+        white-space: normal;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(4px);
+        pointer-events: none;
+        transition: opacity .15s, visibility .15s, transform .15s;
+        z-index: 1000;
+      }
+      .aff-solo-x-host:hover .aff-solo-x-tip,
+      .aff-solo-x-host:focus-within .aff-solo-x-tip {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+      }
+
+      /* Unassigned chip (clickable to restore) */
+      .aff-solo-restore {
+        display: inline-flex;
+        align-items: center;
+        padding: 6px 14px;
+        border-radius: 8px;
+        background: rgba(148,163,184,0.10);
+        border: 1px dashed rgba(148,163,184,0.45);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: background .15s, border-color .15s, color .15s;
+      }
+      .aff-solo-restore:hover {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+        border-style: solid;
+        color: var(--accent);
+      }
+
+      /* ATC Route button */
+      .aff-route-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        border-radius: 6px;
+        cursor: pointer;
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+        color: var(--accent);
+        text-decoration: none;
+        transition: background .15s, border-color .15s;
+      }
+      .aff-route-btn:hover {
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        border-color: var(--accent);
+        text-decoration: none;
+      }
+
+      /* ATC Route modal */
+      .aff-route-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 9000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .aff-route-modal[hidden] { display: none; }
+      .aff-route-modal-backdrop {
+        position: absolute; inset: 0;
+        background: rgba(2, 6, 16, 0.78);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+      }
+      .aff-route-modal-card {
+        position: relative;
+        max-width: 720px;
+        width: 100%;
+        max-height: calc(100vh - 48px);
+        display: flex;
+        flex-direction: column;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+        overflow: hidden;
+      }
+      .aff-route-modal-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 18px 22px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .aff-route-modal-eyebrow {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+      .aff-route-modal-title {
+        margin: 4px 0 0;
+        font-size: 17px;
+        font-weight: 700;
+        color: var(--text);
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        letter-spacing: 0.04em;
+      }
+      .aff-route-modal-close {
+        background: transparent;
+        border: 0;
+        color: var(--muted);
+        font-size: 26px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: 6px;
+      }
+      .aff-route-modal-close:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+      .aff-route-modal-body {
+        margin: 0;
+        padding: 18px 22px;
+        font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--text);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 420px;
+        overflow: auto;
+        background: rgba(255,255,255,0.02);
+      }
+      [data-theme="light"] .aff-route-modal-body { background: rgba(15,23,42,0.025); }
+      .aff-route-modal-footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 14px 22px 18px;
+        border-top: 1px solid var(--border);
+      }
+
+      /* Uniform pill styling for both Flow Restrictions and Status columns */
+      .aff-schedule-card .flowtype-pill,
+      .aff-schedule-card .aff-flow-status {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 7px 16px;
+        border-radius: 999px;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        white-space: nowrap;
+        min-width: 140px;
+        line-height: 1.2;
+        border: 1px solid transparent;
+        box-sizing: border-box;
+      }
+
+      /* Status pill colour variants */
+      .aff-flow-confirmed {
+        background: rgba(74,222,128,0.10);
+        color: #4ade80;
+        border-color: rgba(74,222,128,0.30);
+      }
+      .aff-flow-tobt {
+        background: rgba(56,189,248,0.16);
+        border-color: rgba(56,189,248,0.55);
+        gap: 8px;
+        padding: 6px 6px 6px 14px;
+        box-shadow: 0 4px 14px rgba(56,189,248,0.10);
+        cursor: help;
+      }
+      .aff-flow-tobt .tobt-help { pointer-events: none; }
+      .aff-tobt-label {
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.18em;
+        color: #93c5fd;
+        opacity: 0.85;
+        text-transform: uppercase;
+      }
+      .aff-tobt-time {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: rgba(56,189,248,0.32);
+        color: #f0f9ff;
+        font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+        font-size: 14px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        font-variant-numeric: tabular-nums;
+      }
+      .aff-flow-empty {
+        background: transparent;
+        color: var(--muted);
+        border-color: transparent;
+        opacity: 0.55;
+        min-width: 0;
+        padding: 0;
+        font-weight: 600;
+      }
+      /* (Status no longer renders an "aff-flow-none" variant — kept for safety) */
+      .aff-flow-none {
+        background: rgba(148,163,184,0.10);
+        color: #cbd5e1;
+        border-color: rgba(148,163,184,0.25);
+      }
+
+      @media (max-width: 1100px) {
+        .affiliate-hq { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 720px) {
+        .affiliate-welcome-card { padding: 22px 18px; }
+        .aff-welcome-title { font-size: 24px; }
+        .aff-charter li { padding: 14px 14px 14px 48px; }
+        .aff-charter li::before { left: 10px; top: 12px; }
+      }
+    </style>
+
+    <script>
+      (function() {
+        function markClaim(sel) {
+          if (sel.value) sel.classList.add('has-claim');
+          else sel.classList.remove('has-claim');
+        }
+        document.querySelectorAll('.claim-select').forEach(markClaim);
+
+        function updateStatusCell(row, status) {
+          if (!row || !status) return;
+          var cell = row.querySelector('td:nth-child(4)');
+          if (!cell) return;
+          var span = document.createElement('span');
+          span.className = 'aff-flow-status aff-flow-' + status.kind;
+          if (status.kind === 'tobt' && status.time) {
+            var l = document.createElement('span');
+            l.className = 'aff-tobt-label';
+            l.textContent = status.label || 'TOBT';
+            var t = document.createElement('span');
+            t.className = 'aff-tobt-time';
+            t.textContent = status.time;
+            var h = document.createElement('span');
+            h.className = 'tobt-help';
+            h.textContent = '?';
+            var tt = document.createElement('span');
+            tt.className = 'tobt-tooltip';
+            tt.innerHTML = 'This is a TOBT (Target Off-Blocks Time).<br>Please connect at least 30 minutes before this time.<br>You should be ready to push at this time.<br><b>The actual push time may differ depending on<br>ramp and airfield congestion.</b>';
+            h.appendChild(tt);
+            span.appendChild(l);
+            span.appendChild(t);
+            span.appendChild(h);
+          } else {
+            span.textContent = status.text;
+          }
+          cell.innerHTML = '';
+          cell.appendChild(span);
+        }
+
+        document.addEventListener('change', async function(e) {
+          var sel = e.target.closest('.claim-select');
+          if (!sel) return;
+          var sector = sel.dataset.sector;
+          var claimCid = sel.value || null;
+          var prev = sel.dataset.prev || '';
+          sel.classList.add('claim-saving');
+          try {
+            var r = await fetch('/api/affiliates/hq/claim', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ sectorNumber: sector, claimCid: claimCid })
+            });
+            var d = await r.json().catch(function() { return {}; });
+            if (!r.ok) throw new Error(d.error || 'Failed to save claim');
+            sel.dataset.prev = sel.value;
+            markClaim(sel);
+            updateStatusCell(sel.closest('tr'), d.status);
+          } catch (err) {
+            sel.value = prev;
+            markClaim(sel);
+            alert(err.message || 'Failed to save claim');
+          } finally {
+            sel.classList.remove('claim-saving');
+          }
+        });
+
+        // Snapshot original values so we can revert on failure
+        document.querySelectorAll('.claim-select').forEach(function(s) { s.dataset.prev = s.value; });
+
+        // TOBT tooltip — whole pill is the hover target. Delegated on document
+        // so dynamically rebuilt cells (after a pilot reassignment) work too.
+        function positionTooltipFor(pill) {
+          var tip = pill.querySelector('.tobt-tooltip');
+          if (!tip) return;
+          tip.style.display = 'block';
+          var r = pill.getBoundingClientRect();
+          var tw = tip.offsetWidth;
+          var th = tip.offsetHeight;
+          var left = r.left + r.width / 2 - tw / 2;
+          var top = r.bottom + 8;
+          if (top + th > window.innerHeight - 4) top = r.top - th - 8;
+          if (left < 4) left = 4;
+          if (left + tw > window.innerWidth - 4) left = window.innerWidth - tw - 4;
+          tip.style.left = left + 'px';
+          tip.style.top = top + 'px';
+        }
+        function hideTooltipIn(pill) {
+          var tip = pill.querySelector('.tobt-tooltip');
+          if (tip) tip.style.display = 'none';
+        }
+        document.addEventListener('mouseover', function(e) {
+          var pill = e.target.closest && e.target.closest('.aff-flow-tobt');
+          if (pill) {
+            if (e.relatedTarget && pill.contains(e.relatedTarget)) return;
+            positionTooltipFor(pill);
+            return;
+          }
+          var xBtn = e.target.closest && e.target.closest('.aff-solo-x');
+          if (xBtn) {
+            if (e.relatedTarget && xBtn.contains(e.relatedTarget)) return;
+            positionTooltipFor(xBtn);
+          }
+        });
+        document.addEventListener('mouseout', function(e) {
+          var pill = e.target.closest && e.target.closest('.aff-flow-tobt');
+          if (pill) {
+            if (e.relatedTarget && pill.contains(e.relatedTarget)) return;
+            hideTooltipIn(pill);
+            return;
+          }
+          var xBtn = e.target.closest && e.target.closest('.aff-solo-x');
+          if (xBtn) {
+            if (e.relatedTarget && xBtn.contains(e.relatedTarget)) return;
+            hideTooltipIn(xBtn);
+          }
+        });
+
+        // Solo: release sector (red X) and restore (Unassigned chip)
+        document.addEventListener('click', async function(e) {
+          var x = e.target.closest('.aff-solo-x');
+          var u = e.target.closest('.aff-solo-restore');
+          if (!x && !u) return;
+          var el = x || u;
+          var sector = el.dataset.sector;
+          var action = x ? 'release' : 'restore';
+          el.style.pointerEvents = 'none';
+          el.style.opacity = '0.5';
+          try {
+            var r = await fetch('/api/affiliates/hq/solo-toggle', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ sectorNumber: sector, action: action })
+            });
+            if (!r.ok) {
+              var d = await r.json().catch(function() { return {}; });
+              throw new Error(d.error || 'Failed to update');
+            }
+            location.reload();
+          } catch (err) {
+            el.style.pointerEvents = '';
+            el.style.opacity = '';
+            alert(err.message || 'Failed to update');
+          }
+        });
+
+        // ATC Route modal
+        var routeModal = document.getElementById('affRouteModal');
+        var routeBody = document.getElementById('affRouteModalBody');
+        var routeSector = document.getElementById('affRouteModalSector');
+        var routeClose = document.getElementById('affRouteModalClose');
+        var routeDismiss = document.getElementById('affRouteModalDismiss');
+        var routeCopy = document.getElementById('affRouteModalCopy');
+        var routeBackdrop = routeModal && routeModal.querySelector('.aff-route-modal-backdrop');
+
+        var routeSimbrief = document.getElementById('affRouteModalSimbrief');
+        function openRouteModal(route, from, to, simbrief) {
+          if (!routeModal) return;
+          routeBody.textContent = route || '';
+          routeSector.textContent = (from || '') + (to ? ' → ' + to : '');
+          if (routeSimbrief) {
+            if (simbrief) {
+              routeSimbrief.href = simbrief;
+              routeSimbrief.style.display = '';
+            } else {
+              routeSimbrief.style.display = 'none';
+            }
+          }
+          routeModal.hidden = false;
+          if (routeCopy) routeCopy.textContent = 'Copy to Clipboard';
+        }
+        function closeRouteModal() { if (routeModal) routeModal.hidden = true; }
+
+        document.addEventListener('click', function(e) {
+          // Don't intercept the SimBrief link buttons in the row — let them navigate
+          if (e.target.closest('.aff-sb-btn')) return;
+          var btn = e.target.closest('.aff-route-btn');
+          if (!btn) return;
+          openRouteModal(
+            btn.getAttribute('data-route') || '',
+            btn.getAttribute('data-from') || '',
+            btn.getAttribute('data-to') || '',
+            btn.getAttribute('data-simbrief') || ''
+          );
+        });
+        if (routeClose) routeClose.addEventListener('click', closeRouteModal);
+        if (routeDismiss) routeDismiss.addEventListener('click', closeRouteModal);
+        if (routeBackdrop) routeBackdrop.addEventListener('click', closeRouteModal);
+        document.addEventListener('keydown', function(e) {
+          if (routeModal && !routeModal.hidden && e.key === 'Escape') closeRouteModal();
+        });
+        if (routeCopy) routeCopy.addEventListener('click', async function() {
+          try {
+            await navigator.clipboard.writeText(routeBody.textContent || '');
+            var prev = routeCopy.textContent;
+            routeCopy.textContent = '✓ Copied';
+            setTimeout(function() { routeCopy.textContent = prev; }, 1400);
+          } catch (e) {
+            // older browsers — fallback
+            var ta = document.createElement('textarea');
+            ta.value = routeBody.textContent || '';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (e2) {}
+            document.body.removeChild(ta);
+            var prev2 = routeCopy.textContent;
+            routeCopy.textContent = '✓ Copied';
+            setTimeout(function() { routeCopy.textContent = prev2; }, 1400);
+          }
+        });
+      })();
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'Affiliate HQ', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+// Solo affiliate: release this sector (delete booking, mark released) or restore (recreate booking).
+app.post('/api/affiliates/hq/solo-toggle', requireLogin, requireAffiliate, async (req, res) => {
+  const cid = Number(req.session?.user?.data?.cid);
+  const sectorNumber = String(req.body?.sectorNumber || '').trim();
+  const action = String(req.body?.action || '').toLowerCase();
+  if (!sectorNumber) return res.status(400).json({ error: 'sectorNumber required' });
+  if (action !== 'release' && action !== 'restore') return res.status(400).json({ error: 'Invalid action' });
+
+  const affiliate = await resolveUserAffiliate(cid);
+  if (!affiliate) return res.status(403).json({ error: 'Not in an affiliate' });
+  if (affiliate.hasMembers) return res.status(400).json({ error: 'This action is for solo affiliates only' });
+
+  const scheduleRow = (adminSheetCache || []).find(r => r.number === sectorNumber);
+  if (!scheduleRow) return res.status(400).json({ error: 'Unknown sector' });
+
+  if (action === 'release') {
+    // Delete any existing booking held by anyone in this affiliate for this sector
+    const sectorPrefix = `${scheduleRow.from}-${scheduleRow.to}|${scheduleRow.date_utc}|${scheduleRow.dep_time_utc}`;
+    const memberRows = await prisma.affiliateMember.findMany({ where: { affiliateId: affiliate.id } }).catch(() => []);
+    const affCids = [Number(affiliate.cid), ...memberRows.map(m => Number(m.cid))].filter(Number.isFinite);
+    const bookings = await prisma.tobtBooking.findMany({
+      where: { cid: { in: affCids }, slotKey: { startsWith: sectorPrefix } }
+    });
+    for (const b of bookings) {
+      await prisma.tobtBooking.delete({ where: { id: b.id } }).catch(() => null);
+      const oldKey = `${Number(b.cid)}:${b.slotKey}`;
+      delete tobtBookingsByKey[oldKey];
+      delete tobtBookingsByKey[b.slotKey];
+      if (tobtBookingsByCid[Number(b.cid)]) tobtBookingsByCid[Number(b.cid)].delete(oldKey);
+      try { io.emit('bookingCancelled', { slotKey: b.slotKey }); } catch {}
+    }
+    // Mark released via sentinel cid=0
+    await prisma.affiliateSectorClaim.upsert({
+      where: { affiliateId_sectorNumber: { affiliateId: affiliate.id, sectorNumber } },
+      update: { cid: 0 },
+      create: { affiliateId: affiliate.id, sectorNumber, cid: 0 }
+    });
+    return res.json({ ok: true });
+  }
+
+  // restore: drop the released marker, recreate booking
+  await prisma.affiliateSectorClaim.deleteMany({
+    where: { affiliateId: affiliate.id, sectorNumber, cid: 0 }
+  });
+  try {
+    await assignAffiliatePilotToSector(affiliate, scheduleRow, Number(affiliate.cid));
+  } catch (err) {
+    console.error('[AFF-SOLO] restore booking sync failed:', err);
+  }
+  res.json({ ok: true });
+});
+
+// Claim/unclaim a sector for the viewer's affiliate
+app.post('/api/affiliates/hq/claim', requireLogin, requireAffiliate, async (req, res) => {
+  const cid = Number(req.session?.user?.data?.cid);
+  const sectorNumber = String(req.body?.sectorNumber || '').trim();
+  const claimCidRaw = req.body?.claimCid;
+  if (!sectorNumber) return res.status(400).json({ error: 'sectorNumber required' });
+
+  const affiliate = await resolveUserAffiliate(cid);
+  if (!affiliate) return res.status(403).json({ error: 'Not in an affiliate' });
+
+  if (claimCidRaw == null || claimCidRaw === '') {
+    await prisma.affiliateSectorClaim.deleteMany({
+      where: { affiliateId: affiliate.id, sectorNumber }
+    });
+    const sr = (adminSheetCache || []).find(r => r.number === sectorNumber) || null;
+    return res.json({ ok: true, status: getFlowStatus(sr, null) });
+  }
+
+  const claimCid = Number(claimCidRaw);
+  if (!Number.isFinite(claimCid)) return res.status(400).json({ error: 'Invalid claim CID' });
+
+  // Validate the chosen pilot is in this affiliate (main CID or member)
+  if (claimCid !== Number(affiliate.cid)) {
+    const m = await prisma.affiliateMember.findFirst({
+      where: { affiliateId: affiliate.id, cid: claimCid }
+    });
+    if (!m) return res.status(400).json({ error: 'Selected pilot is not part of this affiliate' });
+  }
+
+  // Validate the sector exists in the active schedule
+  const scheduleRow = (adminSheetCache || []).find(r => r.number === sectorNumber);
+  if (!scheduleRow) return res.status(400).json({ error: 'Unknown sector' });
+
+  await prisma.affiliateSectorClaim.upsert({
+    where: { affiliateId_sectorNumber: { affiliateId: affiliate.id, sectorNumber } },
+    update: { cid: claimCid },
+    create: { affiliateId: affiliate.id, sectorNumber, cid: claimCid }
+  });
+
+  // Transfer/create the sector booking so the assigned pilot holds it.
+  // Awaited so the response carries the up-to-date status pill.
+  try {
+    await assignAffiliatePilotToSector(affiliate, scheduleRow, claimCid);
+  } catch (err) {
+    console.error('[AFF-CLAIM] booking sync failed:', err);
+  }
+
+  res.json({ ok: true, status: getFlowStatus(scheduleRow, claimCid) });
+});
+
+/* ===== AFFILIATE MEMBERS (My Members page) ===== */
+app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  const isAdmin = isAdminUser(cid);
+
+  const owned = await prisma.affiliate.findMany({
+    where: { cid, hasMembers: true },
+    select: { id: true, callsign: true, simType: true },
+    orderBy: { callsign: 'asc' }
+  });
+
+  const ids = owned.map(a => a.id);
+  const members = ids.length
+    ? await prisma.affiliateMember.findMany({
+        where: { affiliateId: { in: ids } },
+        orderBy: { addedAt: 'desc' }
+      })
+    : [];
+
+  // Resolve member names — User table → mailing list → fallback empty
+  const memberCids = [...new Set(members.map(m => m.cid))];
+  const nameByCid = {};
+  if (memberCids.length) {
+    const [users, mailSubs] = await Promise.all([
+      prisma.user.findMany({ where: { cid: { in: memberCids } }, select: { cid: true, name: true } }).catch(() => []),
+      prisma.mailingListSubscriber.findMany({ where: { cid: { in: memberCids } }, select: { cid: true, firstName: true, lastName: true } }).catch(() => [])
+    ]);
+    users.forEach(u => { if (u.name) nameByCid[Number(u.cid)] = u.name; });
+    mailSubs.forEach(s => {
+      const c = Number(s.cid);
+      if (nameByCid[c]) return;
+      const nm = [s.firstName, s.lastName].filter(Boolean).join(' ').trim();
+      if (nm) nameByCid[c] = nm;
+    });
+  }
+
+  const membersByAff = {};
+  ids.forEach(id => { membersByAff[id] = []; });
+  members.forEach(m => {
+    if (!membersByAff[m.affiliateId]) membersByAff[m.affiliateId] = [];
+    membersByAff[m.affiliateId].push({
+      cid: m.cid,
+      name: nameByCid[m.cid] || '',
+      active: m.active !== false,
+      addedAt: m.addedAt
+    });
+  });
+
+  const content = `
+    <div class="mm-wrap">
+      <header class="mm-page-header">
+        <div class="mm-page-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <div>
+          <h2 class="mm-page-title">My Members</h2>
+          <p class="mm-page-subtitle">Manage who can access your affiliate's HQ. Adding a CID grants them <strong>WF Affiliate</strong> access.</p>
+        </div>
+      </header>
+
+      ${owned.map(a => {
+        const list = membersByAff[a.id] || [];
+        return `
+        <section class="card mm-card" data-aff-id="${a.id}">
+          <div class="mm-card-header">
+            <div class="mm-card-title">
+              <span class="ot-cell-callsign mm-callsign">${escapeHtml(a.callsign)}</span>
+              <span class="ot-simtype" data-sim="${escapeHtml((a.simType || '').toUpperCase())}">${escapeHtml(a.simType || '—')}</span>
+              <span class="mm-count">${list.length} member${list.length === 1 ? '' : 's'}</span>
+            </div>
+            <div class="mm-add-row">
+              <span class="mm-add-prefix">+</span>
+              <input type="number" class="mm-cid-input" placeholder="Enter CID" inputmode="numeric" />
+              <button class="ot-btn mm-add-btn" data-aff-id="${a.id}">Add Member</button>
+            </div>
+          </div>
+
+          <div class="mm-msg" role="status"></div>
+
+          <div class="mm-table-wrap">
+            ${list.length === 0 ? `
+              <div class="ot-empty">
+                <div class="ot-empty-title">No members yet</div>
+                <div class="ot-empty-sub">Enter a CID above to add your first member.</div>
+              </div>
+            ` : `
+              <div class="ot-table-wrap">
+                <table class="ot-table">
+                  <thead>
+                    <tr>
+                      <th>CID</th>
+                      <th>Name</th>
+                      <th>Added</th>
+                      <th class="ot-th-center">Active</th>
+                      <th class="ot-th-actions"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${list.map(m => `
+                      <tr data-member-cid="${m.cid}">
+                        <td class="ot-cell-cid">${m.cid}</td>
+                        <td class="ot-cell-name">${escapeHtml(m.name || '—')}</td>
+                        <td><span class="ot-muted">${new Date(m.addedAt).toISOString().slice(0,10)}</span></td>
+                        <td class="ot-cell-active">
+                          <input
+                            type="checkbox"
+                            class="mm-active-toggle wf-check"
+                            data-aff-id="${a.id}"
+                            data-cid="${m.cid}"
+                            ${m.active ? 'checked' : ''}
+                          />
+                        </td>
+                        <td class="ot-cell-actions">
+                          <button class="ot-btn ot-btn-danger mm-remove-btn" data-aff-id="${a.id}" data-cid="${m.cid}">Remove</button>
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            `}
+          </div>
+        </section>
+        `;
+      }).join('')}
+    </div>
+
+    <style>
+      .mm-wrap { width: 100%; max-width: 4400px; margin: 0 auto; }
+      .mm-card { width: 100%; }
+
+      .mm-page-header {
+        display: flex;
+        align-items: flex-start;
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+      .mm-page-icon {
+        width: 44px;
+        height: 44px;
+        flex-shrink: 0;
+        border-radius: 10px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+        color: var(--accent);
+        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+      .mm-page-title { margin: 0; font-size: 20px; font-weight: 700; color: var(--text); }
+      .mm-page-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+      .mm-card { padding: 22px; }
+      .mm-card + .mm-card { margin-top: 16px; }
+
+      .mm-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding-bottom: 16px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 16px;
+      }
+      .mm-card-title {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .mm-callsign { font-size: 16px; }
+      .mm-count {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.05);
+        color: var(--muted);
+      }
+
+      .mm-add-row {
+        display: flex;
+        gap: 0;
+        align-items: stretch;
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        transition: border-color .15s, box-shadow .15s;
+      }
+      .mm-add-row:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+      }
+      .mm-add-prefix {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 10px;
+        font-weight: 700;
+        font-size: 16px;
+        color: var(--muted);
+        border-right: 1px solid var(--border);
+      }
+      .mm-cid-input {
+        padding: 8px 12px;
+        background: transparent;
+        border: 0;
+        color: var(--text);
+        font-size: 13px;
+        width: 150px;
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        outline: none;
+      }
+      .mm-add-btn {
+        border: 0;
+        border-left: 1px solid var(--border);
+        border-radius: 0;
+        padding: 0 14px;
+        background: color-mix(in srgb, var(--accent) 18%, transparent);
+        color: var(--accent);
+      }
+      .mm-add-btn:hover {
+        background: color-mix(in srgb, var(--accent) 28%, transparent);
+        color: var(--accent);
+      }
+      .mm-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+      .mm-msg {
+        display: none;
+        margin-bottom: 12px;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+      .mm-msg.show { display: block; }
+      .mm-msg.ok  { background: rgba(74,222,128,0.10); color: #4ade80; border: 1px solid rgba(74,222,128,0.30); }
+      .mm-msg.err { background: rgba(239,68,68,0.10); color: #fda4af; border: 1px solid rgba(239,68,68,0.30); }
+
+      @media (max-width: 720px) {
+        .mm-card-header { flex-direction: column; align-items: stretch; }
+        .mm-add-row { width: 100%; }
+        .mm-cid-input { flex: 1; min-width: 0; }
+      }
+    </style>
+
+    <script>
+      (function() {
+        function showMsg(card, text, kind) {
+          var el = card.querySelector('.mm-msg');
+          if (!el) return;
+          el.textContent = text;
+          el.className = 'mm-msg show ' + kind;
+          setTimeout(function() { el.classList.remove('show'); }, 3500);
+        }
+
+        document.addEventListener('click', async function(e) {
+          var addBtn = e.target.closest('.mm-add-btn');
+          var rmBtn  = e.target.closest('.mm-remove-btn');
+          if (addBtn) {
+            var card = addBtn.closest('.mm-card');
+            var input = card.querySelector('.mm-cid-input');
+            var cid = Number((input && input.value || '').trim());
+            if (!cid) { showMsg(card, 'Enter a valid CID', 'err'); return; }
+            var affId = addBtn.dataset.affId;
+            addBtn.disabled = true;
+            try {
+              var r = await fetch('/api/affiliates/my/' + affId + '/members', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ cid: cid })
+              });
+              var d = await r.json().catch(function() { return {}; });
+              if (!r.ok) throw new Error(d.error || 'Failed to add');
+              location.reload();
+            } catch (err) {
+              showMsg(card, err.message || 'Failed to add member', 'err');
+              addBtn.disabled = false;
+            }
+          }
+          if (rmBtn) {
+            var card2 = rmBtn.closest('.mm-card');
+            var affId2 = rmBtn.dataset.affId;
+            var cid2 = rmBtn.dataset.cid;
+            var row = rmBtn.closest('tr');
+            var nameCell = row && row.querySelector('.ot-cell-name');
+            var memberLabel = (nameCell && nameCell.textContent.trim()) || ('CID ' + cid2);
+            var ok = await openConfirmModal({
+              title: 'Remove Member',
+              message: 'Remove ' + memberLabel + ' (CID ' + cid2 + ') from this affiliate? They will lose access to your Affiliate HQ.'
+            });
+            if (!ok) return;
+            rmBtn.disabled = true;
+            try {
+              var r2 = await fetch('/api/affiliates/my/' + affId2 + '/members/' + cid2, {
+                method: 'DELETE',
+                credentials: 'same-origin'
+              });
+              if (!r2.ok) throw new Error('Failed to remove');
+              location.reload();
+            } catch (err2) {
+              showMsg(card2, err2.message || 'Failed to remove member', 'err');
+              rmBtn.disabled = false;
+            }
+          }
+        });
+
+        document.addEventListener('change', async function(e) {
+          var cb = e.target.closest('.mm-active-toggle');
+          if (!cb) return;
+          var card = cb.closest('.mm-card');
+          var affId = cb.dataset.affId;
+          var cid = cb.dataset.cid;
+          var newActive = !!cb.checked;
+          cb.disabled = true;
+          try {
+            var r = await fetch('/api/affiliates/my/' + affId + '/members/' + cid, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ active: newActive })
+            });
+            if (!r.ok) throw new Error('Failed to update');
+          } catch (err) {
+            cb.checked = !newActive;
+            showMsg(card, err.message || 'Failed to update', 'err');
+          } finally {
+            cb.disabled = false;
+          }
+        });
+      })();
+    </script>
+  `;
+
+  res.send(renderLayout({ title: 'My Members', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+// Add a member to one of my affiliates
+app.post('/api/affiliates/my/:affiliateId/members', requireLogin, async (req, res) => {
+  const ownerCid = Number(req.session?.user?.data?.cid);
+  const affiliateId = Number(req.params.affiliateId);
+  const memberCid = Number(req.body?.cid);
+  if (!ownerCid || !affiliateId) return res.status(400).json({ error: 'Bad request' });
+  if (!memberCid || !Number.isFinite(memberCid)) return res.status(400).json({ error: 'Valid CID required' });
+
+  const aff = await prisma.affiliate.findUnique({ where: { id: affiliateId } });
+  if (!aff || aff.cid !== ownerCid || !aff.hasMembers) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  if (memberCid === ownerCid) {
+    return res.status(400).json({ error: "You're already the main CID" });
+  }
+
+  try {
+    await prisma.affiliateMember.create({
+      data: { affiliateId, cid: memberCid }
+    });
+  } catch (e) {
+    if (String(e?.code) === 'P2002') {
+      return res.status(409).json({ error: 'CID already a member' });
+    }
+    throw e;
+  }
+
+  // Auto-grant WF_AFFILIATE role so they can access Affiliate HQ.
+  await prisma.userAdditionalRole.upsert({
+    where: { cid_role: { cid: memberCid, role: 'WF_AFFILIATE' } },
+    update: {},
+    create: { cid: memberCid, role: 'WF_AFFILIATE' }
+  });
+  affiliateCids.add(memberCid);
+
+  res.json({ ok: true });
+});
+
+// Update a member of one of my affiliates (e.g. active flag)
+app.patch('/api/affiliates/my/:affiliateId/members/:cid', requireLogin, async (req, res) => {
+  const ownerCid = Number(req.session?.user?.data?.cid);
+  const affiliateId = Number(req.params.affiliateId);
+  const memberCid = Number(req.params.cid);
+  if (!ownerCid || !affiliateId || !memberCid) return res.status(400).json({ error: 'Bad request' });
+
+  const aff = await prisma.affiliate.findUnique({ where: { id: affiliateId } });
+  if (!aff || aff.cid !== ownerCid) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const data = {};
+  if (req.body?.active !== undefined) data.active = Boolean(req.body.active);
+  if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
+
+  await prisma.affiliateMember.updateMany({
+    where: { affiliateId, cid: memberCid },
+    data
+  });
+  res.json({ ok: true });
+});
+
+// Remove a member from one of my affiliates
+app.delete('/api/affiliates/my/:affiliateId/members/:cid', requireLogin, async (req, res) => {
+  const ownerCid = Number(req.session?.user?.data?.cid);
+  const affiliateId = Number(req.params.affiliateId);
+  const memberCid = Number(req.params.cid);
+  if (!ownerCid || !affiliateId || !memberCid) return res.status(400).json({ error: 'Bad request' });
+
+  const aff = await prisma.affiliate.findUnique({ where: { id: affiliateId } });
+  if (!aff || aff.cid !== ownerCid) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  await prisma.affiliateMember.deleteMany({ where: { affiliateId, cid: memberCid } });
+  res.json({ ok: true });
+});
+
+
 app.get('/admin', (req, res) => {
   res.redirect(301, '/admin/control-panel');
 });
@@ -15560,6 +17942,7 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
   const user = req.session.user.data;
   const cid = Number(user.cid);
   const isAdmin = isAdminUser(cid);
+  const showAtcRoute = isAdmin || isPageEnabled('atc-route');
 
   // Resolve the user's team name → all callsigns across every aircraft row
   // that belongs to that team (teams can have multiple OfficialTeam rows,
@@ -15645,7 +18028,7 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
         r.from === from && r.to === to && r.date_utc === dateUtc && r.dep_time_utc === depTimeUtc
       );
       const wfSector = wfRow?.number || '-';
-      const atcRoute = wfRow?.atc_route || '-';
+      const atcRoute = showAtcRoute ? (wfRow?.atc_route || '-') : '-';
       const tobt = typeof booking.tobtTimeUtc === 'string' ? booking.tobtTimeUtc : null;
       const callsign = booking.callsign;
       const aircraftType = callsignAircraftType[String(callsign || '').toUpperCase()] || '';
@@ -15786,7 +18169,7 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
                 <th class="col-tobt">Date</th>
                 <th>Dep Window</th>
                 <th>Flow Type</th>
-                <th>ATC Route</th>
+                ${showAtcRoute ? '<th>ATC Route</th>' : ''}
                 <th>Plan</th>
                 <th></th>
               </tr>
@@ -15812,9 +18195,9 @@ app.get('/team/bookings', requireLogin, requireTeamMember, async (req, res) => {
                   <td>${r.tobt
                     ? `Slotted - <span style="color:#4ade80;font-weight:600;">${r.tobt.replace(':','')}z</span> <span class="tobt-help">?<span class="tobt-tooltip">This is a TOBT (Target Off-Blocks Time).<br>Please connect at least 30 minutes before this time.<br>You should be ready to push at this time.<br><b>The actual push time may differ depending on<br>ramp and airfield congestion.</b></span></span>`
                     : `<span style="color:#4ade80;font-weight:600;">Booking Confirmed</span> <span class="tobt-help">?<span class="tobt-tooltip">You have a booking for this sector. Slots are not required.<br><b>Plan to depart within the Dep Window.</b></span></span>`}</td>
-                  <td>${hasRoute
+                  ${showAtcRoute ? `<td>${hasRoute
                     ? `<button type="button" class="show-route-btn" data-route="${routeAttr}">Show Route</button>`
-                    : '<span style="color:var(--muted);">—</span>'}</td>
+                    : '<span style="color:var(--muted);">—</span>'}</td>` : ''}
                   <td>
                     <a class="simbrief-btn" href="${r.simbriefUrl}" target="_blank" rel="noopener">
                       <span class="simbrief-logo">SB</span>
@@ -16651,112 +19034,221 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
     prisma.affiliate.findMany({ orderBy: { createdAt: 'desc' } })
   ]);
 
+  const teamRecord = (t) => JSON.stringify({ teamName: t.teamName, callsign: t.callsign, mainCid: t.mainCid, aircraftType: t.aircraftType, country: t.country, participatingWf26: t.participatingWf26 }).replace(/'/g, '&#39;');
+  const affRecord = (a) => JSON.stringify({ callsign: a.callsign, simType: a.simType, cid: a.cid, sinceYear: a.sinceYear, hasMembers: a.hasMembers, participatingWf26: a.participatingWf26 }).replace(/'/g, '&#39;');
+
   const content = `
-  <section class="card card-full">
-    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-      <h2 style="margin:0;">Official Teams / WF Affiliates</h2>
-      <div style="display:flex; gap:10px; flex-wrap:wrap;">
-        <button class="action-btn primary" id="addTeamBtn">Add Official Team</button>
-        <button class="action-btn" id="addAffiliateBtn">Add WF Affiliate</button>
+  <section class="card card-full ot-card">
+    <header class="ot-header">
+      <div class="ot-title-row">
+        <h2 class="ot-title">Official Teams &amp; WF Affiliates</h2>
+        <div class="ot-add-actions">
+          <button class="action-btn primary ot-add-btn" id="addTeamBtn" data-add-for="teams">+ Add Official Team</button>
+          <button class="action-btn primary ot-add-btn" id="addAffiliateBtn" data-add-for="affiliates" hidden>+ Add WF Affiliate</button>
+        </div>
       </div>
-    </div>
-<div class="sub-card">
-     <h3 class="section-title">Official Teams</h3>
-    <div class="table-scroll">
-      <table class="departures-table official-teams">
-        <thead>
-          <tr>
-            <th>Team Name</th>
-            <th>Callsign</th>
-            <th>Main CID</th>
-            <th>A/C Type</th>
-            <th>Country</th>
-            <th class="col-wf26 col-center">Active</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${teams.map(t => `
-            <tr data-team-id="${t.id}">
-              <td>${escapeHtml(t.teamName)}</td>
-              <td>${escapeHtml(t.callsign)}</td>
-              <td>${t.mainCid}</td>
-              <td>${escapeHtml(t.aircraftType)}</td>
-              <td>${escapeHtml(t.country)}</td>
-              <td class="col-wf26 col-center">
-  <input
-    type="checkbox"
-    class="wf26-toggle wf-check"
-    data-entity="team"
-    data-id="${t.id}"
-    ${t.participatingWf26 ? 'checked' : ''}
-  />
-</td>
-              <td style="text-align:right;white-space:nowrap;">
-                <button class="action-btn edit-team-btn" data-id="${t.id}" data-record='${JSON.stringify({ teamName: t.teamName, callsign: t.callsign, mainCid: t.mainCid, aircraftType: t.aircraftType, country: t.country, participatingWf26: t.participatingWf26 }).replace(/'/g, '&#39;')}' style="margin-right:6px;">Edit</button>
-                <button class="tobt-btn cancel" data-action="delete-team" data-id="${t.id}">Delete</button>
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-</div>
-    <div class="sub-card">
-  <h3 class="section-title">WF Affiliates</h3>
-    <div class="table-scroll">
-    <table class="departures-table affiliates">
-  <thead>
-    <tr>
-      <th class="col-callsign">Callsign</th>
-      <th class="col-simtype">Full Sim / Home Cockpit</th>
-      <th class="col-cid col-right">CID</th>
-      <th class="col-wf26 col-center">Active</th>
-      <th class="col-actions"></th>
-    </tr>
-  </thead>
-  <tbody>
-    ${affiliates.map(a => `
-      <tr data-affiliate-id="${a.id}">
-        <td class="col-callsign">${escapeHtml(a.callsign)}</td>
-        <td class="col-simtype">
-  ${escapeHtml(a.simType)}
-</td>
 
+      <div class="ot-tabs" role="tablist">
+        <button class="ot-tab active" data-tab="teams" role="tab" type="button">
+          <svg class="ot-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Official Teams</span>
+          <span class="ot-tab-count">${teams.length}</span>
+        </button>
+        <button class="ot-tab" data-tab="affiliates" role="tab" type="button">
+          <svg class="ot-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+          <span>WF Affiliates</span>
+          <span class="ot-tab-count">${affiliates.length}</span>
+        </button>
+      </div>
+    </header>
 
-        <td class="col-cid col-right">${a.cid}</td>
-        <td class="col-wf26 col-center">
-          <input
-            type="checkbox"
-            class="wf26-toggle wf-check"
-            data-entity="affiliate"
-            data-id="${a.id}"
-            ${a.participatingWf26 ? 'checked' : ''}
-          />
-        </td>
-        <td class="col-actions col-right" style="white-space:nowrap;">
-          <button
-            class="action-btn edit-affiliate-btn"
-            data-id="${a.id}"
-            data-record='${JSON.stringify({ callsign: a.callsign, simType: a.simType, cid: a.cid, participatingWf26: a.participatingWf26 }).replace(/'/g, '&#39;')}'
-            style="margin-right:6px;">
-            Edit
-          </button>
-          <button
-            class="tobt-btn cancel"
-            data-action="delete-affiliate"
-            data-id="${a.id}">
-            Delete
-          </button>
-        </td>
-      </tr>
-    `).join('')}
-  </tbody>
-</table>
-
+    <div class="ot-panel active" data-panel="teams">
+      ${teams.length === 0 ? `
+        <div class="ot-empty">
+          <div class="ot-empty-title">No official teams yet</div>
+          <div class="ot-empty-sub">Click "+ Add Official Team" to create one.</div>
+        </div>
+      ` : `
+        <div class="ot-table-wrap">
+          <table class="ot-table">
+            <thead>
+              <tr>
+                <th>Team Name</th>
+                <th>Callsign</th>
+                <th>Main CID</th>
+                <th>A/C Type</th>
+                <th>Country</th>
+                <th class="ot-th-center">Active</th>
+                <th class="ot-th-actions"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${teams.map(t => `
+                <tr data-team-id="${t.id}">
+                  <td class="ot-cell-name ot-uppercase">${escapeHtml(t.teamName)}</td>
+                  <td><span class="ot-cell-callsign">${escapeHtml(t.callsign)}</span></td>
+                  <td class="ot-cell-cid">${t.mainCid}</td>
+                  <td><span class="ot-cell-actype">${escapeHtml(t.aircraftType)}</span></td>
+                  <td><span class="ot-cell-country">${escapeHtml(t.country)}</span></td>
+                  <td class="ot-cell-active">
+                    <input
+                      type="checkbox"
+                      class="wf26-toggle wf-check"
+                      data-entity="team"
+                      data-id="${t.id}"
+                      ${t.participatingWf26 ? 'checked' : ''}
+                    />
+                  </td>
+                  <td class="ot-cell-actions">
+                    <button class="ot-btn edit-team-btn" data-id="${t.id}" data-record='${teamRecord(t)}'>Edit</button>
+                    <button class="ot-btn ot-btn-danger" data-action="delete-team" data-id="${t.id}">Delete</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `}
     </div>
+
+    <div class="ot-panel" data-panel="affiliates">
+      ${affiliates.length === 0 ? `
+        <div class="ot-empty">
+          <div class="ot-empty-title">No WF affiliates yet</div>
+          <div class="ot-empty-sub">Click "+ Add WF Affiliate" to register one.</div>
+        </div>
+      ` : `
+        <div class="ot-table-wrap">
+          <table class="ot-table">
+            <thead>
+              <tr>
+                <th>Name / Callsign</th>
+                <th>Sim Type</th>
+                <th>Main CID</th>
+                <th>Active Since</th>
+                <th class="ot-th-center">Active</th>
+                <th class="ot-th-actions"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${affiliates.map(a => `
+                <tr data-affiliate-id="${a.id}">
+                  <td class="ot-cell-name"><span class="ot-cell-callsign">${escapeHtml(a.callsign)}</span></td>
+                  <td>
+                    <span class="ot-simtype" data-sim="${escapeHtml((a.simType || '').toUpperCase())}">${escapeHtml(a.simType || '—')}</span>
+                  </td>
+                  <td class="ot-cell-cid">${a.cid}</td>
+                  <td>${a.sinceYear ? `<span class="ot-since">${a.sinceYear}</span>` : '<span class="ot-muted">—</span>'}</td>
+                  <td class="ot-cell-active">
+                    <input
+                      type="checkbox"
+                      class="wf26-toggle wf-check"
+                      data-entity="affiliate"
+                      data-id="${a.id}"
+                      ${a.participatingWf26 ? 'checked' : ''}
+                    />
+                  </td>
+                  <td class="ot-cell-actions">
+                    <button class="ot-btn edit-affiliate-btn" data-id="${a.id}" data-record='${affRecord(a)}'>Edit</button>
+                    <button class="ot-btn ot-btn-danger" data-action="delete-affiliate" data-id="${a.id}">Delete</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `}
     </div>
   </section>
+
+  <style>
+    .ot-card { padding: 24px; }
+    .ot-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .ot-title { margin: 0; font-size: 18px; font-weight: 700; color: var(--text); }
+    .ot-add-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .ot-add-btn { font-size: 13px; }
+
+    /* Tabs */
+    .ot-tabs {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+    .ot-tab {
+      background: transparent;
+      border: 0;
+      padding: 10px 18px;
+      color: var(--text);
+      opacity: 0.65;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      white-space: nowrap;
+      transition: color .15s, opacity .15s, border-color .15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ot-tab-icon { width: 16px; height: 16px; flex-shrink: 0; }
+    .ot-tab:hover { opacity: 1; }
+    .ot-tab.active { color: var(--accent); opacity: 1; border-bottom-color: var(--accent); }
+    .ot-tab-count {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      color: var(--muted);
+      min-width: 22px;
+      text-align: center;
+    }
+    .ot-tab.active .ot-tab-count {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent);
+    }
+
+    /* Panels */
+    .ot-panel { display: none; }
+    .ot-panel.active { display: block; }
+
+    @media (max-width: 720px) {
+      .ot-card { padding: 16px; }
+      .ot-table thead th, .ot-table tbody td { padding: 10px 10px; }
+    }
+  </style>
+
+  <script>
+    (function() {
+      const tabs = document.querySelectorAll('.ot-tab');
+      const panels = document.querySelectorAll('.ot-panel');
+      const addTeam = document.getElementById('addTeamBtn');
+      const addAff = document.getElementById('addAffiliateBtn');
+      function activate(name) {
+        tabs.forEach(function(t) { t.classList.toggle('active', t.dataset.tab === name); });
+        panels.forEach(function(p) { p.classList.toggle('active', p.dataset.panel === name); });
+        if (addTeam) addTeam.hidden = name !== 'teams';
+        if (addAff)  addAff.hidden  = name !== 'affiliates';
+        try { localStorage.setItem('ot-active-tab', name); } catch (e) {}
+      }
+      tabs.forEach(function(t) {
+        t.addEventListener('click', function() { activate(t.dataset.tab); });
+      });
+      var saved = 'teams';
+      try { saved = localStorage.getItem('ot-active-tab') || 'teams'; } catch (e) {}
+      if (saved === 'affiliates') activate('affiliates');
+    })();
+  </script>
 
   <!-- ===== Add Entry Modal ===== -->
   <div id="adminEntryModal" class="modal hidden">
@@ -16792,29 +19284,48 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
   <!-- ================= AFFILIATE FIELDS ================= -->
 <div id="affiliateFields" class="hidden">
 
-  <label style="display:block; margin:10px 0 6px;">Callsign</label>
+  <label style="display:block; margin:10px 0 6px;">Name / Callsign</label>
   <input
     name="affiliateCallsign"
     type="text"
     placeholder="e.g. TOM1VB"
-    maxlength="10"
+    maxlength="40"
     style="text-transform:uppercase;"
   />
 
-  <label style="display:block; margin:10px 0 6px;">Full Sim / Home Cockpit</label>
+  <label style="display:block; margin:10px 0 6px;">Sim Type</label>
   <select name="simType">
     <option value="" disabled selected>SELECT SIM TYPE</option>
     <option value="FULL SIM">FULL SIM</option>
     <option value="HOME COCKPIT">HOME COCKPIT</option>
+    <option value="COMMUNITY">COMMUNITY</option>
+    <option value="OTHER">OTHER</option>
   </select>
 
-  <label style="display:block; margin:10px 0 6px;">CID</label>
+  <label style="display:block; margin:10px 0 6px;">Main CID</label>
   <input
     name="cid"
     type="number"
     inputmode="numeric"
     placeholder="E.G. 1303570"
   />
+
+  <label style="display:block; margin:10px 0 6px;">Active Since</label>
+  <select name="sinceYear">
+    <option value="" disabled selected>SELECT YEAR</option>
+    ${(() => {
+      const now = new Date().getUTCFullYear();
+      const opts = [];
+      for (let y = now + 1; y >= 2002; y--) opts.push(`<option value="${y}">${y}</option>`);
+      return opts.join('');
+    })()}
+  </select>
+
+  <label style="display:block; margin:10px 0 6px;">Has multiple users?</label>
+  <select name="hasMembers">
+    <option value="false" selected>No</option>
+    <option value="true">Yes</option>
+  </select>
 
 </div>
 
@@ -16890,10 +19401,12 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
         const affiliateCallsign = form.querySelector('input[name="affiliateCallsign"]');
         const simType = form.querySelector('select[name="simType"], input[name="simType"]');
         const cid = form.querySelector('input[name="cid"]');
+        const sinceYear = form.querySelector('select[name="sinceYear"]');
 
         if (affiliateCallsign) affiliateCallsign.required = false;
         if (simType) simType.required = false;
         if (cid) cid.required = false;
+        if (sinceYear) sinceYear.required = false;
 
       } else {
         titleEl.textContent = editingId ? 'Edit WF Affiliate' : 'Add WF Affiliate';
@@ -16908,10 +19421,12 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
         const affiliateCallsign = form.querySelector('input[name="affiliateCallsign"]');
         const simType = form.querySelector('select[name="simType"], input[name="simType"]');
         const cid = form.querySelector('input[name="cid"]');
+        const sinceYear = form.querySelector('select[name="sinceYear"]');
 
         if (affiliateCallsign) affiliateCallsign.required = true;
         if (simType) simType.required = true;
         if (cid) cid.required = true;
+        if (sinceYear) sinceYear.required = true;
 
         // Not required for AFFILIATE
         form.querySelector('input[name="teamName"]').required = false;
@@ -16934,6 +19449,10 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
           var simSel = form.querySelector('select[name="simType"]');
           if (simSel) simSel.value = record.simType || '';
           form.querySelector('input[name="cid"]').value = record.cid || '';
+          var yearSel = form.querySelector('select[name="sinceYear"]');
+          if (yearSel) yearSel.value = record.sinceYear ? String(record.sinceYear) : '';
+          var hasMembersSel = form.querySelector('select[name="hasMembers"]');
+          if (hasMembersSel) hasMembersSel.value = record.hasMembers ? 'true' : 'false';
         }
         form.querySelector('input[name="participatingWf26"]').checked = !!record.participatingWf26;
       }
@@ -17002,6 +19521,9 @@ app.get('/official-teams', requireAdmin, async (req, res) => {
         payload.callsign = (fd.get('affiliateCallsign') || '').toString().trim().toUpperCase();
         payload.simType = (fd.get('simType') || '').toString().trim().toUpperCase();
         payload.cid = Number(fd.get('cid'));
+        const yr = (fd.get('sinceYear') || '').toString().trim();
+        payload.sinceYear = yr ? Number(yr) : null;
+        payload.hasMembers = String(fd.get('hasMembers') || '').toLowerCase() === 'true';
       }
 
       const baseUrl = type === 'team' ? '/api/admin/official-teams' : '/api/admin/affiliates';
@@ -17140,17 +19662,22 @@ app.post('/api/admin/official-teams', requireAdmin, async (req, res) => {
   });
 
   if (created.participatingWf26) {
-    autoAssignTeamBookings({ reason: `team ${created.id} created` }).catch(() => {});
+    autoAssignTeamThenAffiliate({ reason: `team ${created.id} created` }).catch(() => {});
   }
   return res.json({ success: true, id: created.id });
 });
 
 // Create Affiliate
 app.post('/api/admin/affiliates', requireAdmin, async (req, res) => {
-  const { callsign, simType, cid, participatingWf26 } = req.body || {};
+  const { callsign, simType, cid, sinceYear, hasMembers, participatingWf26 } = req.body || {};
 
   if (!callsign || !simType || !cid) {
     return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  const yr = sinceYear == null || sinceYear === '' ? null : Number(sinceYear);
+  if (yr != null && (!Number.isFinite(yr) || yr < 1990 || yr > 2100)) {
+    return res.status(400).json({ error: 'Invalid sinceYear' });
   }
 
   const created = await prisma.affiliate.create({
@@ -17158,9 +19685,26 @@ app.post('/api/admin/affiliates', requireAdmin, async (req, res) => {
       callsign: String(callsign).trim().toUpperCase(),
       simType: String(simType).trim(),
       cid: Number(cid),
+      sinceYear: yr,
+      hasMembers: Boolean(hasMembers),
       participatingWf26: Boolean(participatingWf26)
     }
   });
+
+  // Auto-grant WF_AFFILIATE role to the linked CID.
+  const cidNum = Number(cid);
+  await prisma.userAdditionalRole.upsert({
+    where: { cid_role: { cid: cidNum, role: 'WF_AFFILIATE' } },
+    update: {},
+    create: { cid: cidNum, role: 'WF_AFFILIATE' }
+  });
+  affiliateCids.add(cidNum);
+  await loadAffiliateOwners();
+
+  // If participating, fill in any leftover slots after teams have been assigned.
+  if (created.participatingWf26) {
+    autoAssignTeamThenAffiliate({ reason: `affiliate ${created.id} created` }).catch(() => {});
+  }
 
   return res.json({ success: true, id: created.id });
 });
@@ -17179,7 +19723,9 @@ app.delete('/api/admin/affiliates/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!id) return res.status(400).json({ error: 'Invalid id' });
 
+  await prisma.affiliateMember.deleteMany({ where: { affiliateId: id } }).catch(() => null);
   await prisma.affiliate.delete({ where: { id } }).catch(() => null);
+  await loadAffiliateOwners();
   return res.json({ success: true });
 });
 
@@ -17198,7 +19744,7 @@ app.patch('/api/admin/official-teams/:id', requireAdmin, async (req, res) => {
   if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
   await prisma.officialTeam.update({ where: { id }, data });
-  autoAssignTeamBookings({ reason: `team ${id} patched` }).catch(() => {});
+  autoAssignTeamThenAffiliate({ reason: `team ${id} patched` }).catch(() => {});
   return res.json({ success: true });
 });
 
@@ -17211,10 +19757,25 @@ app.patch('/api/admin/affiliates/:id', requireAdmin, async (req, res) => {
   if (body.callsign !== undefined) data.callsign = String(body.callsign).trim().toUpperCase();
   if (body.simType !== undefined) data.simType = String(body.simType).trim();
   if (body.cid !== undefined) data.cid = Number(body.cid);
+  if (body.sinceYear !== undefined) {
+    const yr = body.sinceYear == null || body.sinceYear === '' ? null : Number(body.sinceYear);
+    if (yr != null && (!Number.isFinite(yr) || yr < 1990 || yr > 2100)) {
+      return res.status(400).json({ error: 'Invalid sinceYear' });
+    }
+    data.sinceYear = yr;
+  }
+  if (body.hasMembers !== undefined) data.hasMembers = Boolean(body.hasMembers);
   if (body.participatingWf26 !== undefined) data.participatingWf26 = Boolean(body.participatingWf26);
   if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
   await prisma.affiliate.update({ where: { id }, data });
+  await loadAffiliateOwners();
+
+  // If they just turned on participation, run auto-assignment (teams first, then affiliates).
+  if (data.participatingWf26 === true) {
+    autoAssignTeamThenAffiliate({ reason: `affiliate ${id} patched` }).catch(() => {});
+  }
+
   return res.json({ success: true });
 });
 
@@ -20936,7 +23497,8 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
       items: [
         { key: 'wf-portal-banner',  label: 'Portal - Airport Selected for WF', icon: '✈️', desc: 'WorldFlight event banner on airport portal pages' },
         { key: 'flow-restrictions', label: 'Flow Restrictions on Sector Details', icon: '🚦', desc: 'When off, the sector page shows a placeholder instead of flow info' },
-        { key: 'book-slot',         label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' }
+        { key: 'book-slot',         label: 'Book Slot Column',     icon: '📋', desc: 'Book Slot column on the schedule page' },
+        { key: 'atc-route',         label: 'ATC Routes',           icon: '🛣️', desc: 'ATC route shown on schedule, sector, my-slots, affiliate, team-bookings and portal banners. Hide while routes are still being agreed with controllers.' }
       ]
     }
   ];
@@ -22440,13 +25002,14 @@ const filedRoute = p.flight_plan.route || '';
 
 
   // Find flow restrictions for sectors departing from this ICAO
+  const showAtcRoute = isAdmin || isPageEnabled('atc-route');
   const depFlowBanners = adminSheetCache
     .filter(r => r.from === pageIcao && r.to)
     .map(r => {
       const sector = r.from + '-' + r.to;
       const ft = sharedFlowTypes[sector] || 'NONE';
       const rate = sharedDepFlows[sector] || 0;
-      return { to: r.to, flowType: ft, rate, wf: r.number, atcRoute: r.atc_route || '', dateUtc: r.date_utc || '', depTimeUtc: r.dep_time_utc || '', arrTimeUtc: r.arr_time_utc || '' };
+      return { to: r.to, flowType: ft, rate, wf: r.number, atcRoute: showAtcRoute ? (r.atc_route || '') : '', dateUtc: r.date_utc || '', depTimeUtc: r.dep_time_utc || '', arrTimeUtc: r.arr_time_utc || '' };
     });
 
  const content = `
@@ -26271,6 +28834,7 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
   const user = req.session.user.data;
   const cid = Number(user.cid);
   const isAdmin = isAdminUser(cid);
+  const showAtcRoute = isAdmin || isPageEnabled('atc-route');
 
   // 🔑 bookingKeys, not slotKeys (MODEL 2)
   const myBookingKeys = Array.from(tobtBookingsByCid[cid] || []);
@@ -26302,7 +28866,7 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
       );
 
       const wfSector = wfRow?.number || '-';
-      const atcRoute = wfRow?.atc_route || '-';
+      const atcRoute = showAtcRoute ? (wfRow?.atc_route || '-') : '-';
       const callsign = booking.callsign || '';
 
       let connectBy = '—';
@@ -26400,7 +28964,7 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
                 <th>Date</th>
                 <th>Dep Window</th>
                 <th>Flow Type</th>
-                <th>ATC Route</th>
+                ${showAtcRoute ? '<th>ATC Route</th>' : ''}
                 <th>Plan</th>
                 <th></th>
               </tr>
@@ -26421,9 +28985,9 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
                   <td>${r.tobt && r.tobt !== '—' && r.tobt !== 'N/A'
                     ? `Slotted - <span style="color:#4ade80;font-weight:600;">${r.tobt.replace(':','')}z</span> <span class="tobt-help">?<span class="tobt-tooltip">This is a TOBT (Target Off-Blocks Time).<br>Please connect at least 30 minutes before this time.<br>You should be ready to push at this time.<br><b>The actual push time may differ depending on<br>ramp and airfield congestion.</b></span></span>`
                     : `<span style="color:#4ade80;font-weight:600;">Booking Confirmed</span> <span class="tobt-help">?<span class="tobt-tooltip">You have a booking for this sector. Slots are not required.<br><b>Plan to depart within the Dep Window.</b></span></span>`}</td>
-                  <td>${hasRoute
+                  ${showAtcRoute ? `<td>${hasRoute
                     ? `<button type="button" class="show-route-btn" data-route="${routeAttr}">Show Route</button>`
-                    : '<span style="color:var(--muted);">—</span>'}</td>
+                    : '<span style="color:var(--muted);">—</span>'}</td>` : ''}
                   <td>
                     <a class="simbrief-btn" href="${r.simbriefUrl}" target="_blank" rel="noopener">
                       <span class="simbrief-logo">SB</span>

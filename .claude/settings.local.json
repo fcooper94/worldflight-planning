@@ -230,7 +230,10 @@
       "Bash(curl -s -X POST \"https://overpass-api.de/api/interpreter\" --data-urlencode 'data=[out:json][timeout:25];\\(way[aeroway=taxiway]\\(around:300,39.858,-104.677\\);\\);out body geom;')",
       "Bash(curl -s -X POST \"https://overpass-api.de/api/interpreter\" --data-urlencode 'data=[out:json][timeout:60];area[icao=\"KDEN\"]->.airport;\\(way\\(area.airport\\)[aeroway=taxiway];\\);out body geom;')",
       "Bash(curl -s -X POST \"https://overpass-api.de/api/interpreter\" --data-urlencode 'data=[out:json][timeout:60];area[icao=\"KDEN\"]->.airport;\\(way\\(area.airport\\)[aeroway=apron];\\);out body geom;')",
-      "Bash(curl -s -X POST \"https://overpass-api.de/api/interpreter\" --data-urlencode 'data=[out:json][timeout:60];area[icao=\"KDEN\"]->.airport;\\(way\\(area.airport\\)[aeroway=parking_position];\\);out body geom;')"
+      "Bash(curl -s -X POST \"https://overpass-api.de/api/interpreter\" --data-urlencode 'data=[out:json][timeout:60];area[icao=\"KDEN\"]->.airport;\\(way\\(area.airport\\)[aeroway=parking_position];\\);out body geom;')",
+      "Bash(node --check index.js)",
+      "Bash(node --check layout.js)",
+      "Bash(node --check public/slot-banners.js)"
     ]
   }
 }

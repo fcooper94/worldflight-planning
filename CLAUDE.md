@@ -88,6 +88,63 @@ The legacy `enabled` boolean on the row is kept in sync on every write for back-
 - Only the *currently active* event id may be tagged at upload time — any other id is rejected server-side
 - Admins see all docs regardless, with a scope badge (Permanent / event name / Archived: event name)
 
+## Airport portal (`/icao/:icao`)
+
+Two-tab page that's become a major surface area. Architecture worth knowing:
+
+- **Tab 1 — Map, Controllers & ATIS:** two-column grid (`.icao-portal-grid`, `minmax(0, 1.4fr) minmax(0, 1fr)`, `align-items: stretch`). Left column is the map card (stretches to right column height). Right column has METAR card → ATIS card(s) → Online Controllers card.
+- **Tab 2 — Pilot Documents & Scenery:** two stacked cards.
+- **WF banner state machine:** three banner states at the top: WF airport (with sector buttons), "Not on this year's route", or "route not yet released" (when the Schedule page is hidden — so the banner doesn't leak the route via portal-by-portal probing). Use `isPageVisibleTo('schedule', isAdmin)` for the gate.
+
+### Side-label-card UI pattern
+
+All cards on this page (METAR, each ATIS variant, Online Controllers, Pilot Documents, Available Scenery) share the same shape:
+
+- `<section class="card side-label-card xxx-card">` wrapper
+- `<span class="card-side-label">METAR</span>` — top-left horizontal corner chip with `border-top-left-radius: var(--radius)` so it tucks into the rounded card corner
+- `<div class="card-side-body">` — content, padded `30px 16px 12px 16px` to clear the label
+- Per-card `--card-stripe` CSS variable sets the chip color
+
+Established colours:
+- METAR `#60a5fa` · DEPARTURE `#f59e0b` · ARRIVAL `#10b981` · ATIS (general) `#06b6d4` · FAA ATIS `#6b7280`
+- ONLINE CONTROLLERS `#818cf8` · PILOT DOCUMENTS `#a78bfa` · AVAILABLE SCENERY `#14b8a6`
+
+`.card-side-body` is `display: flex; flex-direction: column; justify-content: center` — children stretch on the cross axis (full width). `.action-btn` inside needs `align-self: flex-start` to avoid stretching.
+
+### Map (Leaflet)
+
+- Single instance, `preferCanvas: true`. Expand button toggles a `.is-fullscreen` class on the card AND moves the card to `<body>` to escape ancestor stacking contexts. Esc collapses.
+- `minZoom: 13`, `zoomSnap: 0.5`, `wheelPxPerZoomLevel: 120` for a slower, smoother feel.
+- Tile layer uses `keepBuffer: 8` to reduce zoom-out white tiles. Container background `#1a1a1a` so missing tiles read as a loading state, not a flash.
+- `ResizeObserver` on `#icaoMap` debounces `invalidateSize()` so sidebar/ATIS-card-appears events don't break tile layout.
+- **Aircraft markers** (`buildAircraftIcon`): `iconSize: [18, 18]`, `iconAnchor: [9, 9]` — center the lat/lng on the plane SVG so polylines/lines connect cleanly.
+- **Aircraft polling:** 15s interval re-fetches `/api/icao/:icao/map`. `renderAircraft(list)` updates existing markers in place via `setLatLng`/`setIcon` (no flicker), creates new ones, removes departed callsigns. `fitBounds` only on initial load.
+- **Aircraft tooltip vs draggable tag:** "Show Full Tags" toggle — hover-only Leaflet tooltip vs separate draggable divIcon marker + polyline. For draggable tags, tag follows aircraft via stored `offset = { dlat, dlng }`. User-drag captures new offset. Polyline endpoint = `tagCenterLatLng()` (computes visible centre via element pixel size + map zoom). Recompute on `zoomend` (pixels-per-degree changes).
+
+### Ground layout & stands (OSM Overpass)
+
+- `lib/osm-ground.mjs` fetches `aeroway=runway/taxiway/apron/parking_position/gate` + buildings from Overpass. Disk-cached at `data/ground/<ICAO>.json`. **No expiry** — admin `?refresh=1` query param on `/api/icao/:icao/ground` to force re-fetch.
+- `osmToGeoJSON()` widens runway/taxiway centerlines into polygons (default widths 45m/23m).
+- **Stand position heuristic** (`pickStandTip`): OSM `parking_position` lines should follow "first node = taxiway, last = nose-wheel". Some airports (KDEN) reverse this. The heuristic picks whichever endpoint has the most other parking_position endpoints clustered within 100m (gates pack tightly along terminals; taxi entries spread out). Falls back to building proximity, then OSM convention. **Existing caches under `data/ground/` were generated with old logic — delete the file (or use `?refresh=1`) for the heuristic to apply to a given airport.**
+- Stand occupancy (`detectStandOccupancy`): point-in-polygon match wins, otherwise nearest-stand within 70m. Aircraft must have `groundspeed <= 3 kt` (genuinely stopped). Polled every 60s client-side.
+- **Stand layer toggle reapplies cached occupancy:** removing the layer destroys marker DOM; re-adding recreates from the divIcon HTML, so the `.stand-occupied` red class is lost. `applyStandOccupancy()` reapplies from `window._icaoLastOccupancy` whenever the layer is shown.
+
+### External data sources
+
+| Source | URL | Used for |
+|---|---|---|
+| VATSIM datafeed | `https://data.vatsim.net/v3/vatsim-data.json` | pilots, controllers, atis (15s real cadence) |
+| FAA D-ATIS | `https://atis.info/api/<ICAO>` | US-only, returns array with `type` field (dep/arr/combined). Per-entry: `code` (letter), `datis` (text). Only called when `isUsIcao(icao)`. |
+| METAR | `aviationweather.gov/api/data/metar`, falling back to `avwx.rest/api/metar/...` | Server iterates outward by radius (1.5°/5°/15°/45°/180° global) up to 80 candidates so even remote airports always find a station. Surface a `proxy: { icao, distKm }` in the response when nearest-station fallback was used. |
+| OSM Overpass | rotated through 4 endpoints with backoff | Ground layout. 60s timeout, 6 retries with exponential backoff. |
+
+### Controller list logic
+
+- `isCoveringCtr(callsign, icao)` = US/UK/India/SouthAm CTR + `isCoveringUsApp` (TRACON coverage) + generic ICAO CTR fallback. `isAirportController` matches `<airport-prefix>_*_<role>` for `ATIS|DEL|GND|TWR|APP|DEP`.
+- `US_APP_COVERAGE_BY_ICAO` maps consolidated TRACONs to airports — both the FAA identifier and the friendly VATSIM callsign should be listed (e.g. `KEWR: ['NY', 'N90']`). NY-area satellites (TEB/HPN/ISP/SWF/FRG/CDW/MMU/FOK) are included for NY APP.
+- `/api/icao/:icao/controllers` returns merged + sorted by position rank: **FSS → CTR → APP/TMA/RDR → DEP → TWR → GND → RMP → DEL/CLD**. ATIS callsigns are intentionally excluded (rendered in dedicated ATIS card).
+- Position chips on the client (`atcPosType()`) are color-coded with type-specific Lucide-style SVG icons, fixed `width: 72px` so callsigns align across rows.
+
 ## Common gotchas
 
 - Map padding for `fitBounds` is in **pixels**, not a percentage. For routes that span widely on one axis but not the other, use asymmetric padding (`[20, 50]`) and pick which axis gets more padding based on `spanLat > spanLon`.
@@ -95,9 +152,20 @@ The legacy `enabled` boolean on the row is kept in sync on every write for back-
 - The `.modal-card input` global rules force `text-transform: uppercase` and `text-align: center` for the callsign/ICAO modal. Any new modal that wants normal input should scope its own overrides under a unique modal id.
 - Inline arrow characters in `index.js` template literals are stored as `←` / `→` / `—` escape sequences. Multi-line `Edit` operations may need to use the literal escape sequence, not the rendered character — Python `replace` via Bash is a reliable fallback.
 - US ICAOs (KLAX, KJFK, …) drop the leading `K` for *display only* on the airport portal heading; URLs and DB lookups still use the full 4-letter code.
+- **Bootstrap loading-screen labels are PUBLIC.** `setBootstrapStatus(step, label)` text is shown to anyone hitting the server during startup. Never include WF airport ICAOs — that leaks the route before release. Use the sector number (e.g. "WF2601") instead.
+- **Changes to `lib/*.mjs` need a full server restart** (Ctrl+C and `npm run dev`). Nodemon doesn't reliably pick up `.mjs` changes inside `lib/` on Windows. Cache regeneration won't use new code unless the server is restarted FIRST.
+- **`AirportScenery.submittedBy` is a String column** but `req.session.user.data.cid` is an Int — wrap with `String(...)` before insert. Existing rows mix names and CIDs; ownership checks should match against both.
+- **`airport.elev` may be null** in the DB. Aircraft filters that subtract `elev` from `pilot.altitude` would treat null as 0 — at high airports like KDEN (5,431 ft) every plane on the ground would be filtered out. Use `groundspeed < 80 kt` as primary "on the ground" signal; AGL is a secondary check that should gracefully skip when `elev == null`.
+- **`.icao-tab-panel.active { display: block }` beats** flat panel rules like `.docs-panel { display: flex }`. Use sibling-margin selectors (`.docs-panel > .child + .child { margin-top: 24px }`) for spacing within tab panels.
+- **`.action-btn` is `display: inline-flex`** but stretches to full width inside `display: flex; flex-direction: column` parents (like `.card-side-body`). Use `align-self: flex-start` to keep them content-sized.
+- **Leaflet `.leaflet-div-icon` defaults** apply `background: #fff; border: 1px solid #666` to any divIcon. Override with `!important` and explicit `width/height: auto !important` if your custom marker isn't sizing/coloring as expected.
+- **Globals set on the airport portal**: `window.IS_LOGGED_IN`, `window.ICAO`, `window.IS_WORLD_FLIGHT`, `window.WF_LEG`, `window.VATSIM_USER`. Inline page script populates them — reliable for client-side checks within the portal context.
+- **`adminSheetCache`** is the in-memory cache of `WfScheduleRow`s for the active event. Each row: `{ number: 'WF2601', from: 'KDEN', to: 'EGLL', dateUtc, depTimeUtc, arrTimeUtc, blockTime, atcRoute, ... }`. Used heavily for WF-route checks across the app.
+- **`sync-prod.mjs` deliberately skips `PageVisibility`** — visibility flags are per-environment so toggling in dev doesn't depend on prod state.
 
 ## Tools the user values
 
 - **Prisma db push** for schema changes (no formal migrations workflow set up).
 - **`pg` directly** in scripts for one-shot data pushes/pulls to/from prod, with `--push` flag gating destructive runs and `INSERT … ON CONFLICT DO NOTHING` for idempotency.
 - **Lucide-style line SVG icons** throughout the UI (sidebar, dashboard cards, admin panel cards). When adding a new icon, match this style (`fill: none; stroke: currentColor; stroke-width: 1.8/2`).
+- **Per-type CSS variables** like `--card-stripe`, `--pos-color` on container elements so child selectors can paint per-instance without proliferating classes. See `.atc-pos { background: color-mix(in srgb, var(--pos-color) 15%, transparent); ... }`.

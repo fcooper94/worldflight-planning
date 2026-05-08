@@ -68,10 +68,12 @@ window.loadSlotBanners = function (data) {
           '<span class="slot-window-value">' + (a.window || '—') + '</span>' +
         '</div>' +
 
-        '<div class="slot-atc">' +
-          '<span class="slot-atc-label">ATC Route</span>' +
-          '<span class="slot-atc-route">' + a.atcRoute + '</span>' +
-        '</div>' +
+        (a.atcRoute ?
+          '<div class="slot-atc">' +
+            '<span class="slot-atc-label">ATC Route</span>' +
+            '<span class="slot-atc-route">' + a.atcRoute + '</span>' +
+          '</div>'
+        : '') +
 
         (
   !a.hasSlots
@@ -115,10 +117,12 @@ window.loadSlotBanners = function (data) {
           '<span class="slot-window-value">' + (d.window || '—') + '</span>' +
         '</div>' +
 
-        '<div class="slot-atc">' +
-          '<span class="slot-atc-label">ATC Route</span>' +
-          '<span class="slot-atc-route">' + d.atcRoute + '</span>' +
-        '</div>' +
+        (d.atcRoute ?
+          '<div class="slot-atc">' +
+            '<span class="slot-atc-label">ATC Route</span>' +
+            '<span class="slot-atc-route">' + d.atcRoute + '</span>' +
+          '</div>'
+        : '') +
 
         (
   !d.hasSlots

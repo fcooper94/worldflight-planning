@@ -541,6 +541,13 @@ body.sidebar-collapsed .sidebar { width: var(--sidebar-collapsed); }
   display:none;
 }
 
+/* Collapsed: thin divider between sections (skip the first) */
+.sidebar.collapsed .nav-section + .nav-section{
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
 /* Nav items */
 .sidebar-nav{
   display:flex;
@@ -2881,6 +2888,153 @@ tr:hover .row-actions {
   font-weight: 600;
   text-transform: uppercase;
 }
+
+/* =========================================
+   Shared "ot-*" table primitives
+   Used by /official-teams, /affiliates/my-members, etc.
+   ========================================= */
+.ot-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: auto;
+  background: rgba(255,255,255,0.015);
+}
+[data-theme="light"] .ot-table-wrap { background: rgba(15,23,42,0.015); }
+.ot-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+  font-size: 13px;
+}
+.ot-table thead th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 12px 14px;
+  background: rgba(255,255,255,0.025);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+[data-theme="light"] .ot-table thead th { background: rgba(15,23,42,0.04); }
+.ot-table tbody td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  vertical-align: middle;
+  color: var(--text);
+}
+.ot-table tbody tr:last-child td { border-bottom: 0; }
+.ot-table tbody tr:nth-child(even) td { background: rgba(255,255,255,0.018); }
+.ot-table tbody tr:hover td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+[data-theme="light"] .ot-table tbody tr:nth-child(even) td { background: rgba(15,23,42,0.025); }
+[data-theme="light"] .ot-table tbody tr:hover td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+.ot-cell-name { font-weight: 600; letter-spacing: 0.02em; }
+.ot-uppercase { text-transform: uppercase; }
+.ot-cell-callsign {
+  font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+.ot-cell-cid {
+  font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.ot-cell-actype {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(56,189,248,0.10);
+  color: #93c5fd;
+  border: 1px solid rgba(56,189,248,0.20);
+}
+.ot-cell-country {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: rgba(255,255,255,0.05);
+  color: var(--text);
+}
+.ot-th-center,
+.ot-cell-active { text-align: center; width: 80px; }
+.ot-cell-active .wf-check { margin: 0; }
+
+.ot-simtype {
+  display: inline-flex;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  background: rgba(56,189,248,0.10);
+  color: #93c5fd;
+  border: 1px solid rgba(56,189,248,0.25);
+}
+.ot-simtype[data-sim="HOME COCKPIT"] { background: rgba(245,158,11,0.10); color: #fbbf24; border-color: rgba(245,158,11,0.25); }
+.ot-simtype[data-sim="COMMUNITY"]    { background: rgba(168,85,247,0.10); color: #c4b5fd; border-color: rgba(168,85,247,0.30); }
+.ot-simtype[data-sim="OTHER"]        { background: rgba(148,163,184,0.10); color: #cbd5e1; border-color: rgba(148,163,184,0.25); }
+
+.ot-since {
+  display: inline-flex;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(245,215,122,0.10);
+  color: #f5d77a;
+  border: 1px solid rgba(245,215,122,0.32);
+}
+.ot-muted { color: var(--muted); opacity: 0.6; }
+
+.ot-th-actions,
+.ot-cell-actions { width: 1px; white-space: nowrap; text-align: right; padding-right: 14px; }
+.ot-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  color: var(--text);
+  transition: background .15s, color .15s, border-color .15s;
+}
+.ot-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ot-btn-danger {
+  background: rgba(239,68,68,0.08);
+  color: #fda4af;
+  border-color: rgba(239,68,68,0.35);
+}
+.ot-btn-danger:hover { background: rgba(239,68,68,0.18); border-color: #ef4444; color: #fff; }
+.ot-btn + .ot-btn { margin-left: 6px; }
+
+.ot-empty {
+  padding: 56px 16px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.012);
+}
+.ot-empty-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.ot-empty-sub { font-size: 12px; color: var(--muted); }
 
 /* Upload doc modal: narrower, left-aligned, no uppercase shouting. */
 #uploadDocModal .modal-card {
