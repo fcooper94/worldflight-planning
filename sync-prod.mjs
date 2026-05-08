@@ -217,11 +217,9 @@ await pullTable({
   dateCols: ['createdAt']
 });
 
-await pullTable({
-  table: 'PageVisibility',
-  cols: ['key', 'enabled'],
-  boolCols: ['enabled']
-});
+// Skip PageVisibility — admin/page visibility settings stay local in dev so
+// toggling them here doesn't mirror prod state (the route hidden/visible flag
+// is meaningful per-environment).
 
 await pullTable({
   table: 'MailingListSubscriber',

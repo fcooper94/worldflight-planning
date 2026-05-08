@@ -1190,9 +1190,20 @@ const US_APP_COVERAGE_BY_ICAO = {
   KBUR: ['SCT'],
   KLGB: ['SCT'],
 
-  KJFK: ['N90'],
-  KLGA: ['N90'],
-  KEWR: ['N90'],
+  // NY TRACON (N90) covers EWR/JFK/LGA + the surrounding satellite airports.
+  // VATSIM commonly uses 'NY_APP' rather than the FAA 'N90_APP' identifier,
+  // so both are recognised.
+  KJFK: ['NY', 'N90'],
+  KLGA: ['NY', 'N90'],
+  KEWR: ['NY', 'N90'],
+  KTEB: ['NY', 'N90'], // Teterboro
+  KHPN: ['NY', 'N90'], // Westchester County
+  KISP: ['NY', 'N90'], // Long Island MacArthur
+  KSWF: ['NY', 'N90'], // Stewart
+  KFRG: ['NY', 'N90'], // Republic
+  KCDW: ['NY', 'N90'], // Caldwell
+  KMMU: ['NY', 'N90'], // Morristown
+  KFOK: ['NY', 'N90'], // Francis S. Gabreski
 };
 
 function isUsApp(callsign) {
@@ -5816,32 +5827,42 @@ wfRoute: wfResult?.wfRoute
 app.get('/api/icao/:icao/scenery-links', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
 
-  // Optional: WF-only guard (keep if you want)
-  
-
-  const rows = await prisma.airportScenery.findMany({
-    where: {
-      icao,
-      approved: true
-    },
-    orderBy: [
-      { sim: 'asc' },
-      { name: 'asc' }
-    ]
+  const approvedRows = await prisma.airportScenery.findMany({
+    where: { icao, approved: true },
+    orderBy: [{ sim: 'asc' }, { name: 'asc' }]
   });
 
-  // Group by simulator for existing frontend
-  const result = {
-    msfs: [],
-    xplane: [],
-    p3d: []
-  };
+  // Pending entries: admins see ALL pending submissions for the airport,
+  // regular users only see their own (so they get immediate feedback that
+  // their submission was received).
+  const user = req.session?.user?.data;
+  const isAdmin = user ? isAdminUser(Number(user.cid)) : false;
 
-  for (const r of rows) {
-    if (r.sim === 'MSFS') result.msfs.push(r);
-    if (r.sim === 'XPLANE') result.xplane.push(r);
-    if (r.sim === 'P3D') result.p3d.push(r);
+  let myPendingRows = [];
+  if (isAdmin) {
+    myPendingRows = await prisma.airportScenery.findMany({
+      where: { icao, approved: false },
+      orderBy: [{ sim: 'asc' }, { name: 'asc' }]
+    });
+  } else if (user) {
+    const userIds = [user.name, user.cid != null ? String(user.cid) : null].filter(Boolean);
+    if (userIds.length) {
+      myPendingRows = await prisma.airportScenery.findMany({
+        where: { icao, approved: false, submittedBy: { in: userIds } },
+        orderBy: [{ sim: 'asc' }, { name: 'asc' }]
+      });
+    }
   }
+
+  const result = { msfs: [], xplane: [], p3d: [] };
+  const push = (r, pending) => {
+    const entry = Object.assign({}, r, { pending });
+    if (r.sim === 'MSFS') result.msfs.push(entry);
+    if (r.sim === 'XPLANE') result.xplane.push(entry);
+    if (r.sim === 'P3D') result.p3d.push(entry);
+  };
+  for (const r of approvedRows) push(r, false);
+  for (const r of myPendingRows) push(r, true);
 
   res.json(result);
 });
@@ -5894,7 +5915,9 @@ app.get('/api/icao/:icao/metar', async (req, res) => {
     if (!airport) return res.json({ icao, metar: null, source: null, proxy: null });
 
     const cosLat = Math.cos(airport.lat * Math.PI / 180);
-    const searchRadii = [1.5, 5, 15, 45]; // degrees lat — roughly 170km, 550km, 1650km, 5000km
+    // Final 180 = global (effectively every other airport on earth, sorted by
+    // distance). Guarantees we keep looking until we find a METAR somewhere.
+    const searchRadii = [1.5, 5, 15, 45, 180];
 
     for (const radius of searchRadii) {
       const lonRadius = cosLat > 0.01 ? radius / cosLat : 180;
@@ -5920,7 +5943,7 @@ app.get('/api/icao/:icao/metar', async (req, res) => {
         return da - db;
       });
 
-      const tryCount = radius >= 15 ? 20 : 5;
+      const tryCount = radius >= 45 ? 80 : radius >= 15 ? 30 : 8;
       for (const apt of filtered.slice(0, tryCount)) {
         result = await fetchMetar(apt.icao);
         if (result) {
@@ -5984,42 +6007,48 @@ app.get('/api/icao/:icao/map', async (req, res) => {
 }
 
 const aircraft = livePilots
-  // must have a flight plan
-  .filter(p => p.flight_plan)
-
-  // ✅ departures only
-  .filter(p => p.flight_plan.departure === icao)
-
   // must have position
   .filter(p => p.latitude && p.longitude)
-.filter(p => {
-  const d = distanceNm(
-    airport.lat,
-    airport.lon,
-    p.latitude,
-    p.longitude
-  );
+  .filter(p => {
+    const d = distanceNm(airport.lat, airport.lon, p.latitude, p.longitude);
+    if (d > 8) return false;
 
-  const altMSL = Number(p.altitude ?? 0);
-  const airportElev = Number(airport.elev ?? 0);
-  const altAGL = altMSL - airportElev;
+    // Primary signal: low groundspeed = at the airport (taxiing, parked,
+    // landing rollout). Robust regardless of whether airport.elev is set
+    // — important for high-elevation airports like KDEN (5,431 ft) where
+    // a missing/wrong elev would otherwise hide every aircraft.
+    const gs = Number(p.groundspeed ?? 0);
+    if (gs < 80) return true;
 
-  return (
-    d <= 8 &&                 // spatial clamp
-    altAGL >= -50 &&          // allow slight negatives
-    altAGL <= 200             // surface / flare / rollout
-  );
-})
-
-
-  .map(p => ({
-    callsign: p.callsign,
-    lat: p.latitude,
-    lon: p.longitude,
-    heading: p.heading,
-    groundspeed: p.groundspeed,
-    altitude: p.altitude
-  }));
+    // Secondary: if we know the airport elevation, also show aircraft within
+    // 200 ft AGL so short final / initial climb traffic appears.
+    if (airport.elev != null) {
+      const altAGL = Number(p.altitude ?? 0) - Number(airport.elev);
+      return altAGL >= -50 && altAGL <= 200;
+    }
+    return false;
+  })
+  .map(p => {
+    const fp = p.flight_plan || {};
+    const dep = String(fp.departure || '').toUpperCase();
+    const arr = String(fp.arrival || '').toUpperCase();
+    // WF tag if this flight is one of the active event's legs AND involves
+    // this airport (either as the leg's origin or destination).
+    const isWf = (dep === icao || arr === icao) &&
+      adminSheetCache.some(r => r.from === dep && r.to === arr);
+    return {
+      callsign: p.callsign,
+      lat: p.latitude,
+      lon: p.longitude,
+      heading: p.heading,
+      groundspeed: p.groundspeed,
+      altitude: p.altitude,
+      aircraft: fp.aircraft_short || fp.aircraft || '',
+      origin: dep,
+      destination: arr,
+      isWf
+    };
+  });
 
 
 
@@ -11434,9 +11463,7 @@ function normalizeAtisText(lines) {
     .trim();
 }
 async function fetchFaaAtis(icao) {
-  if (!isUsIcao(icao)) {
-    return { available: false };
-  }
+  if (!isUsIcao(icao)) return [];
 
   try {
     const r = await axios.get(
@@ -11445,29 +11472,27 @@ async function fetchFaaAtis(icao) {
     );
 
     const data = r.data;
+    if (!Array.isArray(data) || !data.length) return [];
 
-    // 🔑 atis.info returns an ARRAY
-    if (!Array.isArray(data) || !data.length) {
-      return { available: false };
-    }
-
-    const atis = data[0];
-
-    if (!atis.datis) {
-      return { available: false };
-    }
-
-    return {
-      available: true,
-      source: 'faa',
-      letter: atis.code || '',
-      text: atis.datis,
-      time: atis.time,
-      updatedAt: atis.updatedAt
-    };
+    return data
+      .filter(a => a && a.datis)
+      .map(a => {
+        const t = String(a.type || '').toLowerCase();
+        let atisType = 'General';
+        if (t === 'dep' || t === 'departure') atisType = 'Departure';
+        else if (t === 'arr' || t === 'arrival') atisType = 'Arrival';
+        return {
+          source: 'faa',
+          atisType,
+          letter: a.code || '',
+          text: a.datis,
+          time: a.time,
+          updatedAt: a.updatedAt
+        };
+      });
   } catch (err) {
     console.warn('[FAA ATIS]', icao, err.message);
-    return { available: false };
+    return [];
   }
 }
 
@@ -11750,35 +11775,39 @@ app.get('/icao/:icao', async (req, res) => {
         ${wfButtons.map(b => `<a href="${b.href}" class="sector-details-btn ${b.type === 'arr' ? 'sector-details-btn--arr' : 'sector-details-btn--dep'}" style="text-decoration:none;padding:12px 22px;font-size:15px;">${b.label}</a>`).join('')}
       </div>
     </div>
-    ` : `
+    ` : isPageVisibleTo('schedule', isAdmin) ? `
     <div class="icao-portal-no-wf">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
       <span>Not on this year's <strong>${activeEventName}</strong> route</span>
+    </div>
+    ` : `
+    <div class="icao-portal-no-wf">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <span>The route for <strong>${activeEventName}</strong> has not yet been released</span>
     </div>
     `}
   </section>
 
   <div class="icao-tabs" role="tablist">
-    <button class="icao-tab active" data-tab="map" role="tab" type="button">Map, Controllers &amp; ATIS</button>
-    <button class="icao-tab" data-tab="docs" role="tab" type="button">Pilot Documents &amp; Scenery</button>
+    <button class="icao-tab active" data-tab="map" role="tab" type="button">
+      <svg class="icao-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/></svg>
+      <span>Map, Controllers &amp; ATIS</span>
+    </button>
+    <button class="icao-tab" data-tab="docs" role="tab" type="button">
+      <svg class="icao-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>
+      <span>Pilot Documents &amp; Scenery</span>
+    </button>
   </div>
 
   <div class="icao-tab-panel active" data-panel="map">
     <div class="icao-portal-grid">
       <div class="icao-portal-left">
-        <section class="card metar-card" id="metarCard">
-          <div class="metar-header">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
-            <span class="metar-title">METAR</span>
-            <span class="metar-source" id="metarSource"></span>
-          </div>
-          <pre class="metar-text" id="metarText">Loading METAR data\u2026</pre>
-          <div class="metar-proxy-note" id="metarProxy" style="display:none;"></div>
-        </section>
         <section class="card icao-portal-map-card">
           <div class="icao-map">
             <div id="icaoMap" data-icao="${icao}"></div>
-            <div class="map-overlay-controls">
+            <div class="map-overlay-controls map-overlay-controls--row">
+              <button class="map-overlay-btn map-overlay-btn--text toggle-tags-btn" title="Show full tags" aria-label="Show full tags">Show Full Tags</button>
+              <button class="map-overlay-btn map-overlay-btn--text toggle-stands-btn" title="Hide stands" aria-label="Hide stands">Hide Stands</button>
               <button id="expandMapBtn" class="map-overlay-btn" title="Expand map" aria-label="Expand map">⤢</button>
             </div>
           </div>
@@ -11786,25 +11815,25 @@ app.get('/icao/:icao', async (req, res) => {
       </div>
 
       <div class="icao-portal-right">
-        <section class="card hidden" id="airportAtisCard">
-          <div class="atis-container">
-            <div class="atis-letter" id="atisLetter">?</div>
-            <div class="atis-body">
-              <div class="atis-header">
-                <span class="atis-source" id="atisSource"></span>
-              </div>
-              <pre class="atis-text" id="atisText"></pre>
-            </div>
+        <section class="card metar-card side-label-card" id="metarCard">
+          <span class="card-side-label">METAR</span>
+          <div class="card-side-body">
+            <pre class="metar-text" id="metarText">Loading METAR data…</pre>
+            <div class="metar-proxy-note" id="metarProxy" style="display:none;"></div>
           </div>
         </section>
 
-        <section class="card">
-          <div class="controllers-card">
-            <h3 class="controllers-heading" style="margin-top:0;">Online Controllers <span class="controllers-src">(VATSIM)</span></h3>
-            <div class="controllers-scroll">
-              <ul id="onlineControllers" class="atc-list">
-                <li class="atc-empty">Loading ATC...</li>
-              </ul>
+        <div class="hidden" id="airportAtisCard"></div>
+
+        <section class="card side-label-card controllers-side-card">
+          <span class="card-side-label">ONLINE CONTROLLERS</span>
+          <div class="card-side-body">
+            <div class="controllers-card">
+              <div class="controllers-scroll">
+                <ul id="onlineControllers" class="atc-list">
+                  <li class="atc-empty">Loading ATC...</li>
+                </ul>
+              </div>
             </div>
           </div>
         </section>
@@ -11812,45 +11841,52 @@ app.get('/icao/:icao', async (req, res) => {
     </div>
   </div>
 
-  <div class="icao-tab-panel" data-panel="docs">
-    <section class="card">
-      <h2 style="margin-top:0;">Pilot Documents</h2>
-      <table class="docs-table">
-        <thead>
-          <tr>
-            <th>File Name</th>
-            <th>Type</th>
-            <th>Validity</th>
-            <th class="hide-mobile">Last Updated</th>
-            <th>Submitted By</th>
-          </tr>
-        </thead>
-        <tbody id="airportDocs"></tbody>
-      </table>
-      <button class="action-btn hidden" id="openUploadDoc" data-icao="${icao}">➕ Upload Document</button>
-      <button class="action-btn hidden" id="requestDocAccess" data-icao="${icao}">🔐 Request access to upload documents</button>
+  <div class="icao-tab-panel docs-panel" data-panel="docs">
+    <section class="card side-label-card docs-pilot-card">
+      <span class="card-side-label">PILOT DOCUMENTS</span>
+      <div class="card-side-body">
+        <table class="docs-table">
+          <thead>
+            <tr>
+              <th>File Name</th>
+              <th>Type</th>
+              <th>Validity</th>
+              <th class="hide-mobile">Last Updated</th>
+              <th>Submitted By</th>
+            </tr>
+          </thead>
+          <tbody id="airportDocs"></tbody>
+        </table>
+        <button class="action-btn hidden" id="openUploadDoc" data-icao="${icao}">➕ Upload Document</button>
+        <button class="action-btn hidden" id="requestDocAccess" data-icao="${icao}">🔐 Request access to upload documents</button>
+        <div id="pilotDocsLoginHint" class="login-hint hidden">
+          Log in to request access to upload documents
+        </div>
+      </div>
     </section>
 
-    <section class="card" style="margin-top:16px;">
-      <h2 style="margin-top:0;">Available Scenery</h2>
-      <table class="docs-table" id="availableScenery">
-        <thead>
-          <tr>
-            <th>Sim</th>
-            <th>Name</th>
-            <th class="hide-mobile">Developer</th>
-            <th class="hide-mobile">Store</th>
-            <th>Type</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="sceneryRows">
-          <tr><td colspan="6" class="empty">Loading…</td></tr>
-        </tbody>
-      </table>
-      <button id="openSceneryModal" class="action-btn">➕ Submit scenery for this airport</button>
-      <div id="sceneryLoginHint" class="login-hint hidden">
-        Log in to submit scenery for this airport
+    <section class="card side-label-card docs-scenery-card">
+      <span class="card-side-label">AVAILABLE SCENERY</span>
+      <div class="card-side-body">
+        <table class="docs-table" id="availableScenery">
+          <thead>
+            <tr>
+              <th>Sim</th>
+              <th>Name</th>
+              <th class="hide-mobile">Developer</th>
+              <th class="hide-mobile">Store</th>
+              <th>Type</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="sceneryRows">
+            <tr><td colspan="6" class="empty">Loading…</td></tr>
+          </tbody>
+        </table>
+        <button id="openSceneryModal" class="action-btn">➕ Submit scenery for this airport</button>
+        <div id="sceneryLoginHint" class="login-hint hidden">
+          Log in to submit scenery for this airport
+        </div>
       </div>
     </section>
   </div>
@@ -11929,15 +11965,100 @@ app.get('/icao/:icao', async (req, res) => {
       }
     }
 
-    .metar-card { padding:12px 16px; }
-    .metar-header {
-      display:flex; align-items:center; gap:8px; margin-bottom:8px;
+    /* Side-label cards: horizontal type label sits in the top-left corner.
+       The label's colour is the at-a-glance type identifier — no left stripe. */
+    .side-label-card {
+      position: relative;
+      padding: 0 !important;
+      overflow: hidden;
     }
-    .metar-header svg { color:var(--accent); flex-shrink:0; }
-    .metar-title { font-weight:700; font-size:13px; color:var(--text); }
-    .metar-source {
-      font-size:11px; color:var(--muted); font-weight:400;
-      margin-left:auto;
+    .docs-panel > .side-label-card + .side-label-card { margin-top: 24px; }
+    .docs-pilot-card { --card-stripe: #a78bfa; }
+    .docs-scenery-card { --card-stripe: #14b8a6; }
+    .docs-pilot-card .action-btn,
+    .docs-scenery-card .action-btn {
+      align-self: flex-start;
+      margin-top: 12px;
+    }
+    /* Submitter's own pending scenery row — greyed out with a status badge */
+    .docs-scenery-card .scenery-pending td {
+      opacity: 0.55;
+    }
+    .docs-scenery-card .scenery-pending-badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 6px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: #fbbf24;
+      background: rgba(251, 191, 36, 0.12);
+      border: 1px solid rgba(251, 191, 36, 0.4);
+      border-radius: 4px;
+      opacity: 1;
+    }
+    .card-side-label {
+      position: absolute;
+      top: 0;
+      left: 0;
+      padding: 6px 14px;
+      background: var(--card-stripe, #38bdf8);
+      color: #fff;
+      font-weight: 700;
+      font-size: 11px;
+      line-height: 1;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      border-top-left-radius: var(--radius);
+      border-bottom-right-radius: 10px;
+      z-index: 1;
+    }
+    .card-side-body {
+      padding: 30px 16px 12px 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 100%;
+    }
+
+    .metar-card { --card-stripe: #60a5fa; }
+
+    /* ATIS sibling cards in the right column */
+    #airportAtisCard {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 0;
+    }
+    #airportAtisCard .atis-entry {
+      display: block;
+      background: linear-gradient(160deg, var(--panel), var(--panel));
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      margin: 0;
+    }
+    #airportAtisCard .vatsim-atis--dep,
+    #airportAtisCard .faa-atis--dep { --card-stripe: #f59e0b; }
+    #airportAtisCard .vatsim-atis--arr,
+    #airportAtisCard .faa-atis--arr { --card-stripe: #10b981; }
+    #airportAtisCard .vatsim-atis--atis { --card-stripe: #06b6d4; }
+    #airportAtisCard .faa-atis,
+    #airportAtisCard .faa-atis--atis { --card-stripe: #6b7280; }
+    #airportAtisCard .atis-row-header {
+      display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+    }
+    #airportAtisCard .atis-meta {
+      font-size: 11px; color: var(--muted);
+      display: flex; align-items: center; gap: 6px;
+    }
+    #airportAtisCard .atis-info-letter {
+      color: var(--text); font-weight: 700; font-size: 12px;
+      letter-spacing: 0.5px;
+    }
+    #airportAtisCard .atis-text {
+      color: var(--text);
     }
     .metar-text {
       font-family:'JetBrains Mono',ui-monospace,monospace;
@@ -11963,17 +12084,26 @@ app.get('/icao/:icao', async (req, res) => {
       background: transparent;
       border: 0;
       padding: 10px 18px;
-      color: var(--muted);
+      color: var(--text);
+      opacity: 0.65;
       cursor: pointer;
       font-size: 14px;
       font-weight: 600;
       border-bottom: 2px solid transparent;
       margin-bottom: -1px;
       white-space: nowrap;
-      transition: color .15s, border-color .15s;
+      transition: color .15s, opacity .15s, border-color .15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
-    .icao-tab:hover { color: var(--text); }
-    .icao-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .icao-tab-icon { width: 16px; height: 16px; flex-shrink: 0; }
+    .icao-tab:hover { opacity: 1; }
+    .icao-tab.active {
+      color: var(--accent);
+      opacity: 1;
+      border-bottom-color: var(--accent);
+    }
     .icao-tab-panel { display: none; }
     .icao-tab-panel.active { display: block; }
 
@@ -11986,17 +12116,144 @@ app.get('/icao/:icao', async (req, res) => {
     .icao-portal-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
     .icao-portal-right { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
     .icao-portal-right > section:last-child { flex: 1; display: flex; flex-direction: column; }
-    .icao-portal-right > section:last-child .controllers-card { flex: 1; display: flex; flex-direction: column; }
-    .icao-portal-right > section:last-child .controllers-scroll { flex: 1; }
+    .controllers-side-card { --card-stripe: #818cf8; }
+    .controllers-side-card .atc-item { gap: 10px; }
+    .atc-pos {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      background: color-mix(in srgb, var(--pos-color) 15%, transparent);
+      border: 1px solid color-mix(in srgb, var(--pos-color) 40%, transparent);
+      border-radius: 6px;
+      color: var(--pos-color);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      flex-shrink: 0;
+      flex-grow: 0;
+      width: 72px;
+      justify-content: flex-start;
+      box-sizing: border-box;
+    }
+    .atc-pos-icon { display: inline-flex; }
+    .atc-pos-icon svg { width: 13px; height: 13px; }
+    .controllers-side-card .atc-callsign { flex: 1; }
+    .controllers-side-card .atc-freq {
+      margin-left: auto;
+      font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      font-variant-numeric: tabular-nums;
+      color: #38bdf8;
+      background: rgba(2, 6, 23, 0.7);
+      padding: 4px 12px;
+      border-radius: 6px;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      text-shadow: 0 0 8px rgba(56, 189, 248, 0.45);
+      line-height: 1;
+    }
+    [data-theme="light"] .controllers-side-card .atc-freq {
+      color: #0369a1;
+      background: rgba(241, 245, 249, 0.9);
+      border-color: rgba(2, 132, 199, 0.3);
+      text-shadow: none;
+    }
+    .controllers-side-card .card-side-body {
+      justify-content: flex-start;
+      flex: 1;
+    }
+    .controllers-side-card .controllers-card {
+      flex: 1; display: flex; flex-direction: column;
+      height: auto;  /* override global .controllers-card { height: 340px } */
+      min-height: 280px;
+    }
+    .controllers-side-card .controllers-scroll { flex: 1; }
     .icao-portal-map-card {
       padding: 12px;
       flex: 1;
       display: flex;
       flex-direction: column;
-      min-height: 360px;
     }
-    .icao-portal-map-card .icao-map { flex: 1; min-height: 0; }
-    .icao-portal-map-card #icaoMap { height: 100%; }
+    .icao-portal-map-card .icao-map { flex: 1; min-height: 500px; }
+    .icao-portal-map-card #icaoMap { height: 100%; width: 100%; }
+    .map-overlay-controls--row { flex-direction: row !important; align-items: center; }
+    .map-overlay-btn--text {
+      width: auto;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
+    body.map-fullscreen { overflow: hidden; }
+    /* Aircraft hover tooltip */
+    .leaflet-tooltip.ac-tooltip {
+      background: rgba(2, 6, 23, 0.92);
+      color: #e5e7eb;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 6px;
+      padding: 6px 10px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+      white-space: nowrap;
+      font-family: inherit;
+    }
+    .leaflet-tooltip.ac-tooltip::before { display: none; }
+    /* Hide the under-marker callsign when permanent tags are on */
+    body.ac-tags-permanent .ac-label { display: none; }
+    /* Draggable permanent tag marker — looks identical to the hover tooltip
+       but is a real marker so it can be dragged. The connecting white line
+       to the aircraft is a Leaflet polyline drawn separately. */
+    .ac-tag-marker {
+      background: rgba(2, 6, 23, 0.92) !important;
+      color: #e5e7eb;
+      border: 1px solid rgba(56, 189, 248, 0.35) !important;
+      border-radius: 6px;
+      padding: 6px 10px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+      white-space: nowrap;
+      font-family: inherit;
+      cursor: move;
+      user-select: none;
+      width: auto !important;
+      height: auto !important;
+    }
+    .ac-tag-marker .ac-tag-box { background: transparent; border: 0; padding: 0; }
+    .ac-tt-callsign {
+      font-weight: 700; font-size: 13px; color: #fff;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .ac-tt-meta {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px; color: #cbd5e1; margin-top: 2px;
+    }
+    .ac-tt-wf {
+      background: linear-gradient(135deg, #f59e0b, #ea580c);
+      color: #fff; font-size: 9px; font-weight: 800;
+      padding: 1px 5px; border-radius: 3px; letter-spacing: 0.6px;
+    }
+    /* Hide stand labels when zoomed out — they're unreadable anyway and
+       hundreds of DOM nodes is the biggest perf cost on this map. */
+    body.icao-zoomed-out .stand-label { display: none !important; }
+    /* Match CartoDB dark tile color so missing tiles during zoom-out
+       read as a loading area instead of a jarring light flash. */
+    #icaoMap.leaflet-container { background: #1a1a1a; }
+    [data-theme="light"] #icaoMap.leaflet-container { background: #e8eef4; }
+    .icao-portal-map-card.is-fullscreen {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      margin: 0;
+      border-radius: 0;
+      background: var(--bg, #0b0f1a);
+    }
+    .icao-portal-map-card.is-fullscreen .icao-map {
+      aspect-ratio: auto;
+      min-height: 0;
+      height: 100%;
+      width: 100%;
+    }
     .icao-portal-grid .atc-list {
       list-style: none;
       padding: 0;
@@ -12030,7 +12287,6 @@ app.get('/icao/:icao', async (req, res) => {
     var icao = window.ICAO;
     if (!icao) return;
     var text = document.getElementById('metarText');
-    var source = document.getElementById('metarSource');
     var proxy = document.getElementById('metarProxy');
     fetch('/api/icao/' + icao + '/metar')
       .then(function(r) { return r.json(); })
@@ -12041,7 +12297,6 @@ app.get('/icao/:icao', async (req, res) => {
           return;
         }
         text.textContent = data.metar;
-        source.textContent = data.source || '';
         if (data.proxy) {
           proxy.textContent = 'No METAR available for ' + icao + '. Showing nearest: ' + data.proxy.icao + ' (' + data.proxy.distKm + ' km away)';
           proxy.style.display = '';
@@ -12224,6 +12479,8 @@ document.addEventListener('DOMContentLoaded', function () {
       if (!res.ok) throw new Error();
       msg.textContent = 'Scenery submitted for approval';
       msg.className = 'modal-message success';
+      // Refresh so the user sees their pending entry in the list immediately.
+      if (typeof window.loadScenery === 'function') window.loadScenery(icao);
       setTimeout(closeModal, 1500);
     })
     .catch(function () {
@@ -12262,12 +12519,12 @@ function loadAtis(icao) {
       container.innerHTML = '';
 
       const vatsimList = Array.isArray(data.vatsim) ? data.vatsim : [];
-const faa = data.faa;
+const faaList = Array.isArray(data.faa) ? data.faa : [];
 
 // Hide section only if neither exists
 container.innerHTML = '';
 
-if (!vatsimList.length && (!faa || !faa.available)) {
+if (!vatsimList.length && !faaList.length) {
   container.classList.add('hidden');
   return;
 }
@@ -12276,27 +12533,29 @@ container.classList.remove('hidden');
 
 // VATSIM ATIS (PRIMARY)
 vatsimList.forEach(function (atis) {
+  const type = (atis.atisType || '').toLowerCase();
+  let typeClass = 'vatsim-atis--atis';
+  let typeLabel = 'ATIS';
+  if (type.includes('dep')) { typeClass = 'vatsim-atis--dep'; typeLabel = 'DEPARTURE'; }
+  else if (type.includes('arr')) { typeClass = 'vatsim-atis--arr'; typeLabel = 'ARRIVAL'; }
+
   const card = document.createElement('section');
-  card.className = 'atis-entry vatsim-atis';
+  card.className = 'atis-entry vatsim-atis side-label-card ' + typeClass;
 
         card.innerHTML =
-          '<div class="atis-container">' +
-            '<div class="atis-letter vatsim">' +
-              (atis.letter || '—') +
-            '</div>' +
-            '<div class="atis-body">' +
-              '<div class="atis-title">' +
-                'VATSIM ATIS (' + atis.atisType + ')' +
-              '</div>' +
+          '<span class="card-side-label">' + typeLabel + '</span>' +
+          '<div class="card-side-body">' +
+            '<div class="atis-row-header">' +
               '<div class="atis-meta">' +
+                (atis.letter ? '<span class="atis-info-letter">INFO ' + atis.letter + '</span> · ' : '') +
                 atis.callsign +
-                (atis.frequency ? ' • ' + atis.frequency : '') +
+                (atis.frequency ? ' · ' + atis.frequency : '') +
               '</div>' +
-              '<div class="atis-text">' +
-                escapeHtml(atis.text) +
-              '</div>' +
-              '<button class="atis-expand-btn" onclick="this.previousElementSibling.classList.toggle(&quot;atis-expanded&quot;);this.textContent=this.previousElementSibling.classList.contains(&quot;atis-expanded&quot;)?&quot;Hide ATIS ▲&quot;:&quot;Show full ATIS ▼&quot;">Show full ATIS ▼</button>' +
             '</div>' +
+            '<div class="atis-text">' +
+              escapeHtml(atis.text) +
+            '</div>' +
+            '<button class="atis-expand-btn" onclick="this.previousElementSibling.classList.toggle(&quot;atis-expanded&quot;);this.textContent=this.previousElementSibling.classList.contains(&quot;atis-expanded&quot;)?&quot;Hide ATIS ▲&quot;:&quot;Show full ATIS ▼&quot;">Show full ATIS ▼</button>' +
           '</div>';
 
         container.appendChild(card);
@@ -12306,22 +12565,27 @@ vatsimList.forEach(function (atis) {
          2) FAA ATIS
          ========================= */
 
-      if (faa && faa.available) {
-  const card = document.createElement('section');
-  card.className = 'atis-entry faa-atis';
+      // Only show FAA ATIS as a fallback when there's no VATSIM ATIS at all.
+      if (vatsimList.length === 0) {
+        faaList.forEach(function (faa) {
+          const type = (faa.atisType || '').toLowerCase();
+          let typeClass = 'faa-atis--atis';
+          let typeLabel = 'FAA ATIS';
+          if (type.includes('dep')) { typeClass = 'faa-atis--dep'; typeLabel = 'DEPARTURE'; }
+          else if (type.includes('arr')) { typeClass = 'faa-atis--arr'; typeLabel = 'ARRIVAL'; }
 
+          const card = document.createElement('section');
+          card.className = 'atis-entry faa-atis side-label-card ' + typeClass;
 
-        card.innerHTML =
-          '<div class="atis-container">' +
-            '<div class="atis-letter faa">' +
-              (faa.letter || '—') +
-            '</div>' +
-            '<div class="atis-body">' +
-             '<div class="atis-title faa">' +
-  'FAA ATIS' +
-  '<span class="atis-badge">REFERENCE</span>' +
-'</div>' +
-
+          card.innerHTML =
+            '<span class="card-side-label">' + typeLabel + '</span>' +
+            '<div class="card-side-body">' +
+              '<div class="atis-row-header">' +
+                '<div class="atis-meta">' +
+                  (faa.letter ? '<span class="atis-info-letter">INFO ' + faa.letter + '</span> · ' : '') +
+                  '<span class="atis-badge">FAA REFERENCE</span>' +
+                '</div>' +
+              '</div>' +
               '<div class="atis-disclaimer">' +
                 'Not valid for VATSIM operations. Always follow VATSIM ATC.' +
               '</div>' +
@@ -12329,10 +12593,10 @@ vatsimList.forEach(function (atis) {
                 escapeHtml(faa.text) +
               '</div>' +
               '<button class="atis-expand-btn" onclick="this.previousElementSibling.classList.toggle(&quot;atis-expanded&quot;);this.textContent=this.previousElementSibling.classList.contains(&quot;atis-expanded&quot;)?&quot;Hide ATIS ▲&quot;:&quot;Show full ATIS ▼&quot;">Show full ATIS ▼</button>' +
-            '</div>' +
-          '</div>';
+            '</div>';
 
-        container.appendChild(card);
+          container.appendChild(card);
+        });
       }
     })
     .catch(err => {
@@ -12349,14 +12613,42 @@ function loadControllers(icao) {
       if (!ul) return;
 
       ul.innerHTML = data.length
-        ? data.map(c =>
-            '<li class="atc-item">' +
+        ? data.map(c => {
+            const pos = atcPosType(c.callsign);
+            return '<li class="atc-item">' +
+              '<span class="atc-pos" style="--pos-color:' + pos.color + '">' +
+                '<span class="atc-pos-icon">' + pos.icon + '</span>' +
+                '<span class="atc-pos-label">' + pos.label + '</span>' +
+              '</span>' +
               '<span class="atc-callsign">' + c.callsign + '</span>' +
               '<span class="atc-freq">' + c.frequency + '</span>' +
-            '</li>'
-          ).join('')
+            '</li>';
+          }).join('')
         : '<li class="atc-empty">No ATC online</li>';
     });
+}
+
+function atcPosType(callsign) {
+  const cs = String(callsign || '').toUpperCase();
+  const ICON = {
+    ctr:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a13 13 0 0 1 0 18"/><path d="M12 3a13 13 0 0 0 0 18"/></svg>',
+    app:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18a9 9 0 0 1 18 0"/><path d="M7 18a5 5 0 0 1 10 0"/><circle cx="12" cy="18" r="1"/></svg>',
+    dep:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="4"/><polyline points="6,10 12,4 18,10"/></svg>',
+    twr:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21V11l4-3 4 3v10"/><path d="M12 8V3"/><circle cx="12" cy="3" r="1"/></svg>',
+    gnd:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21 8 3"/><path d="M19 21 16 3"/><line x1="12" y1="6" x2="12" y2="8"/><line x1="12" y1="11" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="18"/></svg>',
+    rmp:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 17V7h4a3 3 0 0 1 0 6H9"/></svg>',
+    del:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="18" rx="2"/><rect x="9" y="2" width="6" height="4" rx="1"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="14" x2="15" y2="14"/><line x1="9" y1="17" x2="13" y2="17"/></svg>',
+    atis: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h3l5-4v14l-5-4H5z"/><path d="M17 8a5 5 0 0 1 0 8"/></svg>'
+  };
+  if (cs.endsWith('_ATIS'))                                 return { label: 'ATIS', color: '#06b6d4', icon: ICON.atis };
+  if (cs.endsWith('_DEL') || cs.endsWith('_CLD'))           return { label: 'DEL',  color: '#94a3b8', icon: ICON.del };
+  if (cs.endsWith('_GND'))                                  return { label: 'GND',  color: '#fbbf24', icon: ICON.gnd };
+  if (cs.endsWith('_RMP'))                                  return { label: 'RMP',  color: '#fb923c', icon: ICON.rmp };
+  if (cs.endsWith('_TWR'))                                  return { label: 'TWR',  color: '#10b981', icon: ICON.twr };
+  if (cs.endsWith('_DEP'))                                  return { label: 'DEP',  color: '#f59e0b', icon: ICON.dep };
+  if (cs.endsWith('_APP') || cs.endsWith('_TMA') || cs.endsWith('_RDR')) return { label: 'APP', color: '#38bdf8', icon: ICON.app };
+  if (cs.endsWith('_CTR') || cs.endsWith('_FSS'))           return { label: 'CTR',  color: '#a78bfa', icon: ICON.ctr };
+  return { label: 'ATC', color: '#94a3b8', icon: ICON.del };
 }
 
 function loadDepartures(icao) {
@@ -12405,18 +12697,36 @@ function loadAirportDocs(icao) {
       const tbody = document.getElementById('airportDocs');
       const uploadBtn = document.getElementById('openUploadDoc');
       const requestBtn = document.getElementById('requestDocAccess');
+      const loginHint = document.getElementById('pilotDocsLoginHint');
 
       if (!tbody) return;
 
-      // 🔒 Always reset both buttons
+      // Always reset
       uploadBtn?.classList.add('hidden');
       requestBtn?.classList.add('hidden');
+      loginHint?.classList.add('hidden');
 
-      // ✅ Mutually exclusive logic
       if (data.canUpload) {
+        // Has upload access — show the upload button only.
         uploadBtn?.classList.remove('hidden');
-      } else if (window.IS_LOGGED_IN) {
+      } else if (data.hasPendingRequest) {
+        // Existing request still pending review — show button as a status
+        // indicator (disabled, different label).
         requestBtn?.classList.remove('hidden');
+        if (requestBtn) {
+          requestBtn.disabled = true;
+          requestBtn.textContent = '⏳ Access request under review';
+        }
+      } else {
+        // No upload access and no pending request. Always show the
+        // request-access button. When logged out, disable it and show a
+        // login hint below.
+        requestBtn?.classList.remove('hidden');
+        if (requestBtn) {
+          requestBtn.disabled = !window.IS_LOGGED_IN;
+          requestBtn.textContent = '🔐 Request access to upload documents';
+        }
+        if (!window.IS_LOGGED_IN) loginHint?.classList.remove('hidden');
       }
 
       const docs = data.docs;
@@ -12444,16 +12754,6 @@ function loadAirportDocs(icao) {
 </script>
 
 
-<script>
-document.addEventListener('DOMContentLoaded', () => {
-  if (!window.IS_LOGGED_IN) return;
-
-  const btn = document.getElementById('requestDocAccess');
-  if (btn) {
-    btn.classList.remove('hidden');
-  }
-});
-</script>
 <script>
 document.addEventListener('DOMContentLoaded', async () => {
   if (!/\\/icao\\/[A-Z]{4}$/i.test(window.location.pathname)) return;
@@ -12554,7 +12854,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     modal.classList.add('hidden');
   }
 
-  btn.addEventListener('click', openModal);
+  btn.addEventListener('click', () => {
+    // Logged-out users get bounced to login (mirrors the scenery card flow).
+    if (!window.IS_LOGGED_IN) {
+      window.location.href = '/auth/login?redirect=' + encodeURIComponent(window.location.pathname);
+      return;
+    }
+    openModal();
+  });
   closeBtn.addEventListener('click', closeModal);
   if (backdrop) backdrop.addEventListener('click', closeModal);
 
@@ -12593,7 +12900,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       msgEl.style.color = 'var(--success)';
       msgEl.classList.remove('hidden');
       submitBtn.textContent = 'Sent';
-      btn.classList.add('hidden');
+      // Refresh the docs panel so the request button flips to its
+      // "Access request under review" state immediately.
+      if (typeof loadAirportDocs === 'function') loadAirportDocs(icao);
 
       setTimeout(closeModal, 2000);
     } catch (err) {
@@ -12718,11 +13027,9 @@ if (!window.IS_LOGGED_IN && hint) {
 }
 </script>
 <script>
-(function () {
-  const icao = "${icao}";
+window.loadScenery = function(icao) {
   const container = document.getElementById('availableScenery');
   const tbody = document.getElementById('sceneryRows');
-
   if (!container || !tbody) return;
 
   fetch('/api/icao/' + icao + '/scenery-links')
@@ -12738,12 +13045,20 @@ if (!window.IS_LOGGED_IN && hint) {
         return;
       }
 
-      tbody.innerHTML = rows.map(r =>
-        '<tr>' +
+      tbody.innerHTML = rows.map(r => {
+        const pending = !!r.pending;
+        const trClass = pending ? ' class="scenery-pending"' : '';
+        const pendingBadge = pending ? ' <span class="scenery-pending-badge">Pending Approval</span>' : '';
+        const reportBtn = pending
+          ? ''
+          : '<button class="scenery-report-btn" data-id="' + r.id + '" data-name="' + (r.name || '').replace(/"/g, '&quot;') + '" title="Report an issue">' +
+              '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>' +
+            '</button>';
+        return '<tr' + trClass + '>' +
           '<td><span class="sim-pill">' + r.sim + '</span></td>' +
           '<td><a href="' + r.url + '" target="_blank" rel="noopener">' +
             r.name +
-          '</a></td>' +
+          '</a>' + pendingBadge + '</td>' +
           '<td class="hide-mobile">' + (r.developer || '-') + '</td>' +
           '<td class="hide-mobile">' + (r.store || '-') + '</td>' +
           '<td>' +
@@ -12751,13 +13066,9 @@ if (!window.IS_LOGGED_IN && hint) {
               r.type +
             '</span>' +
           '</td>' +
-          '<td>' +
-            '<button class="scenery-report-btn" data-id="' + r.id + '" data-name="' + (r.name || '').replace(/"/g, '&quot;') + '" title="Report an issue">' +
-              '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>' +
-            '</button>' +
-          '</td>' +
-        '</tr>'
-      ).join('');
+          '<td>' + reportBtn + '</td>' +
+        '</tr>';
+      }).join('');
 
       // Hide report buttons if not logged in
       if (!window.IS_LOGGED_IN) {
@@ -12765,24 +13076,32 @@ if (!window.IS_LOGGED_IN && hint) {
           btn.style.display = 'none';
         });
       }
-
-      // Report button handler
-      container.addEventListener('click', function(e) {
-        var btn = e.target.closest('.scenery-report-btn');
-        if (!btn) return;
-        var modal = document.getElementById('sceneryReportModal');
-        document.getElementById('reportSceneryId').value = btn.dataset.id;
-        document.getElementById('reportSceneryName').textContent = btn.dataset.name;
-        modal.querySelectorAll('input[name="reason"]').forEach(function(r) { r.checked = false; });
-        document.getElementById('reportDetails').value = '';
-        document.getElementById('sceneryReportMsg').classList.add('hidden');
-        document.getElementById('submitReportBtn').disabled = false;
-        modal.classList.remove('hidden');
-      });
     })
     .catch(() => {
       tbody.innerHTML = '<tr><td colspan="6" class="empty">Failed to load scenery</td></tr>';
     });
+};
+
+(function () {
+  const icao = "${icao}";
+  const container = document.getElementById('availableScenery');
+  if (!container) return;
+
+  // Single delegated report-button handler (loadScenery may rerun many times).
+  container.addEventListener('click', function(e) {
+    var btn = e.target.closest('.scenery-report-btn');
+    if (!btn) return;
+    var modal = document.getElementById('sceneryReportModal');
+    document.getElementById('reportSceneryId').value = btn.dataset.id;
+    document.getElementById('reportSceneryName').textContent = btn.dataset.name;
+    modal.querySelectorAll('input[name="reason"]').forEach(function(r) { r.checked = false; });
+    document.getElementById('reportDetails').value = '';
+    document.getElementById('sceneryReportMsg').classList.add('hidden');
+    document.getElementById('submitReportBtn').disabled = false;
+    modal.classList.remove('hidden');
+  });
+
+  window.loadScenery(icao);
 })();
 </script>
 
@@ -13610,7 +13929,7 @@ app.post('/api/scenery/submit', requireLogin, async (req, res) => {
         store: store || null,
         url,
         type,
-        submittedBy: req.session.user.data.name || req.session.user.data.cid,
+        submittedBy: String(req.session.user.data.name || req.session.user.data.cid),
         approved: false
       }
     });
@@ -13771,7 +14090,6 @@ app.get('/api/icao/:icao/controllers', async (req, res) => {
     const r = await axios.get('https://data.vatsim.net/v3/vatsim-data.json');
 
     const controllers = r.data.controllers || [];
-    const atis = r.data.atis || [];
 
     /* =====================
        CTR (TOP LEVEL)
@@ -13795,42 +14113,26 @@ app.get('/api/icao/:icao/controllers', async (req, res) => {
         isAtis: false
       }));
 
-    /* =====================
-       ATIS (BOTTOM)
-       ===================== */
-    const airportAtis = atis
-      .filter(a => {
-        const cs = a.callsign?.toUpperCase();
-        return cs &&
-          cs.includes('_ATIS') &&
-          (
-            cs.startsWith(icao + '_') ||
-            (icao.startsWith('K') && cs.startsWith(icao.slice(1) + '_'))
-          );
-      })
-      .map(a => {
-        const cs = a.callsign.toUpperCase();
+    /* ATIS callsigns are shown in the dedicated ATIS card section above,
+       so they're intentionally excluded from this list. */
 
-        let atisType = 'general';
-        if (cs.includes('_D_ATIS')) atisType = 'departure';
-        else if (cs.includes('_A_ATIS')) atisType = 'arrival';
+    // Order: FSS, CTR, APP, DEP, TWR, GND, RMP, DEL — top-down by airspace.
+    const POS_ORDER = { FSS: 0, CTR: 1, APP: 2, TMA: 2, RDR: 2, DEP: 3, TWR: 4, GND: 5, RMP: 6, DEL: 7, CLD: 7 };
+    function posRank(callsign) {
+      const cs = String(callsign || '').toUpperCase();
+      for (const suffix of ['_FSS','_CTR','_APP','_TMA','_RDR','_DEP','_TWR','_GND','_RMP','_DEL','_CLD']) {
+        if (cs.endsWith(suffix)) return POS_ORDER[suffix.slice(1)];
+      }
+      return 99;
+    }
 
-        return {
-          callsign: a.callsign,
-          frequency: a.frequency || '—',
-          isAtis: true,
-          atisType
-        };
+    const all = [...ctrControllers, ...airportControllers]
+      .sort((a, b) => {
+        const r = posRank(a.callsign) - posRank(b.callsign);
+        return r !== 0 ? r : a.callsign.localeCompare(b.callsign);
       });
 
-    /* =====================
-       FINAL ORDERED OUTPUT
-       ===================== */
-    res.json([
-      ...ctrControllers,
-      ...airportControllers,
-      ...airportAtis
-    ]);
+    res.json(all);
 
   } catch (err) {
     console.error('[CONTROLLERS]', err.message);
@@ -13884,8 +14186,22 @@ app.get('/api/icao/:icao/docs', async (req, res) => {
       ? await canEditDocumentation(user.cid, icao)
       : false;
 
+    // True if the logged-in user has a PENDING documentation access request
+    // whose pattern (with wildcards) covers this specific airport.
+    let hasPendingRequest = false;
+    if (user && !canUpload) {
+      const pending = await prisma.documentationAccessRequest.findMany({
+        where: { cid: Number(user.cid), status: 'PENDING' },
+        select: { pattern: true }
+      });
+      hasPendingRequest = pending.some(r =>
+        matchesIcaoPattern(String(r.pattern || '').toUpperCase(), icao.toUpperCase())
+      );
+    }
+
     res.json({
   canUpload,
+  hasPendingRequest,
   docs: docs.map(d => {
     let scope = 'permanent';
     let scopeLabel = 'Permanent';

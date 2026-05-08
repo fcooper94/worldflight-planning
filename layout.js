@@ -806,21 +806,6 @@ window.location.href = '/icao/' + icao;
 
 
 
-<div id="mapModal" class="modal map-modal hidden">
-
-  <div class="map-modal-backdrop"></div>
-
-  <div class="map-modal-panel">
-    <div class="map-modal-header">
-      <span id="mapModalTitle">Airport Map</span>
-      <button id="closeMapModal" aria-label="Close map">✕</button>
-    </div>
-
-    <div class="icao-map">
-      <div id="mapModalMap"></div>
-    </div>
-  </div>
-</div>
 
 <div id="flightPlanModal" class="modal hidden">
   <div class="modal-backdrop"></div>
