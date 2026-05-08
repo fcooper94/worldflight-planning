@@ -15729,7 +15729,6 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
 
       ${affiliate ? `
       <section class="card side-label-card aff-identity-card">
-        <span class="card-side-label">WF Affiliate</span>
         <div class="card-side-body aff-identity-body">
           <div class="aff-identity-main">
             <div class="aff-identity-eyebrow">Official WorldFlight Affiliate</div>
@@ -16087,7 +16086,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
         flex-direction: row;
         align-items: center;
         gap: 22px;
-        padding: 38px 28px 26px;
+        padding: 26px 28px;
         position: relative;
         z-index: 1;
         min-height: 0;
@@ -16133,7 +16132,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
         .aff-identity-card .card-side-body {
           flex-direction: column;
           align-items: flex-start;
-          padding: 38px 20px 22px;
+          padding: 22px 20px;
         }
         .aff-identity-name { font-size: 28px; }
       }
