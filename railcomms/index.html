@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RailComms — Communications Reference</title>
+  <meta name="description" content="Full catalogue of inbound calls and signaller replies in RailComms — driver, signaller, shunter, crew, MOM call types and their wordings.">
+  <style>
+    :root {
+      --bg: #0b0f12;
+      --bg-card: #131a20;
+      --bg-card-hover: #182127;
+      --bg-row-alt: #11171c;
+      --border: #1f2a33;
+      --border-strong: #2c3a45;
+      --text: #e6edf3;
+      --text-dim: #8a98a6;
+      --text-muted: #5d6b78;
+      --accent: #84c424;
+      --accent-dim: #5a8418;
+      --accent-soft: rgba(132, 196, 36, 0.12);
+      --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
+      font-size: 15px;
+      line-height: 1.55;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Layout ── */
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    header.hero {
+      padding: 48px 0 32px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(132, 196, 36, 0.06) 0%, transparent 100%);
+    }
+
+    header.hero h1 {
+      margin: 0 0 8px;
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    header.hero h1 .accent { color: var(--accent); }
+
+    header.hero .subtitle {
+      margin: 0;
+      color: var(--text-dim);
+      font-size: 17px;
+    }
+
+    header.hero .meta {
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* ── Sticky nav ── */
+    nav.toc {
+      position: sticky;
+      top: 0;
+      background: rgba(11, 15, 18, 0.92);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      z-index: 100;
+      padding: 12px 0;
+    }
+
+    nav.toc ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    nav.toc a {
+      display: inline-block;
+      padding: 6px 14px;
+      color: var(--text-dim);
+      text-decoration: none;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+
+    nav.toc a:hover {
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    /* ── Main ── */
+    main { padding: 32px 0 64px; }
+
+    section {
+      margin-bottom: 56px;
+      scroll-margin-top: 70px;
+    }
+
+    section h2 {
+      font-size: 26px;
+      font-weight: 700;
+      margin: 0 0 8px;
+      letter-spacing: -0.01em;
+    }
+
+    section h2::before {
+      content: '';
+      display: inline-block;
+      width: 4px;
+      height: 24px;
+      background: var(--accent);
+      margin-right: 12px;
+      vertical-align: -3px;
+      border-radius: 2px;
+    }
+
+    section .section-intro {
+      color: var(--text-dim);
+      margin: 0 0 24px;
+      font-size: 15px;
+    }
+
+    h3 {
+      font-size: 19px;
+      font-weight: 600;
+      margin: 32px 0 4px;
+      color: var(--text);
+    }
+
+    h3 .pill {
+      display: inline-block;
+      margin-left: 10px;
+      padding: 2px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      border-radius: 999px;
+      vertical-align: 2px;
+    }
+
+    .pill.driver  { background: rgba(132, 196, 36, 0.18); color: #b3e85a; }
+    .pill.red     { background: rgba(248, 113, 113, 0.18); color: #fca5a5; }
+    .pill.signaller { background: rgba(96, 165, 250, 0.18); color: #93c5fd; }
+    .pill.shunter { background: rgba(251, 146, 60, 0.18); color: #fdba74; }
+    .pill.thirdparty { background: rgba(167, 139, 250, 0.18); color: #c4b5fd; }
+    .pill.special { background: rgba(244, 213, 122, 0.18); color: #fde68a; }
+
+    .note {
+      background: var(--accent-soft);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      padding: 10px 14px;
+      margin: 12px 0 18px;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .note strong { color: var(--accent); }
+
+    /* ── Tables ── */
+    .table-wrap {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      margin: 14px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      padding: 12px 16px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    thead th {
+      background: var(--bg-card-hover);
+      color: var(--text-dim);
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s ease;
+    }
+
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:nth-child(even) { background: var(--bg-row-alt); }
+    tbody tr:hover { background: var(--bg-card-hover); }
+
+    td.col-num {
+      width: 36px;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }
+
+    td.col-trigger {
+      width: 28%;
+      font-weight: 600;
+    }
+
+    td.col-trigger .role {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      margin-bottom: 2px;
+    }
+
+    .quote {
+      color: var(--text);
+      font-style: italic;
+    }
+
+    .quote::before { content: '"'; color: var(--accent); font-style: normal; font-weight: 700; }
+    .quote::after { content: '"'; color: var(--accent); font-style: normal; font-weight: 700; }
+
+    code, .var {
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', Menlo, Consolas, monospace;
+      font-size: 0.88em;
+      color: var(--accent);
+      background: var(--accent-soft);
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid rgba(132, 196, 36, 0.2);
+    }
+
+    .optional {
+      color: var(--text-muted);
+      font-style: italic;
+      font-size: 0.92em;
+    }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 0;
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+      line-height: 1.7;
+    }
+
+    footer .disclaimer {
+      max-width: 700px;
+      margin: 0 auto;
+    }
+
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    footer a:hover { text-decoration: underline; }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .container { padding: 0 16px; }
+      header.hero { padding: 32px 0 24px; }
+      header.hero h1 { font-size: 28px; }
+      header.hero .subtitle { font-size: 15px; }
+      nav.toc ul { gap: 2px; }
+      nav.toc a { padding: 5px 10px; font-size: 12px; }
+      section h2 { font-size: 22px; }
+
+      table { font-size: 13px; }
+      th, td { padding: 10px 12px; }
+      td.col-num { display: none; }
+      td.col-trigger { width: auto; }
+
+      /* Stack rows on very narrow screens */
+      .table-wrap.stack thead { display: none; }
+      .table-wrap.stack tr {
+        display: block;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      .table-wrap.stack td {
+        display: block;
+        padding: 4px 0;
+        width: auto;
+      }
+      .table-wrap.stack td:first-child {
+        padding-bottom: 6px;
+        border-bottom: 1px dashed var(--border);
+        margin-bottom: 6px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="hero">
+    <div class="container">
+      <h1><span class="accent">Rail</span>Comms — Communications Reference</h1>
+      <p class="subtitle">Every inbound call type, every signaller reply, exactly as the app speaks them.</p>
+      <p class="meta">Reflects the wording in the current release. Variables in <code>[brackets]</code> are filled in at call time.</p>
+    </div>
+  </header>
+
+  <nav class="toc">
+    <div class="container">
+      <ul>
+        <li><a href="#calls">Inbound Calls</a></li>
+        <li><a href="#replies-red">Red-signal Replies</a></li>
+        <li><a href="#replies-driver">Driver Replies</a></li>
+        <li><a href="#replies-route">Route Query</a></li>
+        <li><a href="#replies-shunter">Shunter</a></li>
+        <li><a href="#replies-signaller">Signaller</a></li>
+        <li><a href="#replies-thirdparty">Third-party</a></li>
+        <li><a href="#replies-tech">Technician</a></li>
+        <li><a href="#flags">State Flags</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="container">
+
+    <!-- ── INBOUND CALLS ─────────────────────────────────────── -->
+    <section id="calls">
+      <h2>Inbound calls</h2>
+      <p class="section-intro">What the caller says when they ring you. Every driver call opens with <em>"Hello, this is [head]…"</em> for consistency.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>Caller / Trigger</th>
+              <th>Spoken message</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="col-num">1</td><td class="col-trigger"><span class="role">Driver</span> Red signal</td><td><span class="quote">Hello, this is <span class="var">[head]</span> standing at signal <span class="var">[sig]</span></span></td></tr>
+            <tr><td class="col-num">2</td><td class="col-trigger"><span class="role">Driver</span> Unlit signal (lamp failure)</td><td><span class="quote">Hello, this is <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>. The signal is showing no aspect</span></td></tr>
+            <tr><td class="col-num">3</td><td class="col-trigger"><span class="role">Driver</span> Adverse change of aspect</td><td><span class="quote">Hello, this is <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>. I have received a change of aspect</span></td></tr>
+            <tr><td class="col-num">4</td><td class="col-trigger"><span class="role">Driver</span> Route query</td><td><span class="quote">Hello, this is <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>. I wanted to query the set route as I am booked via <span class="var">[via]</span></span></td></tr>
+            <tr><td class="col-num">5</td><td class="col-trigger"><span class="role">Driver</span> Delay</td><td><span class="quote">Hello, this is <span class="var">[head]</span> at <span class="var">[location]</span>. We are going to be delayed as <span class="var">[reason]</span>.</span> <span class="optional">(I will be as quick as I can.) (We should be ready to depart at <span class="var">[HH:MM]</span>)</span></td></tr>
+            <tr><td class="col-num">6</td><td class="col-trigger"><span class="role">Driver</span> Examined line — no obstructions</td><td><span class="quote">Hello, this is <span class="var">[head]</span>. I have examined the line as requested and found no obstructions</span></td></tr>
+            <tr><td class="col-num">7</td><td class="col-trigger"><span class="role">Driver</span> Ready to depart</td><td><span class="quote">Hello, this is <span class="var">[head]</span> at <span class="var">[location]</span>. We have resolved our issue and are now ready to depart</span></td></tr>
+            <tr><td class="col-num">8</td><td class="col-trigger"><span class="role">Driver</span> Ready at sidings</td><td><span class="quote">Hello, this is <span class="var">[head]</span> at <span class="var">[location]</span>. I am waiting to enter</span></td></tr>
+            <tr><td class="col-num">9</td><td class="col-trigger"><span class="role">Driver</span> CSD entry permission</td><td><span class="quote">Hello, this is <span class="var">[head]</span> standing at signal <span class="var">[sig]</span> within <span class="var">[entry]</span>. Request permission to enter.</span> <span class="optional">(Scheduled at <span class="var">[time]</span>) (, next stop will be <span class="var">[stop]</span> Platform <span class="var">[N]</span>)</span></td></tr>
+            <tr><td class="col-num">10</td><td class="col-trigger"><span class="role">Shunter</span> Train ready (sidings)</td><td><span class="quote">Hello, this is the Shunter in <span class="var">[location]</span>. Train <span class="var">[head]</span> is ready.</span> <span class="optional">(Next stop is <span class="var">[stop]</span> Platform <span class="var">[N]</span>)</span></td></tr>
+            <tr><td class="col-num">11</td><td class="col-trigger"><span class="role">Shunter</span> CSD permission (format 1)</td><td><span class="quote">Hello, <span class="var">[panel]</span> Signaller, this is the Shunter within <span class="var">[entry]</span>. I have <span class="var">[head]</span> at signal <span class="var">[sig]</span>. Request permission to enter.</span> <span class="optional">(Scheduled at <span class="var">[time]</span>)</span></td></tr>
+            <tr><td class="col-num">12</td><td class="col-trigger"><span class="role">Shunter</span> CSD permission (format 2)</td><td><span class="quote">Hello Signaller. This is the Shunter at <span class="var">[entry]</span>. I have <span class="var">[head]</span> at entry point <span class="var">[sig]</span> who is ready.</span> <span class="optional">(Scheduled at <span class="var">[time]</span>)</span>. <span class="quote">Request permission for them to enter</span></td></tr>
+            <tr><td class="col-num">13</td><td class="col-trigger"><span class="role">Crew</span> Waiting at station</td><td><span class="quote">Hello, this is <span class="var">[head]</span> at <span class="var">[location]</span> station. I am waiting for the train to arrive. As soon as the train is here, my crew and I will complete all our required activities and be ready to depart as soon as possible</span></td></tr>
+            <tr><td class="col-num">14</td><td class="col-trigger"><span class="role">Signaller</span> Train running early</td><td><span class="quote">Hello <span class="var">[panel]</span>, this is <span class="var">[from]</span> Signaller. I have <span class="var">[head]</span> running early via <span class="var">[via]</span>. It can be in your area at about <span class="var">[time]</span>. Shall I let it continue or hold it back until its booked time of <span class="var">[booked]</span>?</span></td></tr>
+            <tr><td class="col-num">15</td><td class="col-trigger"><span class="role">Signaller</span> Train waiting (advisory)</td><td><span class="quote">Hello, <span class="var">[panel]</span> Signaller, this is <span class="var">[from]</span>. I currently have <span class="var">[head]</span> waiting at <span class="var">[location]</span></span></td></tr>
+            <tr><td class="col-num">16</td><td class="col-trigger"><span class="role">MOM</span> Failure fixed</td><td><span class="quote">Hello Signaller, this is the MOM down at the <span class="var">[failure type]</span> in the <span class="var">[area]</span>. Good news, the team have been able to fix the issue and you may resume normal working</span></td></tr>
+            <tr><td class="col-num">17</td><td class="col-trigger"><span class="role">Generic</span> Driver with signal known</td><td><span class="quote">Hello, this is <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>. <span class="var">[raw SimSig message]</span></span></td></tr>
+            <tr><td class="col-num">18</td><td class="col-trigger"><span class="role">Generic</span> No headcode/signal</td><td><span class="quote">Hello, <span class="var">[panel]</span> Signaller, <span class="var">[position]</span>, this is <span class="var">[raw SimSig message]</span></span></td></tr>
+            <tr><td class="col-num">19</td><td class="col-trigger"><span class="role">Other</span> Non-train caller, no body</td><td><span class="quote">Hello, <span class="var">[panel]</span> Signaller. This is <span class="var">[caller]</span></span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── REPLIES — RED SIGNAL ─────────────────────────────── -->
+    <section id="replies-red">
+      <h2>Replies — Red-signal driver call <span class="pill red">Red signal</span></h2>
+      <p class="section-intro">Every reply opens with <span class="quote">Hello <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>.</span> followed by the appropriate body.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead>
+            <tr><th>Reply chosen</th><th>Spoken text after the intro</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="col-trigger">Wait N minutes (grouped 2/5/15)</td><td><span class="quote">Please wait <span class="var">[N]</span> minutes before phoning back</span></td></tr>
+            <tr><td class="col-trigger">Wait until booked HH:MM</td><td><span class="quote">As you are running early, wait at signal <span class="var">[sig]</span> until your booked time of <span class="var">[HH:MM]</span> before phoning back</span></td></tr>
+            <tr><td class="col-trigger">Pass at danger</td><td><span class="quote">I am authorising you to pass signal <span class="var">[sig]</span> at danger. Proceed at caution to the next signal and be prepared to stop short of any obstruction</span></td></tr>
+            <tr><td class="col-trigger">Pass at danger + examine line<br><span class="optional">(first time)</span></td><td><span class="quote">I am authorising you to pass signal <span class="var">[sig]</span> at danger. Proceed at caution to the next signal and be prepared to stop short of any obstruction. I also require you to examine the line between <span class="var">[sig]</span> and the next signal</span></td></tr>
+            <tr><td class="col-trigger">Pass at danger + examine line<br><span class="optional">(train was already examining)</span></td><td><span class="quote">I am authorising you to pass signal <span class="var">[sig]</span> at danger. Proceed at caution to the next signal and be prepared to stop short of any obstruction. Please continue to examine the line and report further</span></td></tr>
+            <tr><td class="col-trigger">Examine line only</td><td><span class="quote">I need you to examine the line between here and the next signal. Proceed at caution and report any obstructions</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── REPLIES — STANDARD DRIVER ────────────────────────── -->
+    <section id="replies-driver">
+      <h2>Replies — Standard driver call <span class="pill driver">Driver</span></h2>
+      <p class="section-intro">Used for unlit signal, adverse aspect, examine results, delay reports, ready-to-depart, generic driver messages.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead>
+            <tr><th>Reply chosen</th><th>Spoken text</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="col-trigger">Pass at danger</td><td><span class="quote">Driver of <span class="var">[head]</span>, this is the <span class="var">[panel]</span> signaller. I am authorising you to pass signal <span class="var">[sig]</span> at danger. Proceed at caution to the next signal and be prepared to stop short of any obstruction</span></td></tr>
+            <tr><td class="col-trigger">Pass at danger + examine<br><span class="optional">(first time)</span></td><td>…same + <span class="quote">I also require you to examine the line between <span class="var">[sig]</span> and the next signal</span></td></tr>
+            <tr><td class="col-trigger">Pass at danger + examine<br><span class="optional">(already examining)</span></td><td>…same + <span class="quote">Please continue to examine the line and report further</span></td></tr>
+            <tr><td class="col-trigger">Pass unlit signal</td><td><span class="quote">Driver of <span class="var">[head]</span>, this is the <span class="var">[panel]</span> signaller. We have a signal lamp failure here at signal <span class="var">[sig]</span>. I am authorising you to pass signal <span class="var">[sig]</span> in its unlit state. Proceed at caution to the next signal</span></td></tr>
+            <tr><td class="col-trigger">Pass unlit + examine</td><td>…same + <span class="quote">and examine the line. Report any obstructions</span></td></tr>
+            <tr><td class="col-trigger">Wait N minutes <span class="optional">(generic fallback)</span></td><td><span class="quote">Hello <span class="var">[head]</span>, standing at signal <span class="var">[sig]</span>, showing red. Please wait <span class="var">[N]</span> minutes</span></td></tr>
+            <tr><td class="col-trigger">Examine line only</td><td><span class="quote"><span class="var">[head]</span>, I need you to examine the line between signal <span class="var">[sig]</span> and the next signal. Proceed at caution and report any obstructions</span></td></tr>
+            <tr><td class="col-trigger">Continue examining</td><td><span class="quote">Thanks Driver, can you continue to examine the line and report further</span></td></tr>
+            <tr><td class="col-trigger">Acknowledge "no obstructions"</td><td><span class="quote">Thanks Driver, I copy that no obstructions were found</span></td></tr>
+            <tr><td class="col-trigger">Acknowledge delay</td><td><span class="quote">Thanks Driver, understood you are delayed due to <span class="var">[reason]</span></span></td></tr>
+            <tr><td class="col-trigger">Yes, signal will be replaced</td><td><span class="quote">Thank you driver, you can expect a change of aspect</span></td></tr>
+            <tr><td class="col-trigger">No, signal will not be replaced</td><td><span class="quote">Thank you driver</span></td></tr>
+            <tr><td class="col-trigger">Ready to depart ack</td><td><span class="quote">Hello <span class="var">[head]</span>, I understand you are now ready to depart. Thanks, Signaller out</span></td></tr>
+            <tr><td class="col-trigger">Continue after speaking to control</td><td><span class="quote"><span class="var">[head]</span>, understood. Continue normally unless otherwise instructed</span></td></tr>
+            <tr><td class="col-trigger">Crew waiting ack</td><td><span class="quote">Thank you for the update driver</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note"><strong>Adverse aspect override:</strong> when the call type is adverse-aspect, the "Continue after speaking" reply becomes <span class="quote">Hello Driver. Please continue and obey all other signals</span></div>
+    </section>
+
+    <!-- ── REPLIES — ROUTE QUERY ────────────────────────────── -->
+    <section id="replies-route">
+      <h2>Replies — Route query <span class="pill special">Route query</span></h2>
+      <p class="section-intro">Driver calls because the set route doesn't match the booked path.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead><tr><th>Reply chosen</th><th>Spoken text</th></tr></thead>
+          <tbody>
+            <tr><td class="col-trigger">Wait N minutes</td><td><span class="quote">Hello driver of <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>. Please remain at <span class="var">[sig]</span> and wait <span class="var">[N]</span> minutes. The route will be set so you can pass via <span class="var">[via]</span></span></td></tr>
+            <tr><td class="col-trigger">Abandon timetable</td><td><span class="quote">Hello driver of <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>. I am advised by route control that you are to abandon your timetable</span></td></tr>
+            <tr><td class="col-trigger">Bypass X then keep to timetable</td><td><span class="quote">Hello driver of <span class="var">[head]</span> standing at signal <span class="var">[sig]</span>. I am advised by route control that you are to bypass <span class="var">[X]</span> and continue with the remainder of your timetable</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── REPLIES — SHUNTER ────────────────────────────────── -->
+    <section id="replies-shunter">
+      <h2>Replies — Shunter / sidings <span class="pill shunter">Shunter</span></h2>
+      <p class="section-intro">Permission flow for trains entering or exiting yards / CSDs.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead><tr><th>Reply chosen</th><th>Spoken text</th></tr></thead>
+          <tbody>
+            <tr><td class="col-trigger">Permission granted for X to enter</td><td><span class="quote">Ok, <span class="var">[X]</span> has permission to enter. Thank you Signaller</span></td></tr>
+            <tr><td class="col-trigger">Call back in N minutes</td><td><span class="quote">Hello Shunter, call back in <span class="var">[N]</span> minutes</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── REPLIES — SIGNALLER ──────────────────────────────── -->
+    <section id="replies-signaller">
+      <h2>Replies — Signaller-to-signaller <span class="pill signaller">Signaller</span></h2>
+      <p class="section-intro">Used when the caller is another signaller (advisory or early-running). Phrasing is peer-to-peer rather than authoritative.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead><tr><th>Reply chosen</th><th>Spoken text</th></tr></thead>
+          <tbody>
+            <tr><td class="col-trigger">Wait N minutes</td><td><span class="quote">Understood, they can expect to wait <span class="var">[N]</span> minutes further. Phone me back if it is longer than that</span></td></tr>
+            <tr><td class="col-trigger">Call back in N</td><td><span class="quote">Give me <span class="var">[N]</span> minutes. Phone me back after that</span></td></tr>
+            <tr><td class="col-trigger">Ok</td><td><span class="quote">Ok, Thanks. I will take a look now</span></td></tr>
+            <tr><td class="col-trigger">Let X run early</td><td><span class="quote">Ok, let <span class="var">[X]</span> come through</span></td></tr>
+            <tr><td class="col-trigger">Hold X back</td><td><span class="quote">Can you hold <span class="var">[X]</span> back until their booked time please</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── REPLIES — THIRD PARTY ────────────────────────────── -->
+    <section id="replies-thirdparty">
+      <h2>Replies — Third-party caller <span class="pill thirdparty">Third-party</span></h2>
+      <p class="section-intro">Token huts, ground frames, level crossing keepers — replies talk <em>about</em> the driver in third person rather than <em>to</em> them.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead><tr><th>Reply chosen</th><th>Spoken text</th></tr></thead>
+          <tbody>
+            <tr><td class="col-trigger">Pass at danger</td><td><span class="quote">Ok, the driver of <span class="var">[head]</span> is authorised to pass signal <span class="var">[sig]</span> at danger. Tell them to proceed at caution to the next signal and be prepared to stop short of any obstruction</span></td></tr>
+            <tr><td class="col-trigger">Pass at danger + examine</td><td><span class="quote">Ok, the driver of <span class="var">[head]</span> is authorised to pass signal <span class="var">[sig]</span> at danger. Tell them to proceed at caution and continue to examine the line. They need to report any obstructions</span></td></tr>
+            <tr><td class="col-trigger">Pass unlit signal</td><td><span class="quote">Ok, the driver of <span class="var">[head]</span> is authorised to pass signal <span class="var">[sig]</span> in its unlit state. Tell them to proceed at caution to the next signal</span></td></tr>
+            <tr><td class="col-trigger">Pass unlit + examine</td><td><span class="quote">Ok, the driver of <span class="var">[head]</span> is authorised to pass signal <span class="var">[sig]</span> in its unlit state. Tell them to proceed at caution and examine the line. They need to report any obstructions</span></td></tr>
+            <tr><td class="col-trigger">Wait N minutes</td><td><span class="quote">Ok, tell the driver to remain at signal <span class="var">[sig]</span> and standby for <span class="var">[N]</span> minutes. Get them to phone back if the signal hasn't cleared</span></td></tr>
+            <tr><td class="col-trigger">Examine line only</td><td><span class="quote">Ok, I need the driver to examine the line between signal <span class="var">[sig]</span> and the next signal. Tell them to proceed at caution and report any obstructions</span></td></tr>
+            <tr><td class="col-trigger">Continue examining</td><td><span class="quote">Ok, tell the driver to continue examining the line and report further</span></td></tr>
+            <tr><td class="col-trigger">Continue after speaking to control</td><td><span class="quote">Ok, tell the driver they can continue normally</span></td></tr>
+            <tr><td class="col-trigger">Call back in N</td><td><span class="quote">Ok, get the driver to call back in <span class="var">[N]</span> minutes</span></td></tr>
+            <tr><td class="col-trigger">Ok</td><td><span class="quote">Ok Thanks</span></td></tr>
+            <tr><td class="col-trigger">Acknowledge "no obstructions"</td><td><span class="quote">Ok, thank you. No obstructions found</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── REPLIES — TECHNICIAN ─────────────────────────────── -->
+    <section id="replies-tech">
+      <h2>Replies — Technician / MOM "failure fixed" <span class="pill special">Tech</span></h2>
+      <div class="table-wrap stack">
+        <table>
+          <thead><tr><th>Reply chosen</th><th>Spoken text</th></tr></thead>
+          <tbody>
+            <tr><td class="col-trigger">Any reply matching "failure fixed"</td><td><span class="quote">Good news. Thanks for your help. I shall commence normal working</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── STATE FLAGS ──────────────────────────────────────── -->
+    <section id="flags">
+      <h2>State flags</h2>
+      <p class="section-intro">Internal flags that decide which branch of the reply formatter fires. Useful when reasoning about why a particular reply wording was chosen.</p>
+
+      <div class="table-wrap stack">
+        <table>
+          <thead>
+            <tr><th>Flag</th><th>Set when…</th><th>Effect</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>isShunterCall</code></td><td>Caller name matches <code>/shunter/i</code>, or driver pattern from sidings</td><td>Adapts shunter-style permission and call-back wording</td></tr>
+            <tr><td><code>isSignallerCall</code></td><td>Sig advisory or early-running signaller call detected</td><td>Switches to peer-to-peer phrasing</td></tr>
+            <tr><td><code>isThirdPartyCall</code></td><td>Caller is not Driver/Signaller/Shunter and no headcode</td><td>All replies become 3rd-person about the driver</td></tr>
+            <tr><td><code>isUnlitSignal</code></td><td>Driver message contains "unlit signal"</td><td>Enables unlit-state pass authorisation wording</td></tr>
+            <tr><td><code>isAdverseAspect</code></td><td>Message contains "adverse change of aspect"</td><td>"Continue after speaking" → "obey all other signals" override</td></tr>
+            <tr><td><code>isRouteQuery</code></td><td>Driver message matches route query parser</td><td>Uses route-control wording for replies</td></tr>
+            <tr><td><code>isReadyToDepart</code></td><td>Message matches the ready-to-depart parser</td><td>Acknowledge with "Signaller out" close</td></tr>
+            <tr><td><code>isRedSignalCall</code></td><td>Message matches "waiting at red signal" or "at signal X displaying red"</td><td>Every reply opens with "Hello [head] standing at signal [sig]."</td></tr>
+            <tr><td><code>examiningTrains[head]</code></td><td>Signaller previously sent any examine-related reply for this train</td><td>Switches "I also require you to examine" → "Please continue to examine"</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note">All flags reset between calls. <code>examiningTrains</code> and <code>trainSignalCache</code> persist across calls within the same SimSig session and clear on disconnect.</div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="container">
+      <div class="disclaimer">
+        <strong>RailComms</strong> is an independent, fan-made companion tool for the <a href="https://www.simsig.co.uk">SimSig</a> railway simulator.
+        It is <strong>not affiliated with, endorsed by, or sponsored by SimSig, Network Rail, or any railway operator or authority</strong>.
+        "SimSig" is the property of its respective owners and is referenced only to describe the simulator that RailComms interoperates with.
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
