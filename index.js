@@ -12062,12 +12062,12 @@ app.get('/admin/documents-scenery', requireAdmin, (req, res) => {
       pendingScenery = pendingScenery.filter(x => x.id !== id);
       renderPending(); refreshBadges();
     } else if (action === 'delete-scenery-from-report') {
-      if (!confirm('Delete this scenery? The report will also be marked resolved.')) return;
-      const reportId = Number(btn.dataset.reportId);
+      if (!confirm('Delete this scenery? Its open reports are cleared with it.')) return;
       const r1 = await fetch('/admin/api/scenery/' + id + '/reject', { method: 'POST' });
       if (!r1.ok) return alert('Delete failed');
-      await fetch('/admin/api/scenery/reports/' + reportId + '/resolve', { method: 'POST' });
-      sceneryReports = sceneryReports.filter(x => x.id !== reportId);
+      // Reports cascade-delete with the scenery row, so drop every report
+      // pointing at it - not just the one whose button was clicked.
+      sceneryReports = sceneryReports.filter(x => !x.scenery || x.scenery.id !== id);
       allScenery = allScenery.filter(x => x.id !== id);
       renderReports(); renderScenery(); refreshBadges();
     } else if (action === 'dismiss-report') {
@@ -15116,7 +15116,9 @@ app.get('/admin/api/scenery/reports', requireAdmin, async (req, res) => {
 app.post('/admin/api/scenery/reports/:id/resolve', requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    await prisma.sceneryReport.update({
+    // updateMany, not update: the report may already be gone (it cascade-deletes
+    // with its scenery row), and a no-op should not 500.
+    await prisma.sceneryReport.updateMany({
       where: { id },
       data: {
         resolved: true,
