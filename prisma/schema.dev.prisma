@@ -50,6 +50,10 @@ model AffiliateMember {
   affiliateId Int
   cid         Int
   active      Boolean  @default(true)
+  /// Manages this affiliate as if they were its main CID: edit bookings,
+  /// claim sectors, manage members. Per-affiliate on purpose - someone can
+  /// manage one affiliate and be an ordinary member of another.
+  manager     Boolean  @default(false)
   addedAt     DateTime @default(now())
 
   @@unique([affiliateId, cid])

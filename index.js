@@ -2409,10 +2409,19 @@ async function loadAffiliateOwners() {
   try {
     const rows = await prisma.affiliate.findMany({
       where: { hasMembers: true },
-      select: { cid: true }
+      select: { id: true, cid: true }
     });
     affiliateOwnerCids.clear();
     rows.forEach(r => { if (r.cid) affiliateOwnerCids.add(Number(r.cid)); });
+
+    // Manager members act for their affiliate as if they were its main CID,
+    // so they belong in the set that gates Manage Members. The page itself
+    // still scopes to the affiliates they actually manage.
+    const managers = await prisma.affiliateMember.findMany({
+      where: { active: true, manager: true, affiliateId: { in: rows.map(r => r.id) } },
+      select: { cid: true }
+    }).catch(() => []);
+    managers.forEach(m => { if (m.cid) affiliateOwnerCids.add(Number(m.cid)); });
   } catch (e) {}
 }
 
@@ -2420,6 +2429,8 @@ function isAffiliate(cid) {
   return !!cid && affiliateCids.has(Number(cid));
 }
 
+// Coarse gate only: true if the CID manages at least one affiliate, as main
+// CID or manager member. Pages scope to the specific affiliates themselves.
 function canManageAffiliateMembers(cid) {
   return !!cid && affiliateOwnerCids.has(Number(cid));
 }
@@ -19097,19 +19108,123 @@ app.post('/api/tobt/update-callsign', requireLogin, async (req, res) => {
 // Resolve "the user's primary affiliate":
 //   1. Affiliate where user is the main CID (lowest id wins if multiple)
 //   2. Otherwise, Affiliate the user belongs to as an AffiliateMember
-async function resolveUserAffiliate(cid) {
-  let aff = await prisma.affiliate.findFirst({
-    where: { cid },
-    orderBy: { id: 'asc' }
-  });
-  if (!aff) {
-    const m = await prisma.affiliateMember.findFirst({
-      where: { cid },
-      orderBy: { id: 'asc' }
-    });
-    if (m) aff = await prisma.affiliate.findUnique({ where: { id: m.affiliateId } });
+/* Every affiliate a CID may act for, each tagged with how:
+
+     owner   - the affiliate's main CID
+     manager - an active member flagged AffiliateMember.manager, who acts for
+               the affiliate as if they were its main CID
+     member  - an ordinary active member
+
+   Someone can hold different roles on different affiliates, which is the whole
+   point of the per-membership flag: manage one, ride along on another. */
+async function resolveUserAffiliates(cid) {
+  const n = Number(cid);
+  if (!n) return [];
+
+  const [owned, memberships] = await Promise.all([
+    prisma.affiliate.findMany({ where: { cid: n }, orderBy: { id: 'asc' } }).catch(() => []),
+    prisma.affiliateMember.findMany({
+      where: { cid: n, active: true },
+      select: { affiliateId: true, manager: true }
+    }).catch(() => [])
+  ]);
+
+  const byId = new Map(owned.map(a => [a.id, { ...a, affiliateRole: 'owner' }]));
+  const extra = memberships.filter(m => !byId.has(m.affiliateId));
+  if (extra.length) {
+    const rows = await prisma.affiliate.findMany({
+      where: { id: { in: extra.map(m => m.affiliateId) } }
+    }).catch(() => []);
+    const isManager = new Map(extra.map(m => [m.affiliateId, !!m.manager]));
+    rows.forEach(a => byId.set(a.id, {
+      ...a,
+      affiliateRole: isManager.get(a.id) ? 'manager' : 'member'
+    }));
   }
-  return aff;
+
+  return [...byId.values()].sort((a, b) => a.id - b.id);
+}
+
+/* One affiliate for a CID. `preferredId` picks a specific one out of the list
+   (the ?id= on the HQ pages) and is ignored when it isn't one of theirs, so a
+   hand-typed id can't reach someone else's affiliate. */
+async function resolveUserAffiliate(cid, preferredId = null) {
+  const list = await resolveUserAffiliates(cid);
+  if (!list.length) return null;
+  if (preferredId) {
+    const hit = list.find(a => a.id === Number(preferredId));
+    if (hit) return hit;
+  }
+  return list[0];
+}
+
+/* Acts for the affiliate with full rights - main CID, or a manager member. */
+function actsForAffiliate(affiliate) {
+  return affiliate?.affiliateRole === 'owner' || affiliate?.affiliateRole === 'manager';
+}
+
+/* Same question straight from the database, for endpoints that are handed an
+   affiliate id rather than a resolved row. */
+async function canManageAffiliate(cid, affiliateId) {
+  const n = Number(cid), id = Number(affiliateId);
+  if (!n || !id) return false;
+  const aff = await prisma.affiliate.findUnique({ where: { id } }).catch(() => null);
+  if (!aff) return false;
+  if (Number(aff.cid) === n) return true;
+  const m = await prisma.affiliateMember.findFirst({
+    where: { affiliateId: id, cid: n, active: true, manager: true },
+    select: { id: true }
+  }).catch(() => null);
+  return !!m;
+}
+
+/* Pick-one screen shown before the HQ or Manage Members when a CID belongs to
+   more than one affiliate. Without it the pages silently land on whichever
+   affiliate sorts first and there is no way to reach the others. */
+const AFFILIATE_ROLE_LABEL = { owner: 'Main CID', manager: 'Manager', member: 'Member' };
+function renderAffiliateChooser({ user, isAdmin, affiliates, target, title }) {
+  const cards = affiliates.map(a => {
+    const label = AFFILIATE_ROLE_LABEL[a.affiliateRole] || 'Member';
+    const accent = a.affiliateRole === 'member' ? 'var(--muted)' : 'var(--accent)';
+    return `
+      <a href="${target}?id=${a.id}" class="card aff-pick">
+        <div class="aff-pick-cs">${escapeHtml(a.callsign || '')}</div>
+        <div class="aff-pick-name">${escapeHtml(a.name || a.callsign || 'Affiliate')}</div>
+        <div class="aff-pick-meta">
+          <span class="aff-pick-role" style="color:${accent};border-color:${accent};">${label}</span>
+          ${a.simType ? '<span class="aff-pick-sim">' + escapeHtml(a.simType) + '</span>' : ''}
+        </div>
+      </a>`;
+  }).join('');
+
+  const content = `
+  <section style="max-width:900px;margin:48px auto 0;padding:0 16px;">
+    <h2 style="margin:0 0 6px;color:var(--accent);">Choose an affiliate</h2>
+    <p style="color:var(--muted);font-size:13.5px;margin:0 0 24px;">
+      Your account is linked to ${affiliates.length} affiliates. Pick the one you want to work on —
+      you can switch again from the header at any time.
+    </p>
+    <div class="aff-pick-grid">${cards}</div>
+  </section>
+  <style>
+    .aff-pick-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:16px; }
+    .aff-pick {
+      display:block; padding:20px; text-decoration:none; color:inherit;
+      border:1px solid var(--border); border-radius:var(--radius,10px);
+      transition:border-color 0.15s, transform 0.15s;
+    }
+    .aff-pick:hover { border-color:var(--accent); transform:translateY(-2px); }
+    .aff-pick-cs { font-family:ui-monospace,Consolas,monospace; font-size:20px; font-weight:700; color:var(--text); }
+    .aff-pick-name { font-size:13px; color:var(--muted); margin-top:2px; }
+    .aff-pick-meta { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+    .aff-pick-role {
+      font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em;
+      border:1px solid; border-radius:5px; padding:2px 7px;
+    }
+    .aff-pick-sim { font-size:11px; color:var(--muted); }
+  </style>`;
+
+  return renderLayout({ title: title || 'Choose an affiliate', user, isAdmin, content, layoutClass: 'dashboard-full' });
 }
 
 /* Shared HQ stylesheet — used by both the Affiliate HQ and the WF Team HQ
@@ -19118,6 +19233,12 @@ const HQ_STYLES = `    <style>
       .roster-tip { display:none;position:absolute;bottom:calc(100% + 8px);right:0;width:240px;padding:10px 14px;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;line-height:1.6;font-weight:400;box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:100;pointer-events:none;white-space:normal; }
       .roster-tip::before { content:'';position:absolute;bottom:-6px;right:14px;width:10px;height:10px;background:var(--panel);border-right:1px solid var(--border);border-bottom:1px solid var(--border);transform:rotate(45deg); }
       .roster-tip-host:hover .roster-tip { display:block; }
+      .aff-switch-banner {
+        display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+        padding:12px 16px; margin-bottom:16px;
+        border-left:3px solid var(--accent);
+      }
+      .aff-switch-text { font-size:13px; color:var(--muted); flex:1; min-width:200px; }
       .affiliate-hq-wrap {
         width: 100%;
         max-width: 2200px;
@@ -20216,7 +20337,22 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
     if (!isAffiliate(cid)) {
       return renderForbidden(req, res, 'This page is for WF affiliates only.');
     }
-    affiliate = await resolveUserAffiliate(cid);
+
+    // Linked to more than one affiliate: make them pick before anything else,
+    // otherwise the page silently lands on whichever sorts first.
+    const mine = await resolveUserAffiliates(cid);
+    if (mine.length > 1 && !requestedId) {
+      return res.send(renderAffiliateChooser({
+        user, isAdmin, affiliates: mine,
+        target: '/affiliates/hq', title: 'Affiliate HQ'
+      }));
+    }
+    // requestedId is validated against their own list, so a hand-typed id
+    // cannot open an affiliate they have nothing to do with.
+    affiliate = await resolveUserAffiliate(cid, requestedId);
+    if (requestedId && affiliate?.id !== requestedId) {
+      return renderForbidden(req, res, 'That affiliate is not linked to your account.');
+    }
     // Holds the WF_AFFILIATE role but no Affiliate row points at their CID
     // (e.g. the affiliate's main CID was transferred). Show a clear notice
     // instead of a half-empty HQ.
@@ -20300,6 +20436,10 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   // Affiliate rows sharing a name are one operator with a fleet, mirroring how
   // OfficialTeam rows share a teamName. Each aircraft keeps its own CID and is
   // auto-assigned its own slot, so only the presentation needs grouping.
+  // Drives the "switch affiliate" banner. An admin read-only view isn't one of
+  // the viewer's own affiliates, so it never gets the switcher.
+  const myAffiliateCount = readOnly ? 0 : (await resolveUserAffiliates(cid)).length;
+
   const affKey = affiliate
     ? String(affiliate.name || affiliate.callsign || '').trim().toUpperCase()
     : '';
@@ -20620,6 +20760,13 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   const content = `
     <div class="affiliate-hq-wrap">
 
+      ${myAffiliateCount > 1 ? `
+      <section class="card aff-switch-banner">
+        <span class="aff-switch-text">Viewing <strong>${escapeHtml(affiliate.name || affiliate.callsign || '')}</strong> — you are linked to ${myAffiliateCount} affiliates.</span>
+        <a href="/affiliates/hq" class="ot-btn">Switch affiliate</a>
+      </section>
+      ` : ''}
+
       ${readOnly ? `
       <section class="card aff-readonly-banner">
         <span class="aff-readonly-badge">Admin · Read-only view</span>
@@ -20750,6 +20897,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                   return;
                 }
                 var fd = new FormData(form);
+                if (window.AFFILIATE_ID) fd.append('affiliateId', window.AFFILIATE_ID);
                 try {
                   var r = await fetch('/api/affiliates/hq/profile', { method: 'POST', credentials: 'same-origin', body: fd });
                   var d = await r.json().catch(function() { return {}; });
@@ -20949,6 +21097,10 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
     ${HQ_STYLES}
 
     <script>
+      // Which affiliate this HQ is showing. Sent with every write so the
+      // server acts on the one on screen, not whichever sorts first for a CID
+      // linked to several.
+      window.AFFILIATE_ID = ${affiliate ? affiliate.id : 'null'};
       (function() {
         function markClaim(sel) {
           if (sel.value) sel.classList.add('has-claim');
@@ -21000,7 +21152,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               credentials: 'same-origin',
-              body: JSON.stringify({ sectorNumber: sector, claimCid: claimCid })
+              body: JSON.stringify({ affiliateId: window.AFFILIATE_ID, sectorNumber: sector, claimCid: claimCid })
             });
             var d = await r.json().catch(function() { return {}; });
             if (!r.ok) throw new Error(d.error || 'Failed to save claim');
@@ -21065,6 +21217,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                   headers: { 'Content-Type': 'application/json' },
                   credentials: 'same-origin',
                   body: JSON.stringify({
+                    affiliateId: window.AFFILIATE_ID,
                     action: 'save',
                     claimId: saveBtn.dataset.claimId || null,
                     sectorNumber: saveBtn.dataset.sector,
@@ -21113,7 +21266,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   credentials: 'same-origin',
-                  body: JSON.stringify({ action: 'delete', claimId: delBtn.dataset.claimId, sectorNumber: '' })
+                  body: JSON.stringify({ affiliateId: window.AFFILIATE_ID, action: 'delete', claimId: delBtn.dataset.claimId, sectorNumber: '' })
                 });
                 if (r.ok) location.reload();
                 else { mcHideOverlay(); var d = await r.json().catch(function() { return {}; }); mcMsg(d.error || 'Failed', false); delBtn.disabled = false; }
@@ -21335,7 +21488,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               credentials: 'same-origin',
-              body: JSON.stringify({ sectorNumber: sector, action: action })
+              body: JSON.stringify({ affiliateId: window.AFFILIATE_ID, sectorNumber: sector, action: action })
             });
             if (!r.ok) {
               var d = await r.json().catch(function() { return {}; });
@@ -21467,9 +21620,9 @@ app.post('/api/affiliates/hq/profile', requireLogin, requireAffiliate, (req, res
 }, async (req, res) => {
   const cid = Number(req.session.user.data.cid);
   try {
-    const affiliate = await resolveUserAffiliate(cid);
-    if (!affiliate || Number(affiliate.cid) !== cid) {
-      return res.status(403).json({ error: 'Only the affiliate Main CID can edit the public profile' });
+    const affiliate = await resolveUserAffiliate(cid, req.body?.affiliateId);
+    if (!affiliate || !actsForAffiliate(affiliate)) {
+      return res.status(403).json({ error: 'Only the affiliate Main CID or a manager can edit the public profile' });
     }
     await prisma.affiliate.update({
       where: { id: affiliate.id },
@@ -21720,7 +21873,7 @@ app.post('/api/affiliates/hq/solo-toggle', requireLogin, requireAffiliate, async
   if (!sectorNumber) return res.status(400).json({ error: 'sectorNumber required' });
   if (action !== 'release' && action !== 'restore') return res.status(400).json({ error: 'Invalid action' });
 
-  const affiliate = await resolveUserAffiliate(cid);
+  const affiliate = await resolveUserAffiliate(cid, req.body?.affiliateId);
   if (!affiliate) return res.status(403).json({ error: 'Not in an affiliate' });
   // Solo actions are allowed while the affiliate has no OTHER active members —
   // a "multiple users" affiliate that hasn't added anyone yet still works solo.
@@ -21774,7 +21927,7 @@ app.post('/api/affiliates/hq/claim', requireLogin, requireAffiliate, async (req,
   const claimCidRaw = req.body?.claimCid;
   if (!sectorNumber) return res.status(400).json({ error: 'sectorNumber required' });
 
-  const affiliate = await resolveUserAffiliate(cid);
+  const affiliate = await resolveUserAffiliate(cid, req.body?.affiliateId);
   if (!affiliate) return res.status(403).json({ error: 'Not in an affiliate' });
 
   if (claimCidRaw == null || claimCidRaw === '') {
@@ -21819,7 +21972,7 @@ app.post('/api/affiliates/hq/manual-claim', requireLogin, requireAffiliate, asyn
   const { action, claimId, sectorNumber, callsign, claimCid } = req.body || {};
   if (!sectorNumber && action !== 'delete') return res.status(400).json({ error: 'sectorNumber required' });
 
-  const affiliate = await resolveUserAffiliate(cid);
+  const affiliate = await resolveUserAffiliate(cid, req.body?.affiliateId);
   if (!affiliate || !affiliate.manualCallsigns) return res.status(403).json({ error: 'Not a manual-callsigns affiliate' });
 
   const flLimit = affiliate.fleetLimit || 3;
@@ -21881,12 +22034,31 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
   const user = req.session.user.data;
   const cid = Number(user.cid);
   const isAdmin = isAdminUser(cid);
+  const requestedId = Number(req.query.id) || null;
 
-  const owned = await prisma.affiliate.findMany({
-    where: { cid, hasMembers: true },
-    select: { id: true, callsign: true, simType: true, cid: true },
-    orderBy: { callsign: 'asc' }
-  });
+  // Affiliates this CID manages — main CID of, or a manager member on. Only
+  // ones that actually take members are manageable here.
+  const manageable = (await resolveUserAffiliates(cid))
+    .filter(a => a.hasMembers && actsForAffiliate(a));
+
+  // More than one: pick before showing anyone's roster.
+  if (manageable.length > 1 && !requestedId) {
+    return res.send(renderAffiliateChooser({
+      user, isAdmin, affiliates: manageable,
+      target: '/affiliates/my-members', title: 'Manage Members'
+    }));
+  }
+
+  const selected = requestedId
+    ? manageable.filter(a => a.id === requestedId)
+    : manageable;
+  if (requestedId && !selected.length) {
+    return renderForbidden(req, res, 'You do not manage that affiliate.');
+  }
+
+  const owned = selected
+    .map(a => ({ id: a.id, callsign: a.callsign, simType: a.simType, cid: a.cid }))
+    .sort((a, b) => String(a.callsign || '').localeCompare(String(b.callsign || '')));
 
   const ids = owned.map(a => a.id);
   const members = ids.length
@@ -22164,7 +22336,7 @@ app.post('/api/affiliates/my/:affiliateId/members', requireLogin, async (req, re
   if (!memberCid || !Number.isFinite(memberCid)) return res.status(400).json({ error: 'Valid CID required' });
 
   const aff = await prisma.affiliate.findUnique({ where: { id: affiliateId } });
-  if (!aff || aff.cid !== ownerCid || !aff.hasMembers) {
+  if (!aff || !aff.hasMembers || !(await canManageAffiliate(ownerCid, affiliateId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -22233,7 +22405,7 @@ app.patch('/api/affiliates/my/:affiliateId/members/:cid', requireLogin, async (r
   if (!ownerCid || !affiliateId || !memberCid) return res.status(400).json({ error: 'Bad request' });
 
   const aff = await prisma.affiliate.findUnique({ where: { id: affiliateId } });
-  if (!aff || aff.cid !== ownerCid) {
+  if (!aff || !(await canManageAffiliate(ownerCid, affiliateId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -22256,7 +22428,7 @@ app.delete('/api/affiliates/my/:affiliateId/members/:cid', requireLogin, async (
   if (!ownerCid || !affiliateId || !memberCid) return res.status(400).json({ error: 'Bad request' });
 
   const aff = await prisma.affiliate.findUnique({ where: { id: affiliateId } });
-  if (!aff || aff.cid !== ownerCid) {
+  if (!aff || !(await canManageAffiliate(ownerCid, affiliateId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
