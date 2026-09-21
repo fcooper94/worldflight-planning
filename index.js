@@ -41267,6 +41267,14 @@ app.get('/sector-planning/:wf/slots.json', requirePageEnabled('sector-planning')
   const sched = (adminSheetCache || []).find(r => r?.number === wf);
   if (!sched) return res.status(404).json({ error: 'Sector not found' });
 
+  // Route A/B only means something once the sector has an agreed departure
+  // split - without one every booking is nominally 'A' and the column is noise.
+  const planRow = await prisma.sectorPlan.findFirst({
+    where: { wf, eventId: activeEventId || undefined },
+    select: { depSplitRoute: true, splitAgreed: true }
+  }).catch(() => null);
+  const split = !!(planRow?.splitAgreed && planRow?.depSplitRoute);
+
   const sectorPrefix = sched.from + '-' + sched.to + '|';
   const rows = [];
   for (const [key, b] of Object.entries(tobtBookingsByKey)) {
@@ -41275,6 +41283,7 @@ app.get('/sector-planning/:wf/slots.json', requirePageEnabled('sector-planning')
     rows.push({
       cid: b.cid,
       callsign: b.callsign || '',
+      route: b.assignedRoute === 'B' ? 'B' : 'A',
       slot: (b.tobtTimeUtc && b.tobtTimeUtc !== 'BOOKING_ONLY' && b.tobtTimeUtc !== 'null')
         ? displayTobt(b.tobtTimeUtc)
         : ''
@@ -41297,12 +41306,13 @@ app.get('/sector-planning/:wf/slots.json', requirePageEnabled('sector-planning')
   rows.forEach(r => { r.name = nameByCid[r.cid] || ''; });
 
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.json({ wf, from: sched.from, to: sched.to, count: rows.length, rows });
+  res.json({ wf, from: sched.from, to: sched.to, count: rows.length, split, rows });
 });
 
 /* Compact standalone page for the small popup window opened from the sector
-   detail header. Slotted sectors get the full slot/CID table; booking-only
-   sectors get a CID search box instead. Refreshes itself every 30s. */
+   detail header. Always lists every booking on the sector - with its assigned
+   route when the sector splits - under a CID search box that filters the list
+   and calls out an exact hit. Refreshes itself every 30s. */
 app.get('/sector-planning/:wf/slots', requirePageEnabled('sector-planning'), async (req, res) => {
   const cid = Number(req.session?.user?.data?.cid) || null;
   if (!isAdminUser(cid) && !userHasFirAccess(cid)) {
@@ -41320,7 +41330,7 @@ app.get('/sector-planning/:wf/slots', requirePageEnabled('sector-planning'), asy
 
   res.send(`<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${wf} ${slotted ? 'Slots' : 'Bookings'} — ${sched.from} → ${sched.to}</title>
+<title>${wf} Bookings — ${sched.from} → ${sched.to}</title>
 <style>
   html,body{margin:0;padding:0;background:#0b1220;color:#e2e8f0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;}
   .head{position:sticky;top:0;background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 16px;}
@@ -41339,52 +41349,84 @@ app.get('/sector-planning/:wf/slots', requirePageEnabled('sector-planning'), asy
   .result.no{display:block;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);color:#f87171;}
   .muted{color:#94a3b8;font-size:12px;}
   .count{font-size:11px;color:#94a3b8;margin:10px 0 6px;}
+  .rt{display:inline-block;min-width:18px;text-align:center;padding:1px 6px;border-radius:5px;font-size:11px;font-weight:700;}
+  .rt-a{background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.4);color:#7dd3fc;}
+  .rt-b{background:rgba(232,121,249,0.15);border:1px solid rgba(232,121,249,0.4);color:#f0abfc;}
 </style></head><body>
 <div class="head">
   <h1>${wf} — ${sched.from} → ${sched.to}</h1>
-  <div class="sub">${slotted ? 'Bookings and connect times' : 'Booking Required — search a CID to check for a booking'} · auto-refreshes every 30s</div>
+  <div class="sub">${slotted ? 'Bookings and connect times' : 'Booking Required'} · auto-refreshes every 30s</div>
 </div>
 <div class="wrap">
-  ${slotted ? '' : '<input id="cidSearch" type="text" inputmode="numeric" placeholder="Search CID for booking…" autofocus /><div id="searchResult" class="result"></div>'}
+  <input id="cidSearch" type="text" placeholder="Search CID or callsign…" autofocus />
+  <div id="searchResult" class="result"></div>
   <div class="count" id="count">Loading…</div>
   <div id="tableWrap"></div>
 </div>
 <script>
   var SLOTTED = ${slotted ? 'true' : 'false'};
-  var DATA = { rows: [] };
+  var DATA = { rows: [], split: false };
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) { return '&#' + c.charCodeAt(0) + ';'; }); }
-  function render() {
-    document.getElementById('count').textContent = DATA.rows.length + ' booking' + (DATA.rows.length === 1 ? '' : 's');
-    if (SLOTTED) {
-      var html = '<table><thead><tr><th>Connect at</th><th>CID</th><th>Callsign</th><th>Name</th></tr></thead><tbody>';
-      DATA.rows.forEach(function(r) {
-        html += '<tr><td class="slot">' + esc(r.slot || '—') + '</td><td>' + esc(r.cid) + '</td><td class="cs">' + esc(r.callsign || '—') + '</td><td>' + esc(r.name || '—') + '</td></tr>';
-      });
-      html += '</tbody></table>';
-      if (!DATA.rows.length) html = '<div class="muted">No bookings yet.</div>';
-      document.getElementById('tableWrap').innerHTML = html;
-    } else {
-      runSearch();
-    }
-  }
-  function runSearch() {
+  function query() {
     var box = document.getElementById('cidSearch');
+    return box ? box.value.trim() : '';
+  }
+  // Full list by default; the search box narrows it rather than replacing it,
+  // so you can always see who else is on the sector.
+  function matches(r, q) {
+    if (!q) return true;
+    var lq = q.toLowerCase();
+    return String(r.cid).indexOf(q) === 0
+      || String(r.callsign || '').toLowerCase().indexOf(lq) === 0
+      || String(r.name || '').toLowerCase().indexOf(lq) !== -1;
+  }
+  function render() {
+    var q = query();
+    var shown = DATA.rows.filter(function(r) { return matches(r, q); });
+    var total = DATA.rows.length;
+    document.getElementById('count').textContent = q
+      ? shown.length + ' of ' + total + ' booking' + (total === 1 ? '' : 's')
+      : total + ' booking' + (total === 1 ? '' : 's');
+
+    var html = '<table><thead><tr>'
+      + (SLOTTED ? '<th>Connect at</th>' : '')
+      + '<th>CID</th><th>Callsign</th><th>Name</th>'
+      + (DATA.split ? '<th>Route</th>' : '')
+      + '</tr></thead><tbody>';
+    shown.forEach(function(r) {
+      html += '<tr>'
+        + (SLOTTED ? '<td class="slot">' + esc(r.slot || '—') + '</td>' : '')
+        + '<td>' + esc(r.cid) + '</td>'
+        + '<td class="cs">' + esc(r.callsign || '—') + '</td>'
+        + '<td>' + esc(r.name || '—') + '</td>'
+        + (DATA.split ? '<td><span class="rt rt-' + (r.route === 'B' ? 'b' : 'a') + '">' + esc(r.route || 'A') + '</span></td>' : '')
+      + '</tr>';
+    });
+    html += '</tbody></table>';
+    if (!total) html = '<div class="muted">No bookings yet.</div>';
+    else if (!shown.length) html = '<div class="muted">No booking matches "' + esc(q) + '".</div>';
+    document.getElementById('tableWrap').innerHTML = html;
+
+    showSearchResult(q);
+  }
+  function showSearchResult(q) {
     var out = document.getElementById('searchResult');
-    if (!box || !out) return;
-    var q = box.value.trim();
-    if (!q) { out.className = 'result'; out.textContent = ''; document.getElementById('tableWrap').innerHTML = ''; return; }
-    var hits = DATA.rows.filter(function(r) { return String(r.cid).indexOf(q) === 0; });
+    if (!out) return;
+    if (!q) { out.className = 'result'; out.textContent = ''; return; }
     var exact = DATA.rows.filter(function(r) { return String(r.cid) === q; });
     if (exact.length) {
       var e = exact[0];
       out.className = 'result ok';
-      out.textContent = '✓ CID ' + e.cid + ' has a booking' + (e.name ? ' — ' + e.name : '') + (e.callsign ? ' (' + e.callsign + ')' : '');
-    } else if (hits.length) {
-      out.className = 'result no';
-      out.textContent = 'No exact match — ' + hits.length + ' CID(s) starting with "' + q + '": ' + hits.slice(0, 5).map(function(r) { return r.cid; }).join(', ') + (hits.length > 5 ? '…' : '');
-    } else {
+      out.textContent = '✓ CID ' + e.cid + ' has a booking'
+        + (e.name ? ' — ' + e.name : '')
+        + (e.callsign ? ' (' + e.callsign + ')' : '')
+        + (DATA.split ? ' · Route ' + (e.route === 'B' ? 'B' : 'A') : '');
+    } else if (/^\d+$/.test(q)) {
       out.className = 'result no';
       out.textContent = '✗ No booking found for CID "' + q + '"';
+    } else {
+      out.className = 'result';
+      out.textContent = '';
     }
   }
   function refresh() {
@@ -41394,7 +41436,7 @@ app.get('/sector-planning/:wf/slots', requirePageEnabled('sector-planning'), asy
       .catch(function() { document.getElementById('count').textContent = 'Failed to load — retrying…'; });
   }
   var sb = document.getElementById('cidSearch');
-  if (sb) sb.addEventListener('input', runSearch);
+  if (sb) sb.addEventListener('input', render);
   refresh();
   setInterval(refresh, 30000);
 </script>
@@ -42101,7 +42143,7 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
           <div style="font-size:11.5px;color:var(--muted);margin-top:1px;">${slotted ? 'Pilots must have a booking to depart. Each booking has a connect time.' : 'Pilots must have a booking to depart within the window — no fixed slot times.'}</div>
         </div>
         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <button type="button" id="spSlotsPopupBtn" class="action-btn" style="font-size:11px;padding:5px 12px;">${slotted ? 'View Bookings' : 'Search CID Bookings'}</button>
+          <button type="button" id="spSlotsPopupBtn" class="action-btn" style="font-size:11px;padding:5px 12px;">Show Bookings</button>
           <a href="/api/slots/${wf.toLowerCase()}.json" target="_blank" rel="noopener" class="action-btn" style="font-size:11px;padding:5px 12px;text-decoration:none;" title="Public live JSON of this sector's bookings — [{cid, slot}]">Live JSON</a>
           <span style="font-size:11px;color:var(--muted);padding:4px 10px;border:1px solid ${c.border};border-radius:999px;" title="VATCAN bookings event id for this sector">VATCAN Event: <strong style="color:var(--text);">${headerVatcanEventId != null ? headerVatcanEventId : 'not linked'}</strong></span>
         </div>
@@ -42109,7 +42151,7 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
     </section>
     <script>
       document.getElementById('spSlotsPopupBtn').addEventListener('click', function() {
-        window.open('/sector-planning/${wf}/slots', 'wfSlots_${wf}', 'width=460,height=680,resizable=yes,scrollbars=yes');
+        window.open('/sector-planning/${wf}/slots', 'wfSlots_${wf}', 'width=580,height=680,resizable=yes,scrollbars=yes');
       });
     </script>`;
     })() : ''}
