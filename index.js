@@ -6290,6 +6290,98 @@ app.get('/faq', (req, res) => {
   res.send(renderLayout({ title: 'FAQ', user, isAdmin, content, layoutClass: 'dashboard-full' }));
 });
 
+// ── MSFS scenery index ──────────────────────────────────────────
+// Flat, link-only list of every approved MSFS scenery we hold, grouped by
+// airport, in route order. Falls back to alphabetical when the Schedule page
+// is not visible to the viewer - ordering by leg would leak the route before
+// release. Off-route airports always trail the route ones alphabetically.
+app.get('/scenery/msfs', async (req, res) => {
+  const user = req.session?.user?.data || null;
+  const isAdmin = user ? isAdminUser(user.cid) : false;
+
+  let rows = [];
+  try {
+    rows = await prisma.airportScenery.findMany({
+      where: { sim: 'MSFS', approved: true },
+      orderBy: [{ icao: 'asc' }, { name: 'asc' }]
+    });
+  } catch (err) {
+    console.error('[MSFS SCENERY PAGE]', err);
+  }
+
+  const byIcao = new Map();
+  for (const r of rows) {
+    if (!byIcao.has(r.icao)) byIcao.set(r.icao, []);
+    byIcao.get(r.icao).push(r);
+  }
+
+  // Route order = adminSheetCache order (sortOrder asc): every leg's departure
+  // airport, then the final leg's arrival. Only applied when the route is
+  // already public to this viewer.
+  const routeIsPublic = isPageVisibleTo('schedule', isAdmin);
+  const routeOrder = [];
+  if (routeIsPublic) {
+    for (const leg of adminSheetCache) {
+      if (leg.from && !routeOrder.includes(leg.from)) routeOrder.push(leg.from);
+    }
+    const last = adminSheetCache[adminSheetCache.length - 1];
+    if (last?.to && !routeOrder.includes(last.to)) routeOrder.push(last.to);
+  }
+
+  const onRoute  = routeOrder.filter(icao => byIcao.has(icao));
+  const offRoute = [...byIcao.keys()].filter(icao => !onRoute.includes(icao)).sort();
+  const ordered  = [...onRoute, ...offRoute];
+
+  const renderIcao = icao => byIcao.get(icao).map(r => {
+    const label = [r.name, r.developer].filter(Boolean).map(escapeHtml).join(' — ');
+    const store = r.store ? ' <span class="msfs-store">(' + escapeHtml(r.store) + ')</span>' : '';
+    return '<li class="msfs-row">'
+      + '<a class="msfs-icao" href="/icao/' + encodeURIComponent(icao) + '">' + escapeHtml(icao) + '</a>'
+      + '<span class="msfs-sep">:</span> '
+      + '<a href="' + escapeHtml(r.url) + '" target="_blank" rel="noopener">' + label + '</a>'
+      + store
+    + '</li>';
+  }).join('');
+
+  const listHtml = ordered.length
+    ? onRoute.map(renderIcao).join('')
+      + (offRoute.length
+          ? '<li class="msfs-divider">' + (onRoute.length ? 'Other airports' : 'All airports') + '</li>'
+            + offRoute.map(renderIcao).join('')
+          : '')
+    : '<li class="msfs-empty">No approved MSFS scenery listed yet.</li>';
+
+  const content = `
+  <section class="card card-full" style="padding:28px;">
+    <h2 style="margin:0 0 6px;color:var(--accent);">MSFS Scenery</h2>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 20px;">
+      Every approved Microsoft Flight Simulator scenery on the portal, one line per option.
+      ${rows.length} link${rows.length === 1 ? '' : 's'} across ${byIcao.size} airport${byIcao.size === 1 ? '' : 's'}.
+      ${routeIsPublic ? 'In route order.' : 'Listed alphabetically.'} Click an ICAO for its full airport page, including X-Plane and P3D options.
+    </p>
+    <ul class="msfs-list">${listHtml}</ul>
+  </section>
+
+  <style>
+    .msfs-list { list-style:none; margin:0; padding:0; font-size:14px; line-height:1.9; }
+    .msfs-row { padding:2px 0; border-bottom:1px solid var(--border); }
+    .msfs-row:last-child { border-bottom:none; }
+    .msfs-icao { font-weight:700; font-family:ui-monospace,Menlo,Consolas,monospace; color:var(--text); text-decoration:none; }
+    .msfs-icao:hover { color:var(--accent); }
+    .msfs-sep { color:var(--muted); }
+    .msfs-row a[target="_blank"] { color:var(--accent); }
+    .msfs-store { color:var(--muted); font-size:12px; }
+    .msfs-empty { color:var(--muted); }
+    .msfs-divider {
+      margin-top:18px; padding:6px 0; border-bottom:1px solid var(--border);
+      color:var(--muted); font-size:11px; font-weight:700;
+      letter-spacing:0.08em; text-transform:uppercase;
+    }
+  </style>`;
+
+  res.send(renderLayout({ title: 'MSFS Scenery', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
 // ── Contact page ───────────────────────────────────────────────────────
 app.get('/contact', (req, res) => {
   const user = req.session?.user?.data || null;
