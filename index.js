@@ -455,6 +455,11 @@ import nodemailer from 'nodemailer';
 import tzLookup from 'tz-lookup';
 import polygonClipping from 'polygon-clipping';
 import _renderLayout from './layout.js';
+import {
+  planRouteRebalance, routeCapacity,
+  DEPARTURE_WINDOW_HOURS, SLOT_BUCKET_MINUTES,
+  TEAM, AFFILIATE, PILOT
+} from './lib/route-split.mjs';
 import { getAirportGround, detectStandOccupancy } from './lib/osm-ground.mjs';
 /* getAirportGround is far quicker given coordinates (bbox instead of an
    area[icao=] lookup), and we already hold them for every airport. */
@@ -3100,6 +3105,9 @@ async function assignAffiliatePilotToSector(affiliate, scheduleRow, claimCid, ov
       dateUtc: existing.dateUtc,
       depTimeUtc: existing.depTimeUtc,
       tobtTimeUtc: existing.tobtTimeUtc,
+      // Carry the route across the transfer - the DB row keeps it, so dropping
+      // it here would silently show (and count) the pilot as Route A.
+      assignedRoute: existing.assignedRoute || memBooking.assignedRoute || 'A',
       createdAtISO: memBooking.createdAtISO || new Date().toISOString()
     };
     deleteBookingByBookingKey(oldBookingKey);
@@ -3216,6 +3224,159 @@ const DEFAULT_SHEET_URL =
   'https://docs.google.com/spreadsheets/d/e/2PACX-1vRG6DbmhAQpFmOophiGjjSh_UUGdTo-LA_sNNexrMpkkH2ECHl8eDsdxM24iY8Itw06pUZZXWtvmUNg/pub?output=csv';
 
 let adminSheetCache = [];          // active event's rows (backward compat)
+
+/* Which of a sector's two routes a new booking flies.
+   'A' is the primary route and the default; 'B' is the agreed split.
+
+   depSplitPct divides the sector's CAPACITY (flow rate x the 2-hour departure
+   window) between the routes, so Route A takes bookings until its share is
+   full and the rest overflow to Route B. Counts come from the in-memory
+   booking cache, keyed bookingKey -> booking; entries whose key has no ':'
+   are raw-slotKey aliases and are skipped so nobody is counted twice.
+
+   This is a first cut taken at booking time, when the sector's eventual mix
+   of teams, affiliates and pilots is not yet known. rebalanceSplitRoutes()
+   re-sorts it into priority order within 5 minutes.
+
+   MUST be called by every path that creates a pilot booking. Leaving it out
+   silently falls through to the schema default of 'A', which is how every
+   booking made through /api/tobt/book ended up on Route A regardless of the
+   sector's agreed split. */
+async function resolveAssignedRoute(from, to, cid, tobtTimeUtc) {
+  const row = (adminSheetCache || []).find(r => r?.from === from && r?.to === to);
+  if (!row?.number) return 'A';
+
+  const sectorPlan = await prisma.sectorPlan.findFirst({
+    where: { wf: row.number, eventId: activeEventId || undefined }
+  }).catch(() => null);
+  if (!sectorPlan?.splitAgreed || !sectorPlan.depSplitRoute || sectorPlan.depSplitPct == null) {
+    return 'A';
+  }
+  // No flow restriction means no capacity ceiling, so nothing overflows.
+  if (sectorPlan.depFlowType === 'NONE' || !sectorPlan.depFlowRate) return 'A';
+
+  // Slotted sectors are split per half-hour of connect time, so the booking
+  // only competes with the others in its own bucket.
+  const slotted = sectorPlan.depFlowType === 'TIME_SLOT_REQUIRED';
+  const { capacityA } = routeCapacity({
+    flowRate: sectorPlan.depFlowRate,
+    depSplitPct: sectorPlan.depSplitPct,
+    hours: slotted ? SLOT_BUCKET_MINUTES / 60 : DEPARTURE_WINDOW_HOURS
+  });
+  const bucket = t => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(t || '').trim());
+    if (!m) return '';
+    const mins = Math.floor((Number(m[1]) * 60 + Number(m[2])) / SLOT_BUCKET_MINUTES) * SLOT_BUCKET_MINUTES;
+    return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  };
+  const myBucket = slotted ? bucket(tobtTimeUtc) : '';
+
+  const sectorPrefix = `${from}-${to}|`;
+  let countA = 0;
+  for (const [k, b] of Object.entries(tobtBookingsByKey)) {
+    if (!k.includes(':') || !b.slotKey?.startsWith(sectorPrefix)) continue;
+    if (b.assignedRoute === 'B') continue;
+    if (slotted && bucket(b.tobtTimeUtc) !== myBucket) continue;
+    countA++;
+  }
+  return countA < capacityA ? 'A' : 'B';
+}
+
+/* Position of each affiliate CID in the affiliate list, main CIDs and members
+   alike. Route A is filled down that list, so the bottom of it is what
+   overflows to Route B. */
+async function buildAffiliateRankMap() {
+  const rank = new Map();
+  const [affs, members] = await Promise.all([
+    prisma.affiliate.findMany({
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+      select: { id: true, cid: true }
+    }).catch(() => []),
+    prisma.affiliateMember.findMany({
+      where: { active: true },
+      select: { affiliateId: true, cid: true }
+    }).catch(() => [])
+  ]);
+  const posByAffiliateId = new Map();
+  affs.forEach((a, i) => {
+    posByAffiliateId.set(a.id, i);
+    if (a.cid) rank.set(Number(a.cid), i);
+  });
+  for (const m of members) {
+    const pos = posByAffiliateId.get(m.affiliateId);
+    if (pos != null && !rank.has(Number(m.cid))) rank.set(Number(m.cid), pos);
+  }
+  return rank;
+}
+
+/* Booking-time assignment can only guess, and cancellations and CID transfers
+   pull a sector off its capacity split anyway. This sweep re-seats every
+   sector with an agreed split into priority order: teams fill Route A first,
+   then affiliates down the affiliate list, then ordinary pilots by booking
+   time. Whatever does not fit Route A's share of the capacity overflows to
+   Route B. Runs every 5 minutes; a settled sector produces no moves and no
+   writes. */
+async function rebalanceSplitRoutes() {
+  if (!activeEventId) return;
+  try {
+    const plans = await prisma.sectorPlan.findMany({ where: { eventId: activeEventId } });
+    const split = plans.filter(p =>
+      p.splitAgreed && p.depSplitRoute && p.depSplitPct != null
+      && p.depFlowType !== 'NONE' && p.depFlowRate);   // no flow rate, no capacity ceiling
+    if (!split.length) return;
+
+    const affRank = await buildAffiliateRankMap();
+    const classify = cid =>
+      isTeamMember(cid) ? TEAM : (isAffiliate(cid) ? AFFILIATE : PILOT);
+
+    let moved = 0;
+    for (const plan of split) {
+      const row = (adminSheetCache || []).find(r => r?.number === plan.wf);
+      if (!row) continue;
+
+      const bookings = await prisma.tobtBooking.findMany({
+        where: { slotKey: { startsWith: `${row.from}-${row.to}|` } },
+        select: {
+          id: true, cid: true, callsign: true, slotKey: true,
+          assignedRoute: true, createdAt: true, tobtTimeUtc: true
+        }
+      });
+      if (!bookings.length) continue;
+
+      const { moves } = planRouteRebalance({
+        bookings,
+        depSplitPct: plan.depSplitPct,
+        flowRate: plan.depFlowRate,
+        slotted: plan.depFlowType === 'TIME_SLOT_REQUIRED',
+        classify,
+        affiliateRank: cid => affRank.get(Number(cid)) ?? Number.MAX_SAFE_INTEGER
+      });
+      if (!moves.length) continue;
+
+      const byId = new Map(bookings.map(b => [b.id, b]));
+      for (const m of moves) {
+        const ok = await prisma.tobtBooking
+          .update({ where: { id: m.id }, data: { assignedRoute: m.to } })
+          .catch(() => null);
+        if (!ok) continue;
+
+        // Keep the in-memory cache in step - resolveAssignedRoute counts from
+        // it, so a stale entry would skew every later assignment.
+        const src = byId.get(m.id);
+        const cached = src && tobtBookingsByKey[`${src.cid}:${src.slotKey}`];
+        if (cached) cached.assignedRoute = m.to;
+        if (src) { try { io.emit('bookingUpdated', { slotKey: src.slotKey }); } catch {} }
+        moved++;
+      }
+      const per = plan.depFlowType === 'TIME_SLOT_REQUIRED' ? 'per 30 min' : 'over 2h';
+      console.log(`[ROUTE SPLIT] ${plan.wf}: moved ${moves.length} booking(s) — ${plan.depFlowRate}/hr ${per} at ${plan.depSplitPct}% Route A`);
+    }
+    if (moved) console.log(`[ROUTE SPLIT] sweep complete — ${moved} booking(s) reassigned`);
+  } catch (e) {
+    console.error('[ROUTE SPLIT] sweep failed:', e.message || e);
+  }
+}
+setInterval(() => { rebalanceSplitRoutes(); }, 5 * 60 * 1000);
 const eventSheetCaches = {};       // eventId -> rows[]
 let wfEvents = [];                 // all events from DB
 let activeEventId = null;          // currently active event ID
@@ -7068,33 +7229,8 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
     }
   }
 
-  // Determine route assignment (A = primary, B = secondary)
-  // WF teams and affiliates always get Route A (primary)
-  let assignedRoute = 'A';
-  const isTeamOrAffiliate = isTeamMember(bookingCid) || isAffiliate(bookingCid);
-  if (!isTeamOrAffiliate) {
-    // Check if there's an agreed split for this sector
-    const sectorPlan = await prisma.sectorPlan.findFirst({
-      where: { wf: row.number, eventId: activeEventId || undefined }
-    }).catch(() => null);
-    if (sectorPlan?.splitAgreed && sectorPlan.depSplitRoute && sectorPlan.depSplitPct != null) {
-      const splitPct = sectorPlan.depSplitPct; // % on Route A
-      // Count existing Route A vs B bookings for this sector
-      const sectorPrefix = `${from}-${to}|`;
-      let countA = 0, countB = 0;
-      for (const [k, b] of Object.entries(tobtBookingsByKey)) {
-        if (k.includes(':') && b.slotKey?.startsWith(sectorPrefix)) {
-          if (b.assignedRoute === 'B') countB++;
-          else countA++;
-        }
-      }
-      const total = countA + countB;
-      // Assign to whichever route is furthest below its target ratio
-      const targetA = splitPct / 100;
-      const currentRatioA = total > 0 ? countA / total : 1;
-      assignedRoute = currentRatioA > targetA ? 'B' : 'A';
-    }
-  }
+  // Booking-only sectors have no connect time, so no half-hour bucket.
+  const assignedRoute = await resolveAssignedRoute(from, to, bookingCid, null);
 
   await prisma.tobtBooking.create({
     data: {
@@ -10490,6 +10626,66 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
           var padX = routeIsVertical ? 20 : 50;
           var padY = routeIsVertical ? 50 : 20;
           map.fitBounds([[depPt.lat, depPt.lon], [arrPt.lat, arrPt.lon]], { padding: [padX, padY], maxZoom: 10 });
+
+          // Route B — the agreed split. Fuchsia and dashed, matching the WF
+          // ATC Hub and the Staffing Overview so a split reads the same on
+          // every map. route2 carries the same gating as route, so it is
+          // empty when ATC routes are not public.
+          if (route2 && route2 !== '-') {
+            fetch('/api/resolve-route?from=' + fromIcao + '&to=' + toIcao + '&route=' + encodeURIComponent(route2) + '&depTime=&blockTime=')
+              .then(function(r) { return r.json(); })
+              .then(function(routeData2) {
+                var pts2 = routeData2.points || [];
+                if (pts2.length < 2) return;
+
+                // Same antimeridian correction as Route A, anchored to the
+                // departure point so both lines land in one world copy.
+                while (pts2[0].lon - depPt.lon > 180)  pts2[0].lon -= 360;
+                while (pts2[0].lon - depPt.lon < -180) pts2[0].lon += 360;
+                for (var j = 1; j < pts2.length; j++) {
+                  while (pts2[j].lon - pts2[j-1].lon > 180)  pts2[j].lon -= 360;
+                  while (pts2[j].lon - pts2[j-1].lon < -180) pts2[j].lon += 360;
+                }
+
+                var coords2 = pts2.map(function(p) { return [p.lat, p.lon]; });
+                L.polyline(coords2, { color: '#e879f9', weight: 3, opacity: 0.9, dashArray: '8, 6' }).addTo(map);
+
+                // Waypoint dots, dimmer than Route A's so the primary stays
+                // the one that reads first.
+                pts2.forEach(function(p, i) {
+                  if (!p.name || i === 0 || i === pts2.length - 1) return;
+                  if (/^(DCT|N\\d)/.test(p.name)) return;
+                  L.marker([p.lat, p.lon], {
+                    icon: L.divIcon({
+                      html: '<div style="width:7px;height:7px;background:#e879f9;border-radius:50%;margin:11.5px;opacity:0.8;"></div>',
+                      className: '',
+                      iconSize: [30, 30],
+                      iconAnchor: [15, 15]
+                    }),
+                    zIndexOffset: 1900
+                  }).addTo(map)
+                    .bindTooltip(p.name, { direction: 'top', className: 'sector-wpt-label', offset: [0, -8] });
+                });
+
+                var routeLegend = L.control({ position: 'bottomleft' });
+                routeLegend.onAdd = function() {
+                  var div = L.DomUtil.create('div');
+                  div.style.cssText = 'background:rgba(15,23,42,0.9);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:10px;line-height:1.6;color:#e2e8f0;';
+                  div.innerHTML = '<div><span style="display:inline-block;width:16px;border-top:2px solid #38bdf8;vertical-align:middle;margin-right:5px;"></span>Route A</div>'
+                    + '<div><span style="display:inline-block;width:16px;border-top:2px dashed #e879f9;vertical-align:middle;margin-right:5px;"></span>Route B</div>';
+                  return div;
+                };
+                routeLegend.addTo(map);
+
+                // Re-fit to include Route B — it can bow well outside the
+                // dep/arr endpoints the primary fit uses (EGSS→EHAM routes
+                // Route B south via Dover).
+                map.fitBounds(
+                  [[depPt.lat, depPt.lon], [arrPt.lat, arrPt.lon]].concat(coords2),
+                  { padding: [padX, padY], maxZoom: 10 }
+                );
+              });
+          }
 
           // Show all FIR boundaries faintly
           fetch('/fir-boundaries.geojson')
@@ -18548,6 +18744,10 @@ for (const existing of Object.values(tobtBookingsByKey)) {
       }
     }
 
+    // Route A/B per the sector's agreed split. Without this the create falls
+    // through to the schema default of 'A' and the split never happens.
+    const assignedRoute = await resolveAssignedRoute(fromIcao, to.toUpperCase(), storedCid, tobtTimeUtc);
+
     await prisma.tobtBooking.create({
       data: {
         slotKey,
@@ -18558,6 +18758,7 @@ for (const existing of Object.values(tobtBookingsByKey)) {
         dateUtc,
         depTimeUtc,
         tobtTimeUtc,
+        assignedRoute,
         manual: wantsManual
       }
     });
@@ -18574,6 +18775,7 @@ for (const existing of Object.values(tobtBookingsByKey)) {
       dateUtc,
       depTimeUtc,
       tobtTimeUtc,
+      assignedRoute,
       manual: wantsManual
     });
 
@@ -18817,7 +19019,9 @@ app.post('/api/team/bookings/update', requireLogin, requireTeamMember, async (re
       to: dbBooking.to,
       dateUtc: dbBooking.dateUtc,
       depTimeUtc: dbBooking.depTimeUtc,
-      tobtTimeUtc: dbBooking.tobtTimeUtc
+      tobtTimeUtc: dbBooking.tobtTimeUtc,
+      // As above: keep the route the DB row already holds.
+      assignedRoute: dbBooking.assignedRoute || 'A'
     };
     if (oldCid !== newCid) {
       deleteBookingByBookingKey(oldBookingKey);
