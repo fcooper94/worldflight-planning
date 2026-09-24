@@ -33306,7 +33306,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         { key: 'flow-restrictions', label: 'Flow Restrictions & Booking', icon: '🚦', desc: 'Flow info on sector details and the Book column on the schedule page. When off, the sector page shows a placeholder and the schedule hides the Book column.' },
         { key: 'atc-route',         label: 'ATC Routes',           icon: '🛣️', desc: 'ATC route shown on schedule, sector, my-slots, affiliate, team-bookings and portal banners. Hide while routes are still being agreed with controllers.' },
         { key: 'worldflight-challenge', label: 'WorldFlight Challenge', icon: '⭐', desc: 'Gold challenge-sector highlights on the schedule and sector pages, and the WorldFlight Challenge page. The admin schedule always shows the challenge sector regardless.' },
-        { key: 'route-alternatives', label: 'Route Alternatives', icon: '🔀', desc: 'Legs whose destination is still undecided, carried as two options (e.g. WF2631.A EINN-EGSS and WF2631.B EINN-EGKB). Visible publishes both; Admin keeps them to admins and FIR managers, with the public seeing only the primary, unsuffixed. Add or settle an alternative from the admin schedule editor.' }
+        { key: 'route-alternatives', label: 'Route Alternatives', icon: '🔀', adminLabel: 'Admin &amp; FIR', desc: 'Legs whose destination is still undecided, carried as two options (e.g. WF2631.A EINN-EGSS and WF2631.B EINN-EGKB). Visible publishes both; Admin &amp; FIR keeps them to admins and FIR managers, with the public seeing only the primary, unsuffixed. Add or settle an alternative from the admin schedule editor.' }
       ]
     }
   ];
@@ -33327,7 +33327,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         <div class="settings-row-controls">
           <div class="vis-segctrl" data-page="${p.key}">
             ${opt('visible', 'Visible')}
-            ${opt('admin-only', 'Admin')}
+            ${opt('admin-only', p.adminLabel || 'Admin')}
             ${opt('hidden', 'Hidden')}
           </div>
         </div>
@@ -33558,6 +33558,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
       .vis-seg {
         background: transparent;
         border: 0;
+        white-space: nowrap;
         padding: 5px 12px;
         border-radius: 6px;
         font-size: 12px;
