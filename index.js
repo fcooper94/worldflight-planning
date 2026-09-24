@@ -7444,9 +7444,14 @@ async function refreshSheetForEvent(event) {
 }
 
 async function loadScheduleFromDb(eventId) {
+  // An alternative shares its primary's sortOrder (they occupy the same slot
+  // in the running order), so sortOrder alone leaves the pair in whatever
+  // order the query plan happens to return - WF2631.B ahead of WF2631. The
+  // number tie-break settles it: a primary is a prefix of its alternatives,
+  // and a prefix always sorts first, so A is always listed before B.
   const dbRows = await prisma.wfScheduleRow.findMany({
     where: { eventId },
-    orderBy: { sortOrder: 'asc' }
+    orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }]
   });
 
   // ATC routes are only DISPLAYED once published via Sector Planning
@@ -11051,6 +11056,35 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   // leg whose destination is still undecided renders exactly like a normal one.
   const scheduleRows = visibleScheduleRows(adminSheetCache, cid);
 
+  // The options making up each undecided leg, keyed on the primary's number,
+  // so the sector pill can tell pilots they have a choice of sector. Built
+  // only for viewers allowed to see alternatives - everyone else had them
+  // filtered out above, so their groups hold one option and no tooltip shows.
+  const variantOptions = {};
+  if (canSeeRouteAlternatives(cid)) {
+    scheduleRows.forEach(r => {
+      if (!r.variant_label) return;
+      const key = r.is_variant ? r.variant_of : r.number;
+      (variantOptions[key] = variantOptions[key] || []).push({
+        number: scheduleRowLabel(r, cid),
+        from: r.from,
+        to: r.to
+      });
+    });
+  }
+  // The airports that actually differ across a group - the choice being put
+  // to the pilot. Normally the destination, but the leg following an
+  // undecided one differs on its departure instead.
+  const variantChoice = {};
+  Object.keys(variantOptions).forEach(key => {
+    const opts = variantOptions[key];
+    if (opts.length < 2) return;
+    const tos   = [...new Set(opts.map(o => o.to))];
+    const froms = [...new Set(opts.map(o => o.from))];
+    const differing = tos.length > 1 ? tos : (froms.length > 1 ? froms : []);
+    if (differing.length > 1) variantChoice[key] = differing;
+  });
+
   // Resolve full airport names + coords for every from/to ICAO so the ICAO
   // cells can render a styled tooltip with the name on hover and the Dep
   // Window cell can show a UTC + local-time tooltip. One Airport query per
@@ -11205,9 +11239,26 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
               flowtype === 'BOOKING_ONLY' ? 'Booking Only' :
               'None';
 
+            // Route alternatives: a hover tooltip on the sector pill spelling
+            // out that this leg is one of two options a pilot may pick from.
+            // Only reachable when the viewer can see both options at all.
+            const altKey    = r.variant_label ? (r.is_variant ? r.variant_of : r.number) : '';
+            const altOpts   = altKey ? (variantOptions[altKey] || []) : [];
+            const altChoice = altKey ? (variantChoice[altKey] || []) : [];
+            const altLabel  = scheduleRowLabel(r, cid);
+            const showAltTt = altOpts.length > 1 && altChoice.length > 1;
+            const altBubble = !showAltTt ? '' : '<span class="alt-tt-bubble">'
+              + '<span class="alt-tt-title">Pilots can choose which sector to fly</span>'
+              + '<span class="alt-tt-choice">' + altChoice.map(escapeHtml).join(' or ') + '</span>'
+              + altOpts.map(o => '<span class="alt-tt-row' + (o.number === altLabel ? ' is-current' : '') + '">'
+                  + '<span class="alt-tt-opt">' + escapeHtml(o.number) + '</span>'
+                  + '<span class="alt-tt-val">' + escapeHtml(o.from) + ' &rarr; ' + escapeHtml(o.to) + '</span>'
+                + '</span>').join('')
+              + '</span>';
+
             return `
             <tr class="${r.variant_label && canSeeRouteAlternatives(cid) ? (r.is_variant ? 'sched-variant sched-variant-alt' : 'sched-variant sched-variant-primary') : ''}">
-              <td class="col-wf-sector"><button class="sector-details-btn${r.is_wf_challenge && showWfChallenge ? ' wf-challenge-btn' : ''}"${r.is_wf_challenge && showWfChallenge ? ' title="WorldFlight Challenge sector"' : ''} data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${showAtcRoute ? escapeHtml(r.atc_route) : ''}">${scheduleRowLabel(r, cid)}</button></td>
+              <td class="col-wf-sector">${showAltTt ? '<span class="alt-tt">' : ''}<button class="sector-details-btn${r.is_wf_challenge && showWfChallenge ? ' wf-challenge-btn' : ''}"${r.is_wf_challenge && showWfChallenge ? ' title="WorldFlight Challenge sector"' : ''} data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${showAtcRoute ? escapeHtml(r.atc_route) : ''}">${altLabel}</button>${altBubble}${showAltTt ? '</span>' : ''}</td>
 
               <td class="col-from">
                 <span class="icao-tt">
@@ -32148,7 +32199,7 @@ app.post('/admin/api/schedule-row/add', requireAdmin, async (req, res) => {
 
   const rows = await prisma.wfScheduleRow.findMany({
     where: { eventId },
-    orderBy: { sortOrder: 'asc' }
+    orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }]
   });
 
   const evt = wfEvents.find(e => e.id === eventId);
@@ -32494,7 +32545,7 @@ app.post('/admin/api/wf-events/:id/flight-config', requireAdmin, async (req, res
     if (data.startDateUtc !== undefined || data.startTimeUtc !== undefined) {
       const firstLeg = await prisma.wfScheduleRow.findFirst({
         where: { eventId: id },
-        orderBy: { sortOrder: 'asc' }
+        orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }]
       });
       if (firstLeg) {
         const updateData = {};
@@ -32546,7 +32597,7 @@ async function recalcScheduleTimes(eventId) {
 
   const allRows = await prisma.wfScheduleRow.findMany({
     where: { eventId },
-    orderBy: { sortOrder: 'asc' }
+    orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }]
   });
 
   // Only primaries form the chain. A route alternative is a second option for
@@ -36755,7 +36806,7 @@ app.get('/admin/api/vatcan/status', requireAdmin, async (req, res) => {
   try {
     const rows = await prisma.wfScheduleRow.findMany({
       where: { eventId: activeEventId || undefined },
-      orderBy: { sortOrder: 'asc' },
+      orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }],
       select: { number: true, from: true, to: true, vatcanEventId: true }
     });
     const lastResults = vatcanAllLastResults();
@@ -39296,7 +39347,7 @@ app.get('/wf-atc/vatcan-codes', requirePageEnabled('vatcan-codes'), requireWfAtc
   try {
     rows = await prisma.wfScheduleRow.findMany({
       where: { eventId: activeEventId || undefined },
-      orderBy: { sortOrder: 'asc' },
+      orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }],
       select: { number: true, from: true, to: true, dateUtc: true, depTimeUtc: true, vatcanEventId: true }
     });
   } catch (e) {
