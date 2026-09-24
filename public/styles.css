@@ -6156,8 +6156,8 @@ html[data-map-theme="light"] .ac-label {
 .alt-tt-bubble {
   position: absolute;
   top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%) translateY(4px);
+  left: 0;
+  transform: translateY(4px);
   background: var(--panel, #1e293b);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 6px;
@@ -6181,8 +6181,8 @@ html[data-map-theme="light"] .ac-label {
   content: '';
   position: absolute;
   top: -5px;
-  left: 50%;
-  transform: translateX(-50%) rotate(45deg);
+  left: 22px;
+  transform: rotate(45deg);
   width: 8px;
   height: 8px;
   background: var(--panel, #1e293b);
@@ -6229,7 +6229,7 @@ html[data-map-theme="light"] .ac-label {
 .alt-tt:focus-within .alt-tt-bubble {
   opacity: 1;
   visibility: visible;
-  transform: translateX(-50%) translateY(0);
+  transform: translateY(0);
 }
 [data-theme="light"] .alt-tt-bubble {
   background: rgba(255,255,255,0.98);
@@ -6241,6 +6241,23 @@ html[data-map-theme="light"] .ac-label {
   border-color: rgba(15,23,42,0.12);
 }
 [data-theme="light"] .alt-tt-choice { border-bottom-color: rgba(15,23,42,0.10); }
+/* .table-scroll is overflow-x: auto, which makes it clip on both axes, so a
+   bubble on one of the last rows would be cut off below. Those open upward. */
+.schedule-page .departures-table tbody tr:nth-last-child(-n+3) .alt-tt-bubble {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+.schedule-page .departures-table tbody tr:nth-last-child(-n+3) .alt-tt-bubble::before {
+  top: auto;
+  bottom: -5px;
+  border-left: none;
+  border-top: none;
+  border-right: 1px solid rgba(255,255,255,0.12);
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+[data-theme="light"] .schedule-page .departures-table tbody tr:nth-last-child(-n+3) .alt-tt-bubble::before {
+  border-color: rgba(15,23,42,0.12);
+}
 .schedule-page .col-date      { width: 12%; }
 .schedule-page .col-window    { width: 11%; }
 .schedule-page .col-flight    { width: 10%; text-align: center; white-space: nowrap; }
