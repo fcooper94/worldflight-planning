@@ -808,13 +808,16 @@ io.use((socket, next) => {
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
 // Every key the Page Visibility admin panel offers must be listed here, or the
 // save is rejected with a 400 and the toggle silently fails.
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'airspace', 'sector-planning', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions', 'atc-route', 'worldflight-challenge', 'vatcan-codes', 'who-we-are', 'request-atc', 'requested-atc', 'wf-atc-hub'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'airspace', 'sector-planning', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions', 'atc-route', 'worldflight-challenge', 'vatcan-codes', 'who-we-are', 'request-atc', 'requested-atc', 'wf-atc-hub', 'route-alternatives'];
 
 // Per-key default mode used when no DB row exists yet. Most keys default to
 // 'visible'; ATC Route defaults to 'hidden' because routes are typically
 // released before they're confirmed with controllers.
 const PAGE_DEFAULT_MODE = {
-  'atc-route': 'hidden'
+  'atc-route': 'hidden',
+  // Route alternatives start admin-only: while a leg's destination is still
+  // undecided, publishing both options would give the pending decision away.
+  'route-alternatives': 'admin-only'
 };
 const pageVisibility = {};     // key -> boolean (true = enabled)
 
@@ -907,6 +910,39 @@ async function loadSiteBanner() {
   maintenanceBanner.enabled = mEnabledRow?.value === 'true';
   maintenanceBanner.text = mTextRow?.value || '';
   console.log('[BANNER] Loaded:', siteBanner, maintenanceBanner);
+}
+
+// ===== ROUTE ALTERNATIVES =====
+// While a leg's destination is still undecided it is carried as two rows: the
+// primary (plain number, e.g. WF2631) and an alternative (WF2631.B). Gated by
+// the 'route-alternatives' page-visibility key so it shares the Visible /
+// Admin / Hidden control every other feature uses.
+//
+//   visible    - everyone sees both options
+//   admin-only - admins and FIR managers, who are the ones agreeing the
+//                routes for each option; the public sees only the primary,
+//                unsuffixed, exactly as if the alternative did not exist
+//   hidden     - admins only
+function canSeeRouteAlternatives(cid) {
+  const isAdmin = isAdminUser(cid);
+  if (isAdmin) return true;
+  if (isPageVisibleTo('route-alternatives', isAdmin)) return true;
+  if (getPageMode('route-alternatives') === 'admin-only') return userHasFirAccess(cid);
+  return false;
+}
+// The legs to show `cid`, with alternatives dropped unless they may see them.
+function visibleScheduleRows(rows, cid) {
+  const list = rows || [];
+  return canSeeRouteAlternatives(cid) ? list : list.filter(r => !r.is_variant);
+}
+
+// How a leg's number should read for `cid`. A primary only picks up its ".A"
+// once an alternative exists AND the viewer can see it.
+function scheduleRowLabel(row, cid) {
+  if (!row) return '';
+  if (!row.variant_label) return row.number;
+  if (!canSeeRouteAlternatives(cid)) return row.number;
+  return row.is_variant ? row.number : `${row.number}.${row.variant_label}`;
 }
 
 function requirePageEnabled(pageKey) {
@@ -7424,6 +7460,12 @@ async function loadScheduleFromDb(eventId) {
   //                              to expose it). Used by the Sector Planning
   //                              admin/detail pages to detect drift vs agreed.
   //   route_agreed              — true when a published route is available.
+  // Route alternatives. An alternative leg carries variantOf = its primary's
+  // number (e.g. WF2631.B -> "WF2631"). The primary keeps its plain number so
+  // nothing keyed on it has to move; it is only labelled ".A" at render time,
+  // and only once an alternative actually exists.
+  const variantParents = new Set(dbRows.filter(r => r.variantOf).map(r => r.variantOf));
+
   const plans = await prisma.sectorPlan.findMany({ where: { eventId } }).catch(() => []);
   const normRoute = s => (s || '').toUpperCase().replace(/\s+/g, ' ').trim();
   const planByWf = {};
@@ -7499,7 +7541,15 @@ async function loadScheduleFromDb(eventId) {
       split_state,
       split_proposed_by,
       split_pct,
-      is_wf_challenge: r.isWfChallenge === true
+      is_wf_challenge: r.isWfChallenge === true,
+      // '' on a leg with no alternative, else 'A' on the primary and the
+      // alternative's own suffix ('B') on the alternative.
+      variant_of: r.variantOf || '',
+      is_variant: !!r.variantOf,
+      has_variants: !r.variantOf && variantParents.has(r.number),
+      variant_label: r.variantOf
+        ? (String(r.number).split('.').pop() || 'B')
+        : (variantParents.has(r.number) ? 'A' : '')
     };
   });
 
@@ -10997,13 +11047,16 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   const showBookSlot = isPageVisibleTo('flow-restrictions', isAdmin);
   const showAtcRoute = isAdmin || isPageEnabled('atc-route');
   const showWfChallenge = isPageVisibleTo('worldflight-challenge', isAdmin);
+  // Route alternatives are filtered out for anyone who may not see them, so a
+  // leg whose destination is still undecided renders exactly like a normal one.
+  const scheduleRows = visibleScheduleRows(adminSheetCache, cid);
 
   // Resolve full airport names + coords for every from/to ICAO so the ICAO
   // cells can render a styled tooltip with the name on hover and the Dep
   // Window cell can show a UTC + local-time tooltip. One Airport query per
   // page load.
   const _scheduleIcaoSet = new Set();
-  adminSheetCache.forEach(r => {
+  scheduleRows.forEach(r => {
     if (r.from) _scheduleIcaoSet.add(String(r.from).toUpperCase());
     if (r.to)   _scheduleIcaoSet.add(String(r.to).toUpperCase());
   });
@@ -11043,7 +11096,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
     return { lo: lo.time, hi: hi.time, zone: lo.zone };
   }
   const depWindowLocalByKey = {};
-  for (const r of adminSheetCache) {
+  for (const r of scheduleRows) {
     if (!r.number || !r.from || !r.dep_time_utc) continue;
     const w = depWindowAtAirport(String(r.from).toUpperCase(), r.date_utc, r.dep_time_utc);
     if (w) depWindowLocalByKey[r.number] = w;
@@ -11078,7 +11131,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
     return { lo: lo.time, hi: hi.time, zone: lo.zone };
   }
   const arrWindowLocalByKey = {};
-  for (const r of adminSheetCache) {
+  for (const r of scheduleRows) {
     if (!r.number || !r.to || !r.arr_time_utc) continue;
     const w = arrWindowAtAirport(String(r.to).toUpperCase(), r.date_utc, r.dep_time_utc, r.arr_time_utc);
     if (w) arrWindowLocalByKey[r.number] = w;
@@ -11142,7 +11195,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
         </thead>
 
         <tbody>
-          ${adminSheetCache.map(r => {
+          ${scheduleRows.map(r => {
             // ✅ FLOW TYPE — must live INSIDE map
             const flowSectorKey = `${r.from}-${r.to}`;
             const sectorInstanceKey = `${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`;
@@ -11153,8 +11206,8 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
               'None';
 
             return `
-            <tr>
-              <td class="col-wf-sector"><button class="sector-details-btn${r.is_wf_challenge && showWfChallenge ? ' wf-challenge-btn' : ''}"${r.is_wf_challenge && showWfChallenge ? ' title="WorldFlight Challenge sector"' : ''} data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${showAtcRoute ? escapeHtml(r.atc_route) : ''}">${r.number}</button></td>
+            <tr class="${r.variant_label && canSeeRouteAlternatives(cid) ? (r.is_variant ? 'sched-variant sched-variant-alt' : 'sched-variant sched-variant-primary') : ''}">
+              <td class="col-wf-sector"><button class="sector-details-btn${r.is_wf_challenge && showWfChallenge ? ' wf-challenge-btn' : ''}"${r.is_wf_challenge && showWfChallenge ? ' title="WorldFlight Challenge sector"' : ''} data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${showAtcRoute ? escapeHtml(r.atc_route) : ''}">${scheduleRowLabel(r, cid)}</button></td>
 
               <td class="col-from">
                 <span class="icao-tt">
@@ -15487,8 +15540,12 @@ app.get('/icao/:icao', async (req, res) => {
   // Find ALL WF legs involving this airport
   const activeEvent = wfEvents.find(e => e.id === activeEventId);
   const activeEventName = activeEvent ? activeEvent.name : 'WorldFlight';
-  const wfDepartures = adminSheetCache.filter(r => r.from === icao);
-  const wfArrivals = adminSheetCache.filter(r => r.to === icao);
+  // An airport that is only a pending route alternative must not light up the
+  // WF banner for viewers who may not see alternatives - that would leak the
+  // undecided destination one portal at a time.
+  const wfLegsHere = visibleScheduleRows(adminSheetCache, Number(req.session?.user?.data?.cid) || null);
+  const wfDepartures = wfLegsHere.filter(r => r.from === icao);
+  const wfArrivals = wfLegsHere.filter(r => r.to === icao);
   const wfDeparture = wfDepartures[0] || null;
   const wfArrival = wfArrivals[0] || null;
   const wfInvolved = wfDeparture || wfArrival;
@@ -18214,7 +18271,11 @@ app.get('/api/schedule.json', async (req, res) => {
     planByWf[sp.wf] = sp;
   }
 
-  const sectors = adminSheetCache.map(r => {
+  // Legs with an undecided destination only appear once alternatives are
+  // published. The sector key stays the plain number so consumers keying on it
+  // are unaffected; the variant fields carry the extra state.
+  const apiCid = Number(req.session?.user?.data?.cid) || null;
+  const sectors = visibleScheduleRows(adminSheetCache, apiCid).map(r => {
     const depWindow = r.dep_time_utc
       ? { open: subtractMinutes(r.dep_time_utc, 60), close: addMinutes(r.dep_time_utc, 60) }
       : null;
@@ -18232,7 +18293,11 @@ app.get('/api/schedule.json', async (req, res) => {
       blockTime: r.block_time,
       flightTime: r.flight_time,
       atcRoute: r.atc_route || null,
-      isWfChallenge: r.is_wf_challenge
+      isWfChallenge: r.is_wf_challenge,
+      // '' unless this leg's destination is still undecided, then 'A' on the
+      // primary and 'B' on the alternative. variantOf names the primary.
+      variant: r.variant_label || '',
+      variantOf: r.variant_of || null
     };
 
     const plan = planByWf[r.number];
@@ -29097,13 +29162,16 @@ ${eventRows.map((r, idx) => {
   const sectorKey = `${r.from}-${r.to}`;
   const isFirst = idx === 0;
   return `
-<tr data-wf="${r.number}" data-idx="${idx}"${r.is_wf_challenge ? ' class="wf-challenge-row"' : ''}>
+<tr data-wf="${r.number}" data-idx="${idx}" class="${r.is_wf_challenge ? 'wf-challenge-row ' : ''}${r.is_variant ? 'sched-alt-row' : (r.has_variants ? 'sched-alt-primary' : '')}">
   ${isScratch ? '<td class="col-del" style="white-space:nowrap;">'
     + '<button class="btn-delete-row" data-wf="' + r.number + '" title="Delete leg">&#x2715;</button>'
+    + (r.is_variant ? '' : (r.has_variants
+        ? '<button class="row-icon btn-resolve-variant" data-wf="' + r.number + '" title="Settle this leg on one of its route options"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></button>'
+        : '<button class="row-icon btn-add-variant" data-wf="' + r.number + '" data-from="' + r.from + '" data-to="' + r.to + '" data-block="' + (r.block_time || '') + '" title="Add a route alternative for this leg"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></button>'))
     + (r.from && r.to ? '<a class="row-icon simbrief-launch" data-from="' + r.from + '" data-to="' + r.to + '" data-wf="' + r.number + '" href="#" title="Generate SimBrief plan">SB</a>' : '')
     + (r.from && r.to ? '<button class="row-icon sb-fetch" data-wf="' + r.number + '" data-from="' + r.from + '" data-to="' + r.to + '" title="Fetch block time from SimBrief">&#x2913;</button>' : '')
     + '</td>' : ''}
-  <td><a href="#" class="sector-link" data-wf="${r.number}" data-from="${r.from}" data-to="${r.to}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-arr="${r.arr_time_utc}" data-block="${r.block_time}" data-route="${r.atc_route}">${r.number}</a></td>
+  <td><a href="#" class="sector-link" data-wf="${r.number}" data-from="${r.from}" data-to="${r.to}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-arr="${r.arr_time_utc}" data-block="${r.block_time}" data-route="${r.atc_route}">${r.variant_label ? (r.is_variant ? r.number : r.number + '.' + r.variant_label) : r.number}</a></td>
   ${isScratch
     ? '<td><input class="sched-edit" data-field="from" value="' + r.from + '" style="width:60px;text-transform:uppercase;" /></td>'
     : '<td>' + r.from + '</td>'}
@@ -29153,6 +29221,44 @@ ${eventRows.map((r, idx) => {
   </section>
 
 <!-- ADD LEG MODAL -->
+<div id="addVariantModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog" style="width:92vw;max-width:470px;padding:24px;">
+    <form id="addVariantForm">
+      <h3 style="margin:0 0 6px;">Add Route Alternative</h3>
+      <p id="addVariantIntro" style="margin:0 0 18px;color:var(--muted);font-size:12px;line-height:1.55;"></p>
+
+      <div class="leg-section">
+        <div class="leg-section-title">Alternative Routing</div>
+        <table class="leg-fields" style="width:100%;border-collapse:separate;border-spacing:6px 0;">
+          <tr>
+            <td style="width:38%;"><label>From<input type="text" id="addVariantFrom" required maxlength="4" placeholder="ICAO" style="text-transform:uppercase;font-family:monospace;" /></label></td>
+            <td style="width:38%;"><label>To<input type="text" id="addVariantTo" required maxlength="4" placeholder="ICAO" style="text-transform:uppercase;font-family:monospace;" /></label></td>
+            <td style="width:24%;"><label>Option<select id="addVariantLabel"><option value="B">B</option><option value="C">C</option><option value="D">D</option></select></label></td>
+          </tr>
+          <tr>
+            <td colspan="3"><label>Block Time<input type="text" id="addVariantBlock" placeholder="HH:MM" pattern="[0-9]{1,2}:[0-9]{2}" style="font-family:monospace;" /></label></td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="leg-section">
+        <div class="leg-section-title">Route Details</div>
+        <label style="display:block;">ATC Route <span style="color:var(--muted);font-weight:400;font-size:11px;">optional &mdash; can be agreed later in Sector Planning</span>
+          <textarea id="addVariantRoute" rows="2" placeholder="Enter or paste ATC route..." style="width:100%;margin-top:4px;padding:8px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e5e7eb;font-family:monospace;font-size:12px;resize:none;"></textarea>
+        </label>
+      </div>
+
+      <div id="addVariantMsg" class="modal-message hidden"></div>
+
+      <div class="modal-actions" style="margin-top:16px;">
+        <button type="button" class="modal-btn modal-btn-cancel" id="closeAddVariant">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-submit" id="submitAddVariant">Add Alternative</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div id="addLegModal" class="modal hidden">
   <div class="modal-backdrop"></div>
   <div id="addLegDialog" class="modal-dialog" style="width:95vw;max-width:1400px;padding:0;overflow:hidden;">
@@ -29856,8 +29962,141 @@ firstRowInputs.forEach(function(input) {
   });
 })();
 
+/* ===== ADD ROUTE ALTERNATIVE ===== */
+// A leg whose destination is still undecided is carried as two rows. This
+// collects the second one; the primary keeps its number and everything keyed
+// on it, so all we need is the alternative's own routing and block time.
+function openAddVariantModal(data) {
+  var modal = document.getElementById('addVariantModal');
+  if (!modal) return;
+
+  var intro = document.getElementById('addVariantIntro');
+  var fromEl = document.getElementById('addVariantFrom');
+  var toEl = document.getElementById('addVariantTo');
+  var labelEl = document.getElementById('addVariantLabel');
+  var blockEl = document.getElementById('addVariantBlock');
+  var routeEl = document.getElementById('addVariantRoute');
+  var msg = document.getElementById('addVariantMsg');
+
+  modal.dataset.wf = data.wf;
+  intro.innerHTML = '<strong>' + data.wf + '</strong> currently flies ' + data.from + ' to ' + data.to +
+    '. The alternative shares its departure slot and is numbered ' + data.wf + '.B, so ' + data.wf +
+    ' keeps its bookings, sector plan and claims either way.';
+
+  fromEl.value = data.from || '';
+  toEl.value = '';
+  labelEl.value = 'B';
+  blockEl.value = '';
+  blockEl.placeholder = data.block ? data.block + ' (copied from ' + data.wf + ')' : 'HH:MM';
+  routeEl.value = '';
+  msg.className = 'modal-message hidden';
+  msg.textContent = '';
+
+  modal.classList.remove('hidden');
+  setTimeout(function () { toEl.focus(); }, 50);
+}
+
+(function () {
+  var modal = document.getElementById('addVariantModal');
+  if (!modal) return;
+
+  var form = document.getElementById('addVariantForm');
+  var msg = document.getElementById('addVariantMsg');
+  var submitBtn = document.getElementById('submitAddVariant');
+
+  function close() { modal.classList.add('hidden'); }
+  document.getElementById('closeAddVariant').addEventListener('click', close);
+  modal.querySelector('.modal-backdrop').addEventListener('click', close);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+
+  function fail(text) {
+    msg.textContent = text;
+    msg.className = 'modal-message error';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Add Alternative';
+  }
+
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var from = document.getElementById('addVariantFrom').value.trim().toUpperCase();
+    var to = document.getElementById('addVariantTo').value.trim().toUpperCase();
+    var block = document.getElementById('addVariantBlock').value.trim();
+
+    if (!/^[A-Z0-9]{4}$/.test(from) || !/^[A-Z0-9]{4}$/.test(to)) {
+      return fail('Both airports must be 4-character ICAO codes.');
+    }
+    if (block && !/^\d{1,2}:\d{2}$/.test(block)) {
+      return fail('Block time must look like HH:MM, or be left blank to copy the primary.');
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Adding...';
+    msg.className = 'modal-message hidden';
+
+    var res = await fetch('/admin/api/schedule-row/add-variant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: window.WF_EVENT_ID,
+        number: modal.dataset.wf,
+        from: from,
+        to: to,
+        label: document.getElementById('addVariantLabel').value,
+        blockTime: block,
+        atcRoute: document.getElementById('addVariantRoute').value.trim()
+      })
+    });
+    var body = await res.json().catch(function () { return {}; });
+    if (!res.ok) return fail(body.error || 'Could not add the alternative.');
+
+    msg.textContent = body.number + ' added.';
+    msg.className = 'modal-message success';
+    location.reload();
+  });
+})();
+
 /* ===== DELETE ROW ===== */
 document.addEventListener('click', function(e) {
+  var addVariantBtn = e.target.closest('.btn-add-variant');
+  if (addVariantBtn) {
+    openAddVariantModal(addVariantBtn.dataset);
+    return;
+  }
+  var resolveBtn = e.target.closest('.btn-resolve-variant');
+  if (resolveBtn) {
+    (async function () {
+      var wf = resolveBtn.dataset.wf;
+      var winner = prompt('Which option does ' + wf + ' fly? A for the primary, B for the alternative.', 'A');
+      if (!winner) return;
+      winner = winner.trim().toUpperCase();
+
+      var send = function (confirmed) {
+        return fetch('/admin/api/schedule-row/resolve-variant', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ eventId: window.WF_EVENT_ID, number: wf, winner: winner, confirm: confirmed })
+        });
+      };
+
+      var res = await send(false);
+      var body = await res.json().catch(function () { return {}; });
+
+      // Bookings were taken on a routing that is about to lose - say so and
+      // only go ahead once that is acknowledged.
+      if (res.status === 409 && body.needsConfirm) {
+        var ok = await openConfirmModal({ title: 'Settle ' + wf, message: body.error });
+        if (!ok) return;
+        res = await send(true);
+        body = await res.json().catch(function () { return {}; });
+      }
+      if (!res.ok) { alert(body.error || 'Could not settle this leg.'); return; }
+      location.reload();
+    })();
+    return;
+  }
+
   var btn = e.target.closest('.btn-delete-row');
   if (!btn) return;
 
@@ -30755,6 +30994,14 @@ document.addEventListener('click', async function(e) {
     letter-spacing: 1px; text-transform: uppercase;
   }
   .col-del { width:0; padding:0 !important; white-space:nowrap; }
+  /* A leg with an undecided destination is two rows sharing one slot. Tie
+     them together so they do not read as two separate sectors. */
+  .sched-alt-primary > td { border-top: 2px solid var(--warning); }
+  .sched-alt-row > td {
+    border-bottom: 2px solid var(--warning);
+    background: color-mix(in srgb, var(--warning) 6%, transparent);
+  }
+
   .btn-delete-row {
     background:none; border:none; color:var(--danger); cursor:pointer;
     font-size:11px; padding:2px 4px; opacity:0.3; transition:opacity .15s; line-height:1;
@@ -30769,6 +31016,9 @@ document.addEventListener('click', async function(e) {
   }
   .row-icon:hover { opacity: 1; }
   a.row-icon.simbrief-launch { color: #60a5fa; }
+  .row-icon svg { display: block; }
+  button.row-icon.btn-add-variant     { color: var(--warning); opacity: 0.75; }
+  button.row-icon.btn-resolve-variant { color: #4ade80; opacity: 0.85; }
   button.row-icon.sb-fetch { color: #4ade80; font-size: 13px; }
 
   /* ===== DATE PICKER ===== */
@@ -31999,6 +32249,10 @@ app.post('/admin/api/schedule-row/delete', requireAdmin, async (req, res) => {
   const { eventId, number } = req.body;
 
   try {
+    // An alternative is only ever a second option for its primary, so it goes
+    // when the primary does - otherwise it is left pointing at a leg that is
+    // no longer in the schedule.
+    await prisma.wfScheduleRow.deleteMany({ where: { eventId, variantOf: number } });
     await prisma.wfScheduleRow.delete({
       where: { eventId_number: { eventId, number } }
     });
@@ -32008,6 +32262,176 @@ app.post('/admin/api/schedule-row/delete', requireAdmin, async (req, res) => {
     if (err.code === 'P2025') return res.json({ ok: true });
     res.status(500).json({ error: err.message });
   }
+});
+
+// Add a route alternative to an existing leg. The primary keeps its number and
+// everything keyed on it (sector plan, claims, team assignments, booking keys);
+// the alternative is a sibling row numbered <primary>.<label> that shares the
+// primary's departure slot and carries its own destination and block time.
+app.post('/admin/api/schedule-row/add-variant', requireAdmin, async (req, res) => {
+  const eventId = Number(req.body.eventId);
+  const number  = String(req.body.number || '').trim().toUpperCase();
+  const from    = String(req.body.from || '').trim().toUpperCase();
+  const to      = String(req.body.to || '').trim().toUpperCase();
+  const label   = (String(req.body.label || 'B').toUpperCase().replace(/[^A-Z]/g, '') || 'B').slice(0, 1);
+
+  if (!Number.isFinite(eventId) || !number) return res.status(400).json({ error: 'Missing event or sector.' });
+  if (!/^[A-Z0-9]{4}$/.test(from) || !/^[A-Z0-9]{4}$/.test(to)) {
+    return res.status(400).json({ error: 'Both airports must be 4-character ICAO codes.' });
+  }
+  if (label === 'A') return res.status(400).json({ error: 'A is the primary leg - an alternative must be B or later.' });
+
+  const primary = await prisma.wfScheduleRow.findUnique({ where: { eventId_number: { eventId, number } } });
+  if (!primary) return res.status(404).json({ error: number + ' is not in this schedule.' });
+  if (primary.variantOf) {
+    return res.status(400).json({ error: number + ' is already an alternative for ' + primary.variantOf + ' - alternatives cannot be nested.' });
+  }
+
+  const variantNumber = number + '.' + label;
+  const clash = await prisma.wfScheduleRow.findUnique({ where: { eventId_number: { eventId, number: variantNumber } } });
+  if (clash) return res.status(409).json({ error: variantNumber + ' already exists.' });
+
+  if (from === primary.from && to === primary.to) {
+    return res.status(400).json({ error: 'That is the same routing as ' + number + ' - an alternative needs a different airport.' });
+  }
+
+  await prisma.wfScheduleRow.create({
+    data: {
+      eventId,
+      // Same slot in the running order as its primary. recalcScheduleTimes
+      // keeps the two in step and never lets an alternative advance the chain.
+      sortOrder: primary.sortOrder,
+      number: variantNumber,
+      variantOf: number,
+      from,
+      to,
+      dateUtc: primary.dateUtc,
+      depTimeUtc: primary.depTimeUtc,
+      arrTimeUtc: '',
+      blockTime: String(req.body.blockTime || primary.blockTime || '').trim(),
+      flightTime: String(req.body.flightTime || primary.flightTime || '').trim(),
+      atcRoute: String(req.body.atcRoute || '').trim(),
+      atcRoute2: ''
+    }
+  });
+
+  await recalcScheduleTimes(eventId);
+  console.log('[ROUTE ALT] Added ' + variantNumber + ' (' + from + ' -> ' + to + ') as an alternative to ' + number);
+  res.json({ ok: true, number: variantNumber });
+});
+
+// Settle a leg whose destination was undecided. The winning routing is written
+// onto the primary row, so the leg keeps the number every sector plan, claim,
+// assignment and booking key already points at, and the alternatives are
+// dropped. Bookings taken against a losing routing are reported first and only
+// removed once the caller confirms.
+app.post('/admin/api/schedule-row/resolve-variant', requireAdmin, async (req, res) => {
+  const eventId = Number(req.body.eventId);
+  const number  = String(req.body.number || '').trim().toUpperCase();
+  const winner  = String(req.body.winner || '').trim().toUpperCase();
+  const confirm = req.body.confirm === true;
+
+  if (!Number.isFinite(eventId) || !number || !winner) {
+    return res.status(400).json({ error: 'Missing event, sector or winning option.' });
+  }
+
+  const primary = await prisma.wfScheduleRow.findUnique({ where: { eventId_number: { eventId, number } } });
+  if (!primary) return res.status(404).json({ error: number + ' is not in this schedule.' });
+  if (primary.variantOf) return res.status(400).json({ error: 'Resolve ' + primary.variantOf + ', not one of its alternatives.' });
+
+  const variants = await prisma.wfScheduleRow.findMany({ where: { eventId, variantOf: number } });
+  if (!variants.length) return res.status(400).json({ error: number + ' has no route alternatives to resolve.' });
+
+  const winnerRow = winner === 'A' ? primary : variants.find(v => v.number === number + '.' + winner);
+  if (!winnerRow) return res.status(404).json({ error: number + '.' + winner + ' is not one of this leg\'s alternatives.' });
+
+  // Every routing that loses - the alternatives, plus the primary's own current
+  // pairing when an alternative is the one that won.
+  const losing = [];
+  if (winnerRow.id !== primary.id) losing.push({ from: primary.from, to: primary.to });
+  for (const v of variants) {
+    if (v.id === winnerRow.id) continue;
+    losing.push({ from: v.from, to: v.to });
+  }
+  const losingKeys = losing.map(l => l.from + '-' + l.to + '|');
+  const orphanedBookings = losingKeys.length
+    ? await prisma.tobtBooking.count({
+        where: { OR: losingKeys.map(k => ({ slotKey: { startsWith: k } })) }
+      }).catch(() => 0)
+    : 0;
+
+  if (orphanedBookings > 0 && !confirm) {
+    return res.status(409).json({
+      needsConfirm: true,
+      orphanedBookings,
+      losing: losing.map(l => l.from + '-' + l.to),
+      error: orphanedBookings + ' booking(s) were taken on the routing(s) that lose ('
+        + losing.map(l => l.from + '-' + l.to).join(', ')
+        + '). Confirm to delete them and settle the leg.'
+    });
+  }
+
+  // Move the winning routing onto the primary row.
+  if (winnerRow.id !== primary.id) {
+    await prisma.wfScheduleRow.update({
+      where: { id: primary.id },
+      data: {
+        from: winnerRow.from,
+        to: winnerRow.to,
+        blockTime: winnerRow.blockTime,
+        flightTime: winnerRow.flightTime,
+        atcRoute: winnerRow.atcRoute,
+        atcRoute2: winnerRow.atcRoute2
+      }
+    });
+
+    // The routes were agreed on the alternative's own sector plan, so carry it
+    // across to the primary's - otherwise the winning leg comes out of this
+    // with no agreed route at all.
+    const winnerPlan = await prisma.sectorPlan.findFirst({ where: { wf: winnerRow.number, eventId } }).catch(() => null);
+    if (winnerPlan) {
+      const primaryPlan = await getOrCreateSectorPlan(number, winnerRow.from, winnerRow.to);
+      if (primaryPlan) {
+        await prisma.sectorPlan.update({
+          where: { id: primaryPlan.id },
+          data: {
+            fromIcao: winnerRow.from,
+            toIcao: winnerRow.to,
+            depRouteSuggestion: winnerPlan.depRouteSuggestion,
+            arrRouteSuggestion: winnerPlan.arrRouteSuggestion,
+            depSplitRoute: winnerPlan.depSplitRoute,
+            depSplitPct: winnerPlan.depSplitPct,
+            arrSplitRoute: winnerPlan.arrSplitRoute,
+            arrSplitPct: winnerPlan.arrSplitPct,
+            splitAgreed: winnerPlan.splitAgreed,
+            depFlowType: winnerPlan.depFlowType,
+            depFlowReason: winnerPlan.depFlowReason,
+            depFlowRate: winnerPlan.depFlowRate,
+            arrFlowRequest: winnerPlan.arrFlowRequest,
+            arrFlowReason: winnerPlan.arrFlowReason
+          }
+        }).catch(() => null);
+      }
+    }
+  }
+
+  // Drop the alternatives and everything that was only ever theirs.
+  const variantNumbers = variants.map(v => v.number);
+  await prisma.sectorPlan.deleteMany({ where: { wf: { in: variantNumbers }, eventId } }).catch(() => null);
+  await prisma.wfScheduleRow.deleteMany({ where: { eventId, variantOf: number } });
+
+  if (orphanedBookings > 0) {
+    await prisma.tobtBooking.deleteMany({
+      where: { OR: losingKeys.map(k => ({ slotKey: { startsWith: k } })) }
+    }).catch(() => null);
+  }
+
+  await recalcScheduleTimes(eventId);
+  await loadTobtBookingsFromDb().catch(() => null);
+  console.log('[ROUTE ALT] ' + number + ' settled on ' + winnerRow.from + ' -> ' + winnerRow.to
+    + ' (option ' + winner + '); removed ' + variantNumbers.length + ' alternative(s), '
+    + orphanedBookings + ' booking(s)');
+  res.json({ ok: true, from: winnerRow.from, to: winnerRow.to, removedBookings: orphanedBookings });
 });
 
 app.post('/admin/api/schedule-row/recalc', requireAdmin, async (req, res) => {
@@ -32120,10 +32544,19 @@ async function recalcScheduleTimes(eventId) {
   const evt = wfEvents.find(e => e.id === eventId);
   const turnaround = evt?.turnaroundMins ?? 45;
 
-  const rows = await prisma.wfScheduleRow.findMany({
+  const allRows = await prisma.wfScheduleRow.findMany({
     where: { eventId },
     orderBy: { sortOrder: 'asc' }
   });
+
+  // Only primaries form the chain. A route alternative is a second option for
+  // a leg that is already in it, so letting one advance the clock would treat
+  // it as an extra sector and push every later leg out by its block time.
+  // Alternatives inherit their primary's date and departure, then work out
+  // their own arrival from their own block time (a different destination is a
+  // different flight length).
+  const rows = allRows.filter(r => !r.variantOf);
+  const variantRows = allRows.filter(r => r.variantOf);
 
   if (!rows.length) {
     await loadScheduleFromDb(eventId);
@@ -32149,12 +32582,17 @@ async function recalcScheduleTimes(eventId) {
 
   const sectorMode = evt?.nextSectorAfter === 'FLIGHT' ? 'FLIGHT' : 'BLOCK';
 
+  const parseHm = (s) => {
+    const p = (s || '').split(':');
+    return p.length >= 2 ? Number(p[0]) * 60 + Number(p[1]) : 0;
+  };
+
+  // Primary number -> the date/departure the chain settled on, so alternatives
+  // can be hung off it below.
+  const primaryTimes = {};
+
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const parseHm = (s) => {
-      const p = (s || '').split(':');
-      return p.length >= 2 ? Number(p[0]) * 60 + Number(p[1]) : 0;
-    };
     const blockMins = parseHm(r.blockTime);
     const flightMins = parseHm(r.flightTime);
 
@@ -32180,6 +32618,8 @@ async function recalcScheduleTimes(eventId) {
       data: updateData
     });
 
+    primaryTimes[r.number] = { dateStr, depStr, depTime };
+
     // Advance clock for next leg
     if (sectorMode === 'FLIGHT') {
       // Next dep = this dep + flight time (no turnaround). Fall back to block if flight time missing.
@@ -32199,8 +32639,29 @@ async function recalcScheduleTimes(eventId) {
     }
   }
 
+  // Alternatives ride on their primary's slot: same date and departure, own
+  // arrival. A primary that the chain never reached (it broke on a missing
+  // block time) leaves its alternatives alone rather than guessing.
+  for (const v of variantRows) {
+    const base = primaryTimes[v.variantOf];
+    if (!base) continue;
+
+    const blockMins = parseHm(v.blockTime);
+    const flightMins = parseHm(v.flightTime);
+    const arrMins = sectorMode === 'FLIGHT' ? (flightMins > 0 ? flightMins : blockMins) : blockMins;
+    const arrTime = arrMins > 0 ? new Date(base.depTime.getTime() + arrMins * 60000) : null;
+    const arrStr = arrTime
+      ? String(arrTime.getUTCHours()).padStart(2, '0') + ':' + String(arrTime.getUTCMinutes()).padStart(2, '0')
+      : '';
+
+    await prisma.wfScheduleRow.update({
+      where: { id: v.id },
+      data: { dateUtc: base.dateStr, depTimeUtc: base.depStr, arrTimeUtc: arrStr }
+    });
+  }
+
   await loadScheduleFromDb(eventId);
-  console.log(`[RECALC] Recalculated ${rows.length} legs for event ${eventId} (turnaround: ${turnaround}min, mode: ${sectorMode})`);
+  console.log(`[RECALC] Recalculated ${rows.length} legs for event ${eventId} (turnaround: ${turnaround}min, mode: ${sectorMode})`  + (variantRows.length ? `, plus ${variantRows.length} route alternative(s)` : ''));
 }
 
 function parseServerDate(str) {
@@ -32793,7 +33254,8 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         { key: 'wf-portal-banner',  label: 'Portal - Airport Selected for WF', icon: '✈️', desc: 'WorldFlight event banner on airport portal pages' },
         { key: 'flow-restrictions', label: 'Flow Restrictions & Booking', icon: '🚦', desc: 'Flow info on sector details and the Book column on the schedule page. When off, the sector page shows a placeholder and the schedule hides the Book column.' },
         { key: 'atc-route',         label: 'ATC Routes',           icon: '🛣️', desc: 'ATC route shown on schedule, sector, my-slots, affiliate, team-bookings and portal banners. Hide while routes are still being agreed with controllers.' },
-        { key: 'worldflight-challenge', label: 'WorldFlight Challenge', icon: '⭐', desc: 'Gold challenge-sector highlights on the schedule and sector pages, and the WorldFlight Challenge page. The admin schedule always shows the challenge sector regardless.' }
+        { key: 'worldflight-challenge', label: 'WorldFlight Challenge', icon: '⭐', desc: 'Gold challenge-sector highlights on the schedule and sector pages, and the WorldFlight Challenge page. The admin schedule always shows the challenge sector regardless.' },
+        { key: 'route-alternatives', label: 'Route Alternatives', icon: '🔀', desc: 'Legs whose destination is still undecided, carried as two options (e.g. WF2631.A EINN-EGSS and WF2631.B EINN-EGKB). Visible publishes both; Admin keeps them to admins and FIR managers, with the public seeing only the primary, unsuffixed. Add or settle an alternative from the admin schedule editor.' }
       ]
     }
   ];
@@ -48314,7 +48776,10 @@ app.get('/book', async (req, res) => {
       : null;
 
   // Find WF number for sector page link
-  const bookLeg = from && to ? adminSheetCache.find(r => r.from === from && r.to === to) : null;
+  // Legs whose destination is still undecided are only bookable once their
+  // alternatives are published (or for admins and FIR managers).
+  const bookRows = visibleScheduleRows(adminSheetCache, Number(req.session?.user?.data?.cid) || null);
+  const bookLeg = from && to ? bookRows.find(r => r.from === from && r.to === to) : null;
   const sectorUrl = bookLeg ? `/sector/${bookLeg.number}/${from}/${to}` : '/schedule';
 
 
@@ -48372,14 +48837,14 @@ app.get('/book', async (req, res) => {
       <h2>Make a Booking</h2>
 <div class="tobt-controls">
   ${preselectedKey ? (() => {
-    const ps = adminSheetCache.find(s => `${s.from}-${s.to}-${s.dep_time_utc}` === preselectedKey);
+    const ps = bookRows.find(s => `${s.from}-${s.to}-${s.dep_time_utc}` === preselectedKey);
     return ps
       ? `<div style="font-size:15px;font-weight:600;color:var(--text);padding:8px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;">${ps.number} | ${ps.from} – ${ps.to} <span style="color:var(--muted);font-size:12px;margin-left:8px;">${ps.date_utc}</span></div>`
       : `<div style="color:var(--muted);">Unknown departure</div>`;
   })() : `<div style="color:var(--muted);">No departure selected. <a href="/schedule" style="color:var(--accent);">Go to schedule</a></div>`}
   <select id="depSelect" class="tobt-select" style="display:none;">
         <option value="">Select a departure</option>
-        ${adminSheetCache.map(s => {
+        ${bookRows.map(s => {
   const value = `${s.from}-${s.to}-${s.dep_time_utc}`;
 const selected = value === preselectedKey ? 'selected' : '';
 

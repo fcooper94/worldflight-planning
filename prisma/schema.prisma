@@ -394,6 +394,11 @@ model WfScheduleRow {
   atcRoute2   String @default("")   // secondary route for traffic split
   isWfChallenge Boolean @default(false)
   vatcanEventId String?              // id returned by VATCAN's POST /api/event (e.g. "SCf56")
+  // Route alternative: NULL on a normal leg. On an alternative it holds the
+  // primary leg's number (e.g. "WF2631"), so WF2631 + WF2631.B are the two
+  // options for one leg. The primary keeps its plain number and is labelled
+  // ".A" at render time only - nothing keyed on the WF number has to move.
+  variantOf     String?
 
   @@unique([eventId, number])
   @@index([eventId])

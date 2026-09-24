@@ -5992,7 +5992,25 @@ html[data-map-theme="light"] .ac-label {
 }
 .schedule-page .departures-table th,
 .schedule-page .departures-table td { padding: 6px 14px; }
-.schedule-page .col-wf-sector { font-weight: 600; width: 7%; overflow: visible !important; text-overflow: unset !important; }
+.schedule-page .col-wf-sector { font-weight: 600; width: 9%; overflow: visible !important; text-overflow: unset !important; }
+
+/* Route alternatives: a leg whose destination is still undecided is carried as
+   two rows (WF2631.A / WF2631.B). Tie them together with a shared left rule so
+   they read as one pending decision rather than two separate sectors. Only
+   rendered for viewers allowed to see alternatives at all. */
+.schedule-page tr.sched-variant > td:first-child { position: relative; }
+.schedule-page tr.sched-variant > td:first-child::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--warning, #f59e0b);
+}
+.schedule-page tr.sched-variant-primary > td:first-child::before { border-radius: 2px 2px 0 0; top: 4px; }
+.schedule-page tr.sched-variant-alt > td:first-child::before     { border-radius: 0 0 2px 2px; bottom: 4px; }
+.schedule-page tr.sched-variant-alt > td { background: color-mix(in srgb, var(--warning, #f59e0b) 5%, transparent); }
 .schedule-page .col-from,
 .schedule-page .col-to        { width: 6%; overflow: visible; position: relative; }
 
@@ -6133,7 +6151,7 @@ html[data-map-theme="light"] .ac-label {
 .schedule-page .col-flight    { width: 10%; text-align: center; white-space: nowrap; }
 .schedule-page .col-block     { width: 10%; text-align: center; white-space: nowrap; overflow: visible; }
 .schedule-page .col-book      { width: 14%; text-align: center; overflow: visible; }
-.schedule-page .col-details   { width: 13%; text-align: center; }
+.schedule-page .col-details   { width: 11%; text-align: center; }
 .sector-details-btn {
   background: rgba(56,189,248,0.1);
   border: 1px solid rgba(56,189,248,0.3);
