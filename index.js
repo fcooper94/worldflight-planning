@@ -2623,6 +2623,14 @@ async function autoAssignTeamBookings({ reason = '' } = {}) {
         const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
         if (flow === 'NONE') continue;
 
+        // Route alternatives: an undecided leg is carried as two options, and
+        // both are flow-restricted, so without this a team/affiliate is
+        // auto-booked onto BOTH (EINN-EGSS and EINN-EGKB). When a choice has
+        // been recorded, only that option takes auto-assigned bookings. No
+        // choice recorded means book both, exactly as before.
+        if (row.auto_book_variant && row.variant_label
+            && row.variant_label !== row.auto_book_variant) continue;
+
         // The team marked this aircraft as not flying this sector.
         if (row.number && optedOut.has(`${team.fleetId}|${row.number}`)) continue;
 
@@ -2756,6 +2764,14 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
 
         const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
         if (flow === 'NONE') continue;
+
+        // Route alternatives: an undecided leg is carried as two options, and
+        // both are flow-restricted, so without this a team/affiliate is
+        // auto-booked onto BOTH (EINN-EGSS and EINN-EGKB). When a choice has
+        // been recorded, only that option takes auto-assigned bookings. No
+        // choice recorded means book both, exactly as before.
+        if (row.auto_book_variant && row.variant_label
+            && row.variant_label !== row.auto_book_variant) continue;
 
         const sectorPrefix = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
 
@@ -7470,6 +7486,13 @@ async function loadScheduleFromDb(eventId) {
   // nothing keyed on it has to move; it is only labelled ".A" at render time,
   // and only once an alternative actually exists.
   const variantParents = new Set(dbRows.filter(r => r.variantOf).map(r => r.variantOf));
+  // The option chosen to take auto-assigned team/affiliate bookings, stored
+  // on the primary and mirrored onto its alternatives so every row of a leg
+  // can answer "is this the option that gets booked?" on its own.
+  const autoBookByPrimary = {};
+  dbRows.forEach(r => {
+    if (!r.variantOf && r.autoBookVariant) autoBookByPrimary[r.number] = r.autoBookVariant;
+  });
 
   const plans = await prisma.sectorPlan.findMany({ where: { eventId } }).catch(() => []);
   const normRoute = s => (s || '').toUpperCase().replace(/\s+/g, ' ').trim();
@@ -7554,7 +7577,9 @@ async function loadScheduleFromDb(eventId) {
       has_variants: !r.variantOf && variantParents.has(r.number),
       variant_label: r.variantOf
         ? (String(r.number).split('.').pop() || 'B')
-        : (variantParents.has(r.number) ? 'A' : '')
+        : (variantParents.has(r.number) ? 'A' : ''),
+      // '' when no choice was recorded - both options keep taking bookings.
+      auto_book_variant: autoBookByPrimary[r.variantOf || r.number] || ''
     };
   });
 
@@ -29294,6 +29319,21 @@ ${eventRows.map((r, idx) => {
       </div>
 
       <div class="leg-section">
+        <div class="leg-section-title">Bookings</div>
+        <label style="display:block;">If bookings are required for this leg, allocate teams &amp; affiliates to
+          <select id="addVariantAutoBook" style="width:100%;margin-top:4px;">
+            <option value="A">Sector A &mdash; the existing routing</option>
+            <option value="B" id="addVariantAutoBookAlt">Sector B &mdash; this alternative</option>
+            <option value="">Both &mdash; no restriction</option>
+          </select>
+        </label>
+        <p style="margin:6px 0 0;color:var(--muted);font-size:11px;line-height:1.5;">
+          Applies to sectors with a flow restriction. Auto-assignment books teams and
+          affiliates onto the chosen option only, so nobody is given a slot on both.
+          Pilots can still book either option by hand.
+        </p>
+      </div>
+      <div class="leg-section">
         <div class="leg-section-title">Route Details</div>
         <label style="display:block;">ATC Route <span style="color:var(--muted);font-weight:400;font-size:11px;">optional &mdash; can be agreed later in Sector Planning</span>
           <textarea id="addVariantRoute" rows="2" placeholder="Enter or paste ATC route..." style="width:100%;margin-top:4px;padding:8px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e5e7eb;font-family:monospace;font-size:12px;resize:none;"></textarea>
@@ -30039,6 +30079,19 @@ function openAddVariantModal(data) {
   labelEl.value = 'B';
   blockEl.value = '';
   blockEl.placeholder = data.block ? data.block + ' (copied from ' + data.wf + ')' : 'HH:MM';
+  var autoBookEl = document.getElementById('addVariantAutoBook');
+  var autoBookAlt = document.getElementById('addVariantAutoBookAlt');
+  if (autoBookEl) autoBookEl.value = 'A';
+  // The alternative can be B, C or D - its entry names whichever is picked.
+  var syncAltOption = function () {
+    if (!autoBookAlt) return;
+    var wasAlt = autoBookEl && autoBookEl.value === autoBookAlt.value;
+    autoBookAlt.value = labelEl.value;
+    autoBookAlt.textContent = 'Sector ' + labelEl.value + ' — this alternative';
+    if (wasAlt) autoBookEl.value = labelEl.value;
+  };
+  syncAltOption();
+  labelEl.onchange = syncAltOption;
   routeEl.value = '';
   msg.className = 'modal-message hidden';
   msg.textContent = '';
@@ -30096,7 +30149,8 @@ function openAddVariantModal(data) {
         to: to,
         label: document.getElementById('addVariantLabel').value,
         blockTime: block,
-        atcRoute: document.getElementById('addVariantRoute').value.trim()
+        atcRoute: document.getElementById('addVariantRoute').value.trim(),
+        autoBookVariant: document.getElementById('addVariantAutoBook').value
       })
     });
     var body = await res.json().catch(function () { return {}; });
@@ -32325,12 +32379,19 @@ app.post('/admin/api/schedule-row/add-variant', requireAdmin, async (req, res) =
   const from    = String(req.body.from || '').trim().toUpperCase();
   const to      = String(req.body.to || '').trim().toUpperCase();
   const label   = (String(req.body.label || 'B').toUpperCase().replace(/[^A-Z]/g, '') || 'B').slice(0, 1);
+  // Which option takes auto-assigned team/affiliate bookings on a
+  // flow-restricted sector: 'A' (the primary), this alternative's own
+  // letter, or '' meaning no choice - both keep taking bookings.
+  const autoBook = String(req.body.autoBookVariant || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1);
 
   if (!Number.isFinite(eventId) || !number) return res.status(400).json({ error: 'Missing event or sector.' });
   if (!/^[A-Z0-9]{4}$/.test(from) || !/^[A-Z0-9]{4}$/.test(to)) {
     return res.status(400).json({ error: 'Both airports must be 4-character ICAO codes.' });
   }
   if (label === 'A') return res.status(400).json({ error: 'A is the primary leg - an alternative must be B or later.' });
+  if (autoBook && autoBook !== 'A' && autoBook !== label) {
+    return res.status(400).json({ error: 'Bookings must be allocated to A or ' + label + '.' });
+  }
 
   const primary = await prisma.wfScheduleRow.findUnique({ where: { eventId_number: { eventId, number } } });
   if (!primary) return res.status(404).json({ error: number + ' is not in this schedule.' });
@@ -32366,6 +32427,14 @@ app.post('/admin/api/schedule-row/add-variant', requireAdmin, async (req, res) =
     }
   });
 
+  // One decision per leg, so it lives on the primary row rather than being
+  // duplicated across the options.
+  if (autoBook) {
+    await prisma.wfScheduleRow.update({
+      where: { eventId_number: { eventId, number } },
+      data: { autoBookVariant: autoBook }
+    }).catch(() => null);
+  }
   await recalcScheduleTimes(eventId);
   console.log('[ROUTE ALT] Added ' + variantNumber + ' (' + from + ' -> ' + to + ') as an alternative to ' + number);
   res.json({ ok: true, number: variantNumber });
@@ -32468,6 +32537,12 @@ app.post('/admin/api/schedule-row/resolve-variant', requireAdmin, async (req, re
 
   // Drop the alternatives and everything that was only ever theirs.
   const variantNumbers = variants.map(v => v.number);
+  // The options are about to disappear, so the allocation choice goes with
+  // them - a stale letter would go on filtering a leg that has no options.
+  await prisma.wfScheduleRow.update({
+    where: { eventId_number: { eventId, number } },
+    data: { autoBookVariant: null }
+  }).catch(() => null);
   await prisma.sectorPlan.deleteMany({ where: { wf: { in: variantNumbers }, eventId } }).catch(() => null);
   await prisma.wfScheduleRow.deleteMany({ where: { eventId, variantOf: number } });
 

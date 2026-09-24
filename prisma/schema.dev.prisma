@@ -389,6 +389,12 @@ model WfScheduleRow {
   isWfChallenge Boolean @default(false)
   vatcanEventId String?
   variantOf     String?
+  // Which option of an undecided leg takes auto-assigned team and affiliate
+  // bookings, as the option letter ("A" for the primary, "B" for the first
+  // alternative). Set on the PRIMARY row only - one decision per leg. NULL
+  // means no choice was recorded and both options are booked, as they were
+  // before this existed. Only consulted on flow-restricted sectors.
+  autoBookVariant String?
 
   @@unique([eventId, number])
   @@index([eventId])
