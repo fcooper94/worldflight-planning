@@ -1281,6 +1281,17 @@ async function loadSiteGate() {
   siteGate.enabled = row ? row.value === 'true' : true;
   console.log('[SECURITY] Site password gate', siteGate.enabled ? 'ENABLED' : 'DISABLED', '(toggle via Admin → Page Visibility)');
 }
+/* ===== AFFILIATE APPLICATIONS OPEN/CLOSED =====
+   Stored in SiteSetting 'affiliate-applications-enabled'. When closed, the
+   public /affiliate-apply form is replaced by a "closed" landing page and the
+   public submit endpoint refuses new applications. Admin-entered applications
+   (/admin/api/affiliate-applications) are unaffected. Defaults to open. */
+const affiliateApplications = { enabled: true };
+async function loadAffiliateApplicationsSetting() {
+  const row = await prisma.siteSetting.findUnique({ where: { key: 'affiliate-applications-enabled' } }).catch(() => null);
+  affiliateApplications.enabled = row ? row.value === 'true' : true;
+  console.log('[SETTINGS] Affiliate applications', affiliateApplications.enabled ? 'OPEN' : 'CLOSED');
+}
 const SITE_GATE_ALLOW = /\.(css|js|png|jpg|jpeg|gif|svg|geojson|ico|webp|woff2?|ttf|otf|map)$/i;
 
 app.get('/site-password', (req, res) => {
@@ -3654,6 +3665,7 @@ async function bootstrap() {
   await loadPageVisibility();
   await loadSiteBanner();
   await loadSiteGate();
+  await loadAffiliateApplicationsSetting();
   await loadMasterUsers();
   await refreshOpenAtcRequestCount();
   await loadTeamMembers();
@@ -26849,6 +26861,24 @@ const WF_DISCORD_INVITE = String(process.env.DISCORD_INVITE_URL || '').trim() ||
 app.get('/affiliate-apply', async (req, res) => {
   const user = req.session?.user?.data || null;
   const isAdmin = user ? isAdminUser(user.cid) : false;
+
+  // Applications closed (Admin > Page Visibility > Site): everyone gets the
+  // closed landing page instead of the form.
+  if (!affiliateApplications.enabled) {
+    const closedContent = `
+  <section class="card card-full" style="padding:40px 28px;text-align:center;">
+    <div style="max-width:560px;margin:0 auto;display:flex;flex-direction:column;align-items:center;gap:14px;">
+      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      <h2 style="margin:0;">Affiliate Applications Closed</h2>
+      <p style="color:var(--muted);margin:0;line-height:1.6;">Due to a huge number of applications, applications for this year's event are closed for new affiliate teams.</p>
+      <p style="margin:0;line-height:1.6;">You are of course welcome to fly along anyway and raise money for your own charities!</p>
+      ${isAdmin ? '<p style="color:var(--muted);font-size:12px;margin:8px 0 0;">Admin: reopen applications from <a href="/admin/settings" style="color:var(--accent);">Page Visibility</a>.</p>' : ''}
+    </div>
+  </section>`;
+    return res.send(renderLayout({ title: 'Affiliate Applications Closed', user, isAdmin, content: closedContent, layoutClass: 'dashboard-full' }));
+  }
   const cid = Number(user?.cid) || null;
 
   let existingState = null; // 'pending' | 'affiliate' | null
@@ -28037,6 +28067,9 @@ app.post('/api/affiliate-applications', (req, res, next) => {
     next();
   });
 }, async (req, res) => {
+  if (!affiliateApplications.enabled) {
+    return res.status(403).json({ error: "Applications for this year's event are closed for new affiliate teams." });
+  }
   const sessUser = req.session?.user?.data;
   const cid = Number(sessUser?.cid);
   if (!cid) return res.status(401).json({ error: 'You must be logged in to apply' });
@@ -33466,6 +33499,25 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
             </label>
           </div>
         </div>
+
+        <div class="settings-row">
+          <div class="settings-row-info">
+            <span class="settings-row-icon">📝</span>
+            <div>
+              <div class="settings-row-label">Affiliate Applications</div>
+              <div class="settings-row-desc">Public application form at <code>/affiliate-apply</code>. When disabled, visitors see an "applications closed" page instead. Admins can still add applications from the Applications tab.</div>
+            </div>
+          </div>
+          <div class="settings-row-controls">
+            <span class="vis-pill ${affiliateApplications.enabled ? 'vis-on' : 'vis-off'}" id="affAppsPill">
+              ${affiliateApplications.enabled ? 'Enabled' : 'Disabled'}
+            </span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="affAppsToggle" ${affiliateApplications.enabled ? 'checked' : ''} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
       </div>
 
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
@@ -33729,6 +33781,28 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         });
       }
 
+      // Affiliate applications open/closed toggle
+      var affAppsToggle = document.getElementById('affAppsToggle');
+      if (affAppsToggle) {
+        affAppsToggle.addEventListener('change', async function() {
+          var enabled = this.checked;
+          var pill = document.getElementById('affAppsPill');
+          var res = await fetch('/api/admin/affiliate-applications-enabled', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabled })
+          });
+          if (res.ok) {
+            pill.textContent = enabled ? 'Enabled' : 'Disabled';
+            pill.className = 'vis-pill ' + (enabled ? 'vis-on' : 'vis-off');
+          } else {
+            this.checked = !enabled;
+            var err = await res.json().catch(function() { return {}; });
+            alert(err.error || 'Failed to update affiliate applications');
+          }
+        });
+      }
+
       // Banner toggle
       document.getElementById('bannerToggle').addEventListener('change', async function() {
         const enabled = this.checked;
@@ -33817,6 +33891,21 @@ app.post('/api/admin/site-gate', requireAdmin, async (req, res) => {
   });
   siteGate.enabled = enabled;
   console.log('[SECURITY] Site password gate', enabled ? 'ENABLED' : 'DISABLED', 'via admin toggle');
+  res.json({ success: true });
+});
+
+app.post('/api/admin/affiliate-applications-enabled', requireAdmin, async (req, res) => {
+  const { enabled } = req.body || {};
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'Invalid value' });
+  }
+  await prisma.siteSetting.upsert({
+    where: { key: 'affiliate-applications-enabled' },
+    update: { value: String(enabled) },
+    create: { key: 'affiliate-applications-enabled', value: String(enabled) }
+  });
+  affiliateApplications.enabled = enabled;
+  console.log('[SETTINGS] Affiliate applications', enabled ? 'OPEN' : 'CLOSED', 'via admin toggle');
   res.json({ success: true });
 });
 
