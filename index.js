@@ -8850,6 +8850,9 @@ app.get('/', async (req, res) => {
       + '&manualrmk=' + encodeURIComponent('Route validated from www.worldflight.center');
 
   const nsShowRoute = isAdmin || isPageEnabled('atc-route');
+  // Flow rate, capacity and bookings are not public until flow restrictions
+  // are released - same key the schedule uses to gate its Book column.
+  const nsShowFlow = isPageVisibleTo('flow-restrictions', isAdmin);
   const nsSectorKey = nextSector ? `${nextSector.from}-${nextSector.to}` : '';
   const nsFlowType = nsSectorKey ? (sharedFlowTypes[nsSectorKey] || 'NONE') : 'NONE';
   const nsFlowRate = nsSectorKey ? (sharedDepFlows[nsSectorKey] || 0) : 0;
@@ -9007,7 +9010,7 @@ app.get('/', async (req, res) => {
             </div>
           </div>
 
-          <div class="db-next-card">
+          <div class="db-next-card${nsShowFlow ? '' : ' db-next-card--wide'}">
             <div class="db-next-label">ATC Route</div>
             ${nsShowRoute && nextSector.atc_route ? `
               <div class="db-next-route${nsAssigned === 'A' ? ' is-assigned' : ''}">
@@ -9025,6 +9028,7 @@ app.get('/', async (req, res) => {
             ` : `<div class="db-next-empty">${nsShowRoute ? 'No route published yet.' : 'Routes are not published yet.'}</div>`}
           </div>
 
+          ${nsShowFlow ? `
           <div class="db-next-card">
             <div class="db-next-label">Flow &amp; Booking</div>
             <div class="db-next-flow">
@@ -9053,6 +9057,7 @@ app.get('/', async (req, res) => {
               return `<a class="db-next-book" href="/book?from=${nextSector.from}&amp;to=${nextSector.to}&amp;dateUtc=${encodeURIComponent(nextSector.date_utc || '')}&amp;depTimeUtc=${encodeURIComponent(nextSector.dep_time_utc || '')}">Make a booking</a>`;
             })()}
           </div>
+          ` : ''}
 
           <div class="db-next-card">
             <div class="db-next-label">Scenery</div>
