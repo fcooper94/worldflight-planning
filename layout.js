@@ -52,6 +52,7 @@ export default function renderLayout({
     globe:       svg('<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/>'),
     users:       svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
     clipboard:   svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="14" y2="16"/>'),
+    megaphone:   svg('<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>'),
     briefcase:   svg('<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>'),
     settings:    svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>')
   };
@@ -110,7 +111,7 @@ export default function renderLayout({
       </a>
     </div>` : ''}
 
-    ${pv('atc') || (pv('airspace') && canSeeStaffing) || (pv('sector-planning') && hasFirAccess) || (pv('request-atc') && hasFirAccess) ? `<div class="nav-section">
+    ${isAdmin || pv('atc') || (pv('airspace') && canSeeStaffing) || (pv('sector-planning') && hasFirAccess) || (pv('request-atc') && hasFirAccess) ? `<div class="nav-section">
       <div class="nav-title">Planning</div>
       ${pv('atc') ? `<a href="/atc" class="nav-item" data-tooltip="WF Flow Control">
         <span class="icon">${icons.headphones}</span>
@@ -123,6 +124,10 @@ export default function renderLayout({
       ${pv('request-atc') && hasFirAccess ? `<a href="/request-atc" class="nav-item" data-tooltip="Request ATC">
         <span class="icon">${icons.headphones}</span>
         <span class="label">Request ATC</span>
+      </a>` : ''}
+      ${isAdmin ? `<a href="/sector-notices" class="nav-item" data-tooltip="Sector Notices">
+        <span class="icon">${icons.megaphone}</span>
+        <span class="label">Sector Notices</span>
       </a>` : ''}
       ${pv('sector-planning') && hasFirAccess ? `<a href="/sector-planning" class="nav-item" data-tooltip="Sector Planning">
         <span class="icon">${icons.clipboard}</span>

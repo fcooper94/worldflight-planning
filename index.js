@@ -3085,17 +3085,26 @@ function buildAffiliateSimbriefUrl(scheduleRow, affiliate, claimedCid, includeRo
 
   const remarkParts = [label];
   if (flow !== 'NONE') {
-    if (tobt) remarkParts.push(`WF TCT/${String(tobt).replace(':', '')}z`);
+    // displayTobt first: the stored time carries the slot-key suffix
+    // ("19:50#4") when several slots share a minute, and that must not end
+    // up in a filed flight plan remark.
+    if (tobt) remarkParts.push(`WF TCT/${displayTobt(String(tobt)).replace(':', '')}z`);
     else if (booking) remarkParts.push('WF Booking Confirmed');
   }
   remarkParts.push('WWW.PLANNING.WORLDFLIGHT.CENTER');
   const remark = remarkParts.join(' - ');
 
+  const sbRoute = (booking?.assignedRoute === 'B' && scheduleRow.atc_route2 && scheduleRow.atc_route2 !== '-')
+    ? scheduleRow.atc_route2
+    : scheduleRow.atc_route;
+
   const callsign = String(affiliate?.callsign || '').toUpperCase();
   const params = new URLSearchParams({
     orig: scheduleRow.from || '',
     dest: scheduleRow.to || '',
-    route: includeRoute && scheduleRow.atc_route && scheduleRow.atc_route !== '-' ? scheduleRow.atc_route : '',
+    // A split sector puts some aircraft on Route B, so plan whichever route
+    // this booking was actually assigned rather than always the primary.
+    route: includeRoute && sbRoute && sbRoute !== '-' ? sbRoute : '',
     callsign,
     manualrmk: remark
   });
@@ -8578,6 +8587,15 @@ function buildTimeWindow(hhmm) {
   return `${subtractMinutes(hhmm, 60)}–${addMinutes(hhmm, 60)}`;
 }
 
+// "2000-2200z" - the compact UTC form the schedule, HQ and dashboard all use.
+// buildTimeWindow() keeps the colons for the pages that want them. Module
+// level on purpose: several handlers define their own local copy of this one,
+// and new code should not add another.
+function utcWindow(hhmm) {
+  const w = buildTimeWindow(hhmm);
+  return w ? w.replace(/:/g, '').replace(/[–—]/g, '-') + 'z' : '';
+}
+
 function addMinutes(timeStr, minutes) {
   const [hh, mm] = timeStr.split(':').map(Number);
   const d = new Date(Date.UTC(2000, 0, 1, hh, mm));
@@ -8760,6 +8778,167 @@ app.get('/', async (req, res) => {
     .sort(() => Math.random() - 0.5)
     .slice(0, 3);
 
+  // ===== NEXT SECTOR =====
+  // The next leg still to depart. Route alternatives are filtered out for
+  // viewers who may not see them, and the panel always tracks the primary
+  // row so it keeps working while a destination is still undecided.
+  const _nsRows = visibleScheduleRows(adminSheetCache, cid).filter(r => !r.is_variant);
+  const _nsNow = Date.now();
+  const _legDepMs = (r) => {
+    const d = parseServerDate(r.date_utc);
+    const m = String(r.dep_time_utc || '').match(/^(\d{1,2}):?(\d{2})$/);
+    if (!d || !m) return null;
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), Number(m[1]), Number(m[2]));
+  };
+  // This viewer's booking on a given leg. Slot keys carry a suffix when
+  // several share a minute, so match on the sector prefix rather than
+  // rebuilding the whole key.
+  const _bookingFor = (row) => {
+    if (!cid || !row) return null;
+    const prefix = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
+    for (const bk of (tobtBookingsByCid[cid] || [])) {
+      if (bk.includes(prefix)) return tobtBookingsByKey[bk];
+    }
+    return null;
+  };
+
+  // Is this viewer airborne on that leg right now? Read from the VATSIM feed
+  // we already poll. Groundspeed is the signal to trust - airport elevation
+  // is nullable, so an AGL check would misjudge anyone at a high field.
+  // Counts as flying it if they hold a booking on the leg or their filed
+  // route matches it, so unrestricted sectors (no booking) still work.
+  const _isFlyingLeg = (row) => {
+    if (!cid || !row) return false;
+    const p = (cachedPilots || []).find(x => Number(x.cid) === Number(cid));
+    if (!p || Number(p.groundspeed || 0) < 80) return false;
+    if (_bookingFor(row)) return true;
+    const dep = String(p.flight_plan?.departure || '').toUpperCase();
+    const arr = String(p.flight_plan?.arrival || '').toUpperCase();
+    return dep === String(row.from).toUpperCase() && arr === String(row.to).toUpperCase();
+  };
+
+  // The booking window runs to dep +60, so pilots can still be departing an
+  // hour after the scheduled time - hold the card on that leg until the
+  // window shuts rather than flipping at the departure time itself.
+  // Before the event this lands on leg one; once the last leg has gone it
+  // stays there rather than the panel emptying mid-event.
+  const NS_DEP_WINDOW_MS = 60 * 60 * 1000;
+  let nextSector = _nsRows.find(r => {
+    const ms = _legDepMs(r);
+    return ms != null && (ms + NS_DEP_WINDOW_MS) >= _nsNow;
+  }) || _nsRows[_nsRows.length - 1] || null;
+
+  // Already airborne on that leg? Then they are flying it now, and the one
+  // they need to prepare for is the next one down the schedule.
+  if (nextSector && _isFlyingLeg(nextSector)) {
+    const i = _nsRows.indexOf(nextSector);
+    if (i >= 0 && _nsRows[i + 1]) nextSector = _nsRows[i + 1];
+  }
+
+  // Departure instant for the sector date. The client formats it to the
+  // viewer's own locale; this is only the value and a server-side fallback.
+  const nsDateMs = nextSector ? _legDepMs(nextSector) : null;
+
+  // Routes are only shown once published - same gate the schedule uses, so
+  // this cannot leak a route that is still being agreed with controllers.
+  // Each route gets its own SimBrief link - same shape the sector page uses,
+  // so a pilot can plan the exact route they have been given.
+  const nsSimbriefUrl = (route) => !nextSector ? '#'
+    : 'https://dispatch.simbrief.com/options/custom?orig=' + nextSector.from
+      + '&dest=' + nextSector.to
+      + '&route=' + encodeURIComponent(route || '')
+      + '&manualrmk=' + encodeURIComponent('Route validated from www.worldflight.center');
+
+  const nsShowRoute = isAdmin || isPageEnabled('atc-route');
+  const nsSectorKey = nextSector ? `${nextSector.from}-${nextSector.to}` : '';
+  const nsFlowType = nsSectorKey ? (sharedFlowTypes[nsSectorKey] || 'NONE') : 'NONE';
+  const nsFlowRate = nsSectorKey ? (sharedDepFlows[nsSectorKey] || 0) : 0;
+  const nsFlowLabel = nsFlowType === 'SLOTTED' ? 'Booking with Connection Time'
+    : nsFlowType === 'BOOKING_ONLY' ? 'Booking Only' : 'No Restrictions';
+  const nsFlowExplain = nsFlowType === 'SLOTTED'
+    ? 'TCT is a Target Connection Time. This is the time to connect to VATSIM. TCTs stagger pilot connections at this airport so the network and controllers aren\u2019t overwhelmed.'
+    : nsFlowType === 'BOOKING_ONLY'
+      ? 'A booking is required to fly this sector. There is no set connection time.'
+      : '';
+  const nsNeedsBooking = nsFlowType === 'SLOTTED' || nsFlowType === 'BOOKING_ONLY';
+
+  // How busy the sector is. Slotted sectors have discrete slots to count;
+  // booking-only sectors get their capacity from the flow rate across the
+  // two-hour departure window. Same sums the sector page shows.
+  let nsCapTotal = 0, nsCapUsed = 0;
+  if (nextSector && nsFlowType === 'SLOTTED') {
+    const slotPrefix = `${nextSector.from}-${nextSector.to}|`;
+    for (const k of Object.keys(allTobtSlots)) {
+      if (!k.startsWith(slotPrefix)) continue;
+      nsCapTotal++;
+      if (isSlotTaken(k)) nsCapUsed++;
+    }
+  } else if (nextSector && nsFlowType === 'BOOKING_ONLY') {
+    const cap = getBookingOnlyCapacity(nextSector.from, nextSector.to);
+    nsCapTotal = cap.total;
+    nsCapUsed = cap.used;
+  }
+  const nsCapLeft = Math.max(0, nsCapTotal - nsCapUsed);
+  const nsCapPct = nsCapTotal > 0 ? Math.min(100, Math.round((nsCapUsed / nsCapTotal) * 100)) : 0;
+  const nsCapLevel = nsCapLeft <= 0 ? 'is-full' : nsCapPct >= 75 ? 'is-busy' : 'is-ok';
+
+  const nsBooking = _bookingFor(nextSector);
+  // tobtTimeUtc carries the slot-key suffix ("19:50#4") when a flow rate puts
+  // several slots in the same minute - displayTobt trims it back to the time.
+  // Shown as 1950z rather than 19:50z, matching how slot times are written
+  // everywhere else.
+  const nsTct = nsBooking?.tobtTimeUtc
+    ? displayTobt(String(nsBooking.tobtTimeUtc)).replace(':', '')
+    : null;
+  const nsBookedRoute = nsBooking?.assignedRoute || 'A';
+  // Only meaningful once the pilot holds a booking on a sector that actually
+  // has a split - otherwise there is no assignment to report.
+  const nsHasSplit = !!(nextSector && nextSector.atc_route2);
+  const nsAssigned = (nsBooking && nsHasSplit) ? nsBookedRoute : null;
+
+  // Scenery for both ends. MSFS gets a direct link, payware preferred and
+  // freeware only when that is all there is; anything for another sim is a
+  // count with a link through to the airport portal.
+  const nsIcaos = nextSector ? [nextSector.from, nextSector.to].filter(Boolean).map(x => String(x).toUpperCase()) : [];
+  const nsScenery = nsIcaos.length
+    ? await prisma.airportScenery.findMany({
+        where: { icao: { in: nsIcaos }, approved: true },
+        select: { icao: true, sim: true, name: true, developer: true, url: true, type: true }
+      }).catch(() => [])
+    : [];
+  // Pilot briefs: the documents uploaded for either end of the sector. Event
+  // scoping matches the airport portal - NULL eventId is permanent, a tagged
+  // one is only current while that event is active, and non-admins never see
+  // documents from an event that has been archived.
+  const nsDocs = nsIcaos.length
+    ? await prisma.airportDocument.findMany({
+        where: { icao: { in: nsIcaos } },
+        orderBy: { uploadedAt: 'desc' },
+        select: { icao: true, filename: true, eventId: true }
+      }).catch(() => [])
+    : [];
+  const nsVisibleDocs = nsDocs.filter(d => isAdmin || d.eventId == null || d.eventId === activeEventId);
+  const nsDocsFor = (icao) => nsVisibleDocs.filter(d => String(d.icao).toUpperCase() === icao);
+
+  // Sector notice - a note for everyone flying this leg. Stored in SiteSetting
+  // under "sector-notice:<WF>" so it needs no schema change; the authoring UI
+  // is still to come.
+  const nsNoticeRow = nextSector
+    ? await prisma.siteSetting.findUnique({ where: { key: `sector-notice:${nextSector.number}` } }).catch(() => null)
+    : null;
+  const nsNotice = (nsNoticeRow?.value || '').trim();
+
+  // Stored types are a mix of "Payware", "PAID" and "Freeware".
+  const _isPayware = t => /pay|paid/i.test(String(t || ''));
+  const nsSceneryFor = (icao) => {
+    const rows = nsScenery.filter(x => String(x.icao).toUpperCase() === icao);
+    const msfs = rows.filter(x => String(x.sim).toUpperCase() === 'MSFS');
+    return {
+      pick: msfs.find(x => _isPayware(x.type)) || msfs[0] || null,
+      others: rows.length - msfs.length
+    };
+  };
+
   const content = `
     <div class="db-page">
 
@@ -8768,18 +8947,164 @@ app.get('/', async (req, res) => {
           <h1 class="db-greeting">${greeting}</h1>
           <p class="db-subtitle">${activeEvent.name || 'No active event'}</p>
         </div>
-        ${activeEvent.startDateUtc ? `<div class="db-hero-date">${activeEvent.startDateUtc}</div>` : ''}
       </div>
 
       <div class="db-stats">
         ${heroTiles.map(t => `<a href="${t.href}" class="db-stat db-stat-link">
           <div class="db-stat-icon">
-            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${t.icon}</svg>
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${t.icon}</svg>
           </div>
-          <div class="db-stat-label">${t.label}</div>
-          <div class="db-stat-desc">${t.desc}</div>
+          <div class="db-stat-text">
+            <div class="db-stat-label">${t.label}</div>
+            <div class="db-stat-desc">${t.desc}</div>
+          </div>
         </a>`).join('')}
       </div>
+
+      ${nextSector ? `
+      <div class="db-section db-next">
+        <div class="db-section-header">
+          <h2 class="db-section-title">Next Sector</h2>
+          <a href="/sector/${nextSector.number}/${nextSector.from}/${nextSector.to}" class="db-section-link">View sector</a>
+        </div>
+
+        <div class="db-next-body">
+        <div class="db-next-head">
+          <span class="db-next-wf">${scheduleRowLabel(nextSector, cid)}</span>
+          <span class="db-next-leg">${nextSector.from} <span class="db-next-arrow">\u2192</span> ${nextSector.to}</span>
+          <span class="db-next-date" data-utc-ms="${nsDateMs || ''}">${escapeHtml(nextSector.date_utc || '')}</span>
+        </div>
+        ${nextSector.has_variants ? `<div class="db-next-undecided">Destination not yet decided \u2014 this leg has a route alternative.</div>` : ''}
+        <script>
+          (function () {
+            // Write the date the way this viewer's locale does - DD/MM/YYYY or
+            // MM/DD/YYYY - rather than the server guessing from a header.
+            // Formatted in UTC so the sector date cannot slip a day for anyone
+            // west of Greenwich. Falls back to the server text if anything here
+            // is unavailable.
+            var el = document.querySelector('.db-next-date[data-utc-ms]');
+            if (!el) return;
+            var ms = Number(el.getAttribute('data-utc-ms'));
+            if (!ms) return;
+            try {
+              el.textContent = new Intl.DateTimeFormat(undefined, {
+                day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC'
+              }).format(new Date(ms));
+            } catch (e) { /* keep the server-rendered fallback */ }
+          })();
+        </script>
+
+        <div class="db-next-grid">
+
+          <div class="db-next-card db-next-card--wide db-next-times">
+            <div class="db-next-time">
+              <div class="db-next-label">Departure Window</div>
+              <div class="db-next-time-val">${nextSector.dep_time_utc ? timeWindow(nextSector.dep_time_utc) : '\u2014'}</div>
+            </div>
+            <div class="db-next-time">
+              <div class="db-next-label">Arrival Window</div>
+              <div class="db-next-time-val">${nextSector.arr_time_utc ? timeWindow(nextSector.arr_time_utc) : '\u2014'}</div>
+            </div>
+          </div>
+
+          <div class="db-next-card">
+            <div class="db-next-label">ATC Route</div>
+            ${nsShowRoute && nextSector.atc_route ? `
+              <div class="db-next-route${nsAssigned === 'A' ? ' is-assigned' : ''}">
+                ${nsHasSplit ? `<span class="db-next-route-tag">Primary</span>` : ''}
+                <code>${escapeHtml(nextSector.atc_route)}</code>
+                ${!nsAssigned || nsAssigned === 'A' ? `<a class="db-next-sb" href="${nsSimbriefUrl(nextSector.atc_route)}" target="_blank" rel="noopener" title="Plan this route with SimBrief"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>SimBrief</a>` : ''}
+              </div>
+              ${nsAssigned === 'A' ? `<div class="db-next-assigned">You have been assigned the primary route.</div>` : ''}
+              ${nsHasSplit ? `<div class="db-next-route${nsAssigned === 'B' ? ' is-assigned' : ''}">
+                <span class="db-next-route-tag">Secondary</span>
+                <code>${escapeHtml(nextSector.atc_route2)}</code>
+                ${!nsAssigned || nsAssigned === 'B' ? `<a class="db-next-sb" href="${nsSimbriefUrl(nextSector.atc_route2)}" target="_blank" rel="noopener" title="Plan the secondary route with SimBrief"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>SimBrief</a>` : ''}
+              </div>` : ''}
+              ${nsAssigned === 'B' ? `<div class="db-next-assigned">You have been assigned the secondary route.</div>` : ''}
+            ` : `<div class="db-next-empty">${nsShowRoute ? 'No route published yet.' : 'Routes are not published yet.'}</div>`}
+          </div>
+
+          <div class="db-next-card">
+            <div class="db-next-label">Flow &amp; Booking</div>
+            <div class="db-next-flow">
+              <span class="db-next-pill db-next-pill--${nsFlowType === 'NONE' ? 'none' : 'flow'}">${nsFlowLabel}</span>
+              ${nsNeedsBooking && nsFlowRate > 0 ? `<span class="db-next-rate">${nsFlowRate} deps / hour</span>` : ''}
+            </div>
+            ${nsFlowExplain ? `<div class="db-next-flow-note">${nsFlowExplain}</div>` : ''}
+            ${nsNeedsBooking && nsCapTotal > 0 ? `
+              <div class="db-next-cap ${nsCapLevel}">
+                <div class="db-next-cap-head">
+                  <span class="db-next-cap-count"><strong>${nsCapUsed}</strong> of ${nsCapTotal} booked</span>
+                  <span class="db-next-cap-left">${nsCapLeft > 0 ? `${nsCapLeft} left` : 'Full'}</span>
+                </div>
+                <div class="db-next-cap-bar"><span style="width:${nsCapPct}%"></span></div>
+              </div>
+            ` : ''}
+            ${(() => {
+              if (nsBooking) {
+                return `<div class="db-next-booked">
+                    <span class="db-next-pill db-next-pill--ok">Booked${nsTct ? ` ${nsTct}z` : ''}</span>
+                    ${nsTct ? `<span class="db-next-tct-note">Please connect on a stand at ${nextSector.from} at ${nsTct}z.</span>` : ''}
+                  </div>`;
+              }
+              if (!nsNeedsBooking) return `<div class="db-next-empty">No booking needed for this sector.</div>`;
+              if (!cid) return `<a class="db-next-book" href="/auth/login">Log in to make a booking</a>`;
+              return `<a class="db-next-book" href="/book?from=${nextSector.from}&amp;to=${nextSector.to}&amp;dateUtc=${encodeURIComponent(nextSector.date_utc || '')}&amp;depTimeUtc=${encodeURIComponent(nextSector.dep_time_utc || '')}">Make a booking</a>`;
+            })()}
+          </div>
+
+          <div class="db-next-card">
+            <div class="db-next-label">Scenery</div>
+            ${nsIcaos.map(icao => {
+              const sc = nsSceneryFor(icao);
+              const other = sc.others > 0
+                ? `<a class="db-next-scenery-more" href="/icao/${icao}">${sc.others} for other sims</a>`
+                : '';
+              if (!sc.pick) {
+                return `<div class="db-next-scenery">
+                    <span class="db-next-icao">${icao}</span>
+                    ${other || `<span class="db-next-empty">No scenery listed.</span>`}
+                  </div>`;
+              }
+              const pay = _isPayware(sc.pick.type);
+              return `<div class="db-next-scenery">
+                  <span class="db-next-icao">${icao}</span>
+                  <a class="db-next-scenery-link" href="${escapeHtml(sc.pick.url)}" target="_blank" rel="noopener">
+                    <span class="db-next-pill db-next-pill--${pay ? 'pay' : 'free'}">MSFS ${pay ? 'Payware' : 'Freeware'}</span>
+                    <span class="db-next-scenery-name">${escapeHtml(sc.pick.name || '')}${sc.pick.developer ? ` \u00b7 ${escapeHtml(sc.pick.developer)}` : ''}</span>
+                  </a>
+                  ${other}
+                </div>`;
+            }).join('')}
+          </div>
+
+          <div class="db-next-card">
+            <div class="db-next-label">Pilot Briefs</div>
+            ${nsIcaos.map(icao => {
+              const docs = nsDocsFor(icao);
+              return `<div class="db-next-brief">
+                  <span class="db-next-icao">${icao}</span>
+                  ${docs.length
+                    ? `<div class="db-next-brief-list">` + docs.map(d => {
+                        const label = String(d.filename).replace(/\.[^/.]+$/, '');
+                        return `<a class="db-next-brief-link" href="/uploads/${icao}/${encodeURIComponent(d.filename)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`;
+                      }).join('') + `</div>`
+                    : `<span class="db-next-empty">No briefs uploaded.</span>`}
+                </div>`;
+            }).join('')}
+          </div>
+
+          <div class="db-next-card db-next-card--wide db-next-notice">
+            <div class="db-next-label">Sector Message from WF Organisers</div>
+            ${nsNotice
+              ? `<div class="db-next-notice-body">${escapeHtml(nsNotice)}</div>`
+              : `<div class="db-next-empty">No message for this sector.</div>`}
+          </div>
+
+        </div>
+        </div>
+      </div>` : ''}
 
       ${adminSheetCache.length > 0 && (isAdmin || isPageEnabled('schedule')) ? `
       <div class="db-section">
@@ -8840,15 +9165,6 @@ app.get('/', async (req, res) => {
         color: var(--muted, #94a3b8);
         margin: 4px 0 0;
       }
-      .db-hero-date {
-        font-size: 13px;
-        color: var(--muted, #94a3b8);
-        white-space: nowrap;
-        padding: 6px 14px;
-        border-radius: 8px;
-        background: var(--panel2);
-        border: 1px solid var(--border);
-      }
 
       .db-stats {
         display: grid;
@@ -8856,11 +9172,17 @@ app.get('/', async (req, res) => {
         gap: 16px;
       }
       .db-stat {
-        padding: 24px 20px;
+        padding: 14px 16px;
         border-radius: 12px;
         border: 1px solid var(--border, rgba(255,255,255,0.07));
         background: var(--panel2, rgba(255,255,255,0.03));
-        text-align: center;
+        /* Icon beside the text rather than stacked above it. Keeps the label
+           and description intact while roughly halving the tile height, so
+           there is room for another section below. */
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        text-align: left;
       }
       .db-stat-link {
         text-decoration: none;
@@ -8879,12 +9201,325 @@ app.get('/', async (req, res) => {
         display: flex;
         align-items: center;
         justify-content: center;
+        flex: 0 0 auto;
       }
       .db-stat-icon svg { display: block; }
+      /* min-width:0 so a long description wraps inside the flex row instead
+         of forcing the tile wider. */
+      .db-stat-text { min-width: 0; }
+
+      /* ===== NEXT SECTOR ===== */
+      /* .db-section has no padding of its own - the inset on its header comes
+         from .db-section-header. Give the body the same 20px so the leg line
+         and the cards align with the "Next Sector" title above them. */
+      .db-next-body { padding: 16px 20px; }
+
+      /* The next sector is the one thing on this page a pilot has to act on,
+         so it carries a light accent tint rather than the neutral panel the
+         other sections use. color-mix keeps the tint proportional to whatever
+         the active theme sets --accent to, so it stays subtle in both.
+         Written as .db-section.db-next to outweigh the [data-theme="light"]
+         .db-section rule in styles.css. */
+      .db-section.db-next {
+        border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+        background: color-mix(in srgb, var(--accent) 6%, var(--panel2));
+        box-shadow: 0 4px 18px color-mix(in srgb, var(--accent) 10%, transparent);
+      }
+      .db-section.db-next > .db-section-header {
+        background: color-mix(in srgb, var(--accent) 7%, transparent);
+        border-bottom-color: color-mix(in srgb, var(--accent) 20%, var(--border));
+      }
+      .db-section.db-next .db-section-title { color: var(--accent); }
+      /* Inner cards need a little more body so they still read as cards
+         against the tinted panel instead of dissolving into it. */
+      .db-section.db-next .db-next-card {
+        background: color-mix(in srgb, var(--panel) 70%, transparent);
+        border-color: color-mix(in srgb, var(--accent) 14%, var(--border));
+      }
+      [data-theme="light"] .db-section.db-next {
+        background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+        border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+      }
+      .db-next-head {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 10px 14px;
+        margin-bottom: 12px;
+      }
+      .db-next-wf {
+        font-size: 18px;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+        color: var(--accent, #38bdf8);
+      }
+      .db-next-leg { font-size: 16px; font-weight: 700; color: var(--text, #e2e8f0); }
+      .db-next-arrow { color: var(--muted, #94a3b8); margin: 0 2px; }
+      .db-next-date {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        color: var(--muted, #94a3b8);
+        white-space: nowrap;
+      }
+      .db-next-undecided {
+        font-size: 12px;
+        color: var(--warning, #f59e0b);
+        margin: -4px 0 12px;
+      }
+
+      .db-next-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      /* Scenery spans both columns - it is a list, not a stat. */
+      .db-next-card--wide { grid-column: 1 / -1; }
+      .db-next-card {
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid var(--border, rgba(255,255,255,0.07));
+        background: var(--panel2, rgba(255,255,255,0.03));
+        min-width: 0;
+      }
+      .db-next-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 700;
+        color: var(--muted, #94a3b8);
+        margin-bottom: 8px;
+      }
+      .db-next-empty { font-size: 12px; color: var(--muted2, #64748b); }
+
+      /* Departure and arrival windows, UTC only - both are dep/arr +/- 1hr,
+         the same windows the schedule page shows. */
+      .db-next-times { display: flex; flex-wrap: wrap; gap: 12px 48px; }
+      .db-next-times .db-next-label { margin-bottom: 4px; }
+      .db-next-time { min-width: 0; }
+      .db-next-time-val {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+        color: var(--text, #e2e8f0);
+      }
+      .db-next-flow-note {
+        margin-top: 8px;
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--muted2, #64748b);
+      }
+      .db-next-tct-note {
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--muted, #94a3b8);
+      }
+
+      .db-next-route { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
+      .db-next-route + .db-next-route {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border, rgba(255,255,255,0.07));
+      }
+      /* The route text takes the space and the SimBrief button sits at the
+         end, so a long route wraps rather than pushing the button away. */
+      .db-next-route > code { flex: 1 1 auto; }
+      .db-next-route code {
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--text, #e2e8f0);
+        word-break: break-word;
+        min-width: 0;
+      }
+
+      .db-next-route-tag {
+        /* Fixed width: "Primary" and "Secondary" are different lengths, and
+           without this the two routes start at different columns. */
+        flex: 0 0 74px;
+        box-sizing: border-box;
+        text-align: center;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--muted, #94a3b8);
+        background: rgba(148,163,184,0.15);
+        border-radius: 4px;
+        padding: 2px 0;
+      }
+      /* The route this pilot is actually flying. */
+      .db-next-route.is-assigned .db-next-route-tag {
+        background: rgba(74,222,128,0.18);
+        color: #4ade80;
+      }
+      .db-next-assigned {
+        /* Lines up under the route text: tag width + the flex gap. */
+        margin: 6px 0 0 84px;
+        font-size: 11px;
+        font-weight: 600;
+        color: #4ade80;
+      }
+      /* The note breaks the .db-next-route + .db-next-route pairing above, so
+         restore the divider after it - otherwise the next route crowds the
+         note and looks as though it is the one being described. */
+      .db-next-assigned + .db-next-route {
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border, rgba(255,255,255,0.07));
+      }
+
+      .db-next-sb {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 9px;
+        border-radius: 5px;
+        border: 1px solid rgba(74,222,128,0.35);
+        background: rgba(74,222,128,0.10);
+        color: #4ade80;
+        font-size: 11px;
+        font-weight: 600;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      .db-next-sb:hover { background: rgba(74,222,128,0.18); border-color: rgba(74,222,128,0.6); }
+
+      .db-next-flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .db-next-rate { font-size: 12px; color: var(--muted, #94a3b8); }
+      .db-next-booked { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+      /* Capacity at a glance: how much of the sector is already taken. */
+      .db-next-cap { margin-top: 12px; }
+      .db-next-cap-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 12px;
+        color: var(--muted, #94a3b8);
+        margin-bottom: 5px;
+      }
+      .db-next-cap-count strong { color: var(--text, #e2e8f0); font-weight: 700; }
+      .db-next-cap-bar {
+        height: 6px;
+        border-radius: 999px;
+        background: rgba(148,163,184,0.18);
+        overflow: hidden;
+      }
+      .db-next-cap-bar > span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        transition: width 0.3s;
+      }
+      .db-next-cap.is-ok   .db-next-cap-bar > span { background: #4ade80; }
+      .db-next-cap.is-busy .db-next-cap-bar > span { background: #f59e0b; }
+      .db-next-cap.is-full .db-next-cap-bar > span { background: #f87171; }
+      .db-next-cap.is-busy .db-next-cap-left { color: #f59e0b; font-weight: 600; }
+      .db-next-cap.is-full .db-next-cap-left { color: #f87171; font-weight: 700; }
+
+      .db-next-pill {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+      .db-next-pill--flow { background: rgba(245,158,11,0.15); color: #f59e0b; }
+      .db-next-pill--none { background: rgba(148,163,184,0.15); color: var(--muted, #94a3b8); }
+      .db-next-pill--ok   { background: rgba(34,197,94,0.15); color: #4ade80; }
+      .db-next-pill--pay  { background: rgba(167,139,250,0.15); color: #a78bfa; }
+      .db-next-pill--free { background: rgba(20,184,166,0.15); color: #14b8a6; }
+
+      /* Deliberately quiet: this sits on the dashboard alongside everything
+         else, so it reads as one option among many rather than the page's
+         primary call to action. It picks up the accent on hover. */
+      .db-next-book {
+        display: inline-block;
+        margin-top: 12px;
+        padding: 5px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--border, rgba(255,255,255,0.12));
+        background: transparent;
+        color: var(--muted, #94a3b8);
+        font-size: 12px;
+        font-weight: 600;
+        text-decoration: none;
+        transition: color 0.15s, border-color 0.15s, background 0.15s;
+      }
+      .db-next-book:hover {
+        color: var(--accent, #38bdf8);
+        border-color: var(--accent, #38bdf8);
+        background: rgba(56,189,248,0.08);
+      }
+
+      .db-next-scenery {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+      .db-next-scenery + .db-next-scenery {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border, rgba(255,255,255,0.07));
+      }
+      .db-next-icao {
+        flex: 0 0 auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--text, #e2e8f0);
+        min-width: 46px;
+      }
+      .db-next-scenery-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        text-decoration: none;
+        min-width: 0;
+      }
+      .db-next-scenery-name { font-size: 12px; color: var(--muted, #94a3b8); }
+      .db-next-scenery-link:hover .db-next-scenery-name { color: var(--text, #e2e8f0); }
+      .db-next-scenery-more {
+        font-size: 11px;
+        color: var(--muted2, #64748b);
+        text-decoration: none;
+        margin-left: auto;
+      }
+      .db-next-scenery-more:hover { color: var(--accent, #38bdf8); }
+
+      /* Pilot briefs: the documents for each end of the sector. */
+      .db-next-brief { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+      .db-next-brief + .db-next-brief {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border, rgba(255,255,255,0.07));
+      }
+      .db-next-brief-list { display: flex; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
+      .db-next-brief-link {
+        font-size: 12px;
+        color: var(--muted, #94a3b8);
+        text-decoration: none;
+        border-bottom: 1px dotted var(--border, rgba(255,255,255,0.2));
+      }
+      .db-next-brief-link:hover { color: var(--accent, #38bdf8); border-bottom-color: var(--accent, #38bdf8); }
+
+      /* Sector notices: a note for everyone flying this leg. */
+      .db-next-notice-body {
+        font-size: 12px;
+        line-height: 1.6;
+        color: var(--text, #e2e8f0);
+        white-space: pre-wrap;
+      }
       .db-stat-label {
         font-size: 12px;
         color: var(--muted, #94a3b8);
-        margin-top: 6px;
+        margin-top: 0;
         text-transform: uppercase;
         letter-spacing: 0.5px;
         font-weight: 600;
@@ -8892,7 +9527,7 @@ app.get('/', async (req, res) => {
       .db-stat-desc {
         font-size: 12px;
         color: var(--muted2, #64748b);
-        margin-top: 8px;
+        margin-top: 3px;
         line-height: 1.4;
         text-transform: none;
         letter-spacing: 0;
@@ -8970,6 +9605,7 @@ app.get('/', async (req, res) => {
         .db-greeting { font-size: 20px; }
         .db-page { padding: 24px 16px; }
         .db-stats { grid-template-columns: 1fr; }
+        .db-next-grid { grid-template-columns: 1fr; }
       }
     </style>`;
 
@@ -19961,6 +20597,43 @@ const HQ_STYLES = `    <style>
       }
 
       /* ATC Route button */
+      /* Which route this operator was assigned on a split sector. Shared by
+         both HQs via HQ_STYLES so the two modals cannot drift apart. */
+      .aff-route-assigned {
+        display: block;
+        margin-bottom: 12px;
+        padding: 6px 10px;
+        border-radius: 6px;
+        background: rgba(74,222,128,0.12);
+        border: 1px solid rgba(74,222,128,0.30);
+        color: #4ade80;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .aff-route-assigned.is-none {
+        background: rgba(148,163,184,0.10);
+        border-color: var(--border);
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .aff-route-assigned.is-mixed {
+        background: rgba(245,158,11,0.12);
+        border-color: rgba(245,158,11,0.30);
+        color: #f59e0b;
+      }
+      .aff-route-sep {
+        margin: 12px 0 8px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        font-family: inherit;
+      }
+
       .aff-route-btn {
         display: inline-flex;
         align-items: center;
@@ -20621,6 +21294,25 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   }
   // Bookings held by any aircraft in the fleet, keyed by callsign + sector.
   const fleetCallsignSet = new Set(affFleet.map(a => String(a.callsign || '').toUpperCase()).filter(Boolean));
+  // Which route this affiliate was assigned on a sector. fleetBooking below
+  // only exists for multi-aircraft affiliates, so match on the fleet's
+  // callsigns, the affiliate's own callsign, or the pilot claiming the
+  // sector - a solo affiliate has an assignment too.
+  const affAssignedRoute = (row, claimedCidMaybe) => {
+    const pfx = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
+    const ownCs = String(affiliate?.callsign || '').toUpperCase();
+    const set = new Set();
+    for (const b of Object.values(tobtBookingsByKey)) {
+      if (!b || typeof b.slotKey !== 'string' || !b.slotKey.startsWith(pfx)) continue;
+      const cs = String(b.callsign || '').toUpperCase();
+      const mine = (cs && (fleetCallsignSet.has(cs) || cs === ownCs))
+        || (claimedCidMaybe && Number(b.cid) === Number(claimedCidMaybe));
+      if (!mine) continue;
+      if (b.assignedRoute) set.add(b.assignedRoute);
+    }
+    return set.size === 1 ? [...set][0] : (set.size > 1 ? 'MIXED' : '');
+  };
+
   const fleetBooking = {};
   if (isMultiAircraft) {
     Object.values(tobtBookingsByKey).forEach(b => {
@@ -20775,6 +21467,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                 ${scheduleRows.map(r => {
                   const flow = getFlowRestriction(r);
                   const restricted = (sharedFlowTypes[`${r.from}-${r.to}`] || 'NONE') !== 'NONE';
+                  const assignedRoute = affAssignedRoute(r);
                   return affFleet.map((a, i) => {
                     const cs = String(a.callsign || '').toUpperCase();
                     const b = fleetBooking[`${cs}|${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`] || null;
@@ -20802,7 +21495,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                           ? `<span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span></span>`
                           : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}</td>` : ''}
                       ${showAtcRoute ? `<td>${first ? (r.atc_route && r.atc_route !== '-'
-                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" title="View the agreed ATC route">Route</button>`
+                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a>` : ''}</td>
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a>` : ''}</td>
@@ -21160,6 +21853,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                     : (claimByNumber[r.number] || null);
                   const flow = getFlowRestriction(r);
                   const status = flowStatus(r, claimedCid);
+                  const assignedRoute = affAssignedRoute(r, claimedCid);
                   return `
                   <tr data-sector="${escapeHtml(r.number)}">
                     <td><a class="sector-details-btn" href="/sector/${escapeHtml(r.number)}/${escapeHtml(r.from)}/${escapeHtml(r.to)}" target="_blank" rel="noopener" title="Open the sector overview in a new tab">${escapeHtml(r.number)}</a></td>
@@ -21204,7 +21898,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                       const sbAttr = sbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
                       const r2Attr = r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : '';
                       return r.atc_route && r.atc_route !== '-'
-                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r2Attr}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" title="View the agreed ATC route">Route</button>`
+                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r2Attr}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`;
                     })()}</td>` : ''}
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a></td>
@@ -21665,10 +22359,31 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
         var routeBackdrop = routeModal && routeModal.querySelector('.aff-route-modal-backdrop');
 
         var routeSimbrief = document.getElementById('affRouteModalSimbrief');
-        function openRouteModal(route, from, to, simbrief, route2) {
+        var routeCopyText = '';
+        function openRouteModal(route, from, to, simbrief, route2, assigned) {
           if (!routeModal) return;
           routeBody.textContent = '';
-          if (route) { routeBody.textContent = route; }
+          // Copy and SimBrief act on the route this operator is actually
+          // flying, never the pair - pasting both into a flight plan is
+          // useless. Falls back to the primary when nothing is assigned.
+          routeCopyText = (assigned === 'B' && route2) ? route2 : (route || '');
+          if (assigned) {
+            var note = document.createElement('div');
+            note.className = 'aff-route-assigned' + (assigned === 'MIXED' ? ' is-mixed' : '');
+            note.textContent = assigned === 'MIXED' ? 'Your aircraft are assigned to different routes \u2014 check each booking.' : 'You have been assigned the ' + (assigned === 'B' ? 'secondary' : 'primary') + ' route.';
+            routeBody.appendChild(note);
+          } else if (route2) {
+            // Split sector, but nothing assigned to this operator yet.
+            var none = document.createElement('div');
+            none.className = 'aff-route-assigned is-none';
+            none.textContent = 'No route assigned yet — one is allocated once a slot is booked for this sector.';
+            routeBody.appendChild(none);
+          }
+          if (route) {
+            var r1 = document.createElement('span');
+            r1.textContent = route;
+            routeBody.appendChild(r1);
+          }
           if (route2) {
             var sep = document.createElement('div');
             sep.style.cssText = 'margin:12px 0 8px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);font-family:inherit;';
@@ -21702,7 +22417,8 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
             btn.getAttribute('data-from') || '',
             btn.getAttribute('data-to') || '',
             btn.getAttribute('data-simbrief') || '',
-            btn.getAttribute('data-route2') || ''
+            btn.getAttribute('data-route2') || '',
+            btn.getAttribute('data-assigned') || ''
           );
         });
         if (routeClose) routeClose.addEventListener('click', closeRouteModal);
@@ -21713,14 +22429,14 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
         });
         if (routeCopy) routeCopy.addEventListener('click', async function() {
           try {
-            await navigator.clipboard.writeText(routeBody.textContent || '');
+            await navigator.clipboard.writeText(routeCopyText || '');
             var prev = routeCopy.textContent;
             routeCopy.textContent = '✓ Copied';
             setTimeout(function() { routeCopy.textContent = prev; }, 1400);
           } catch (e) {
             // older browsers — fallback
             var ta = document.createElement('textarea');
-            ta.value = routeBody.textContent || '';
+            ta.value = routeCopyText || '';
             document.body.appendChild(ta);
             ta.select();
             try { document.execCommand('copy'); } catch (e2) {}
@@ -22849,6 +23565,21 @@ app.get('/team/hq', requireLogin, async (req, res) => {
   const assignedCid = {};
   assignRows.forEach(a => { assignedCid[`${a.officialTeamId}|${a.sectorNumber}`] = Number(a.cid); });
 
+  // Which route this team was assigned on a sector. bookingByCsSector below
+  // is only built for multi-slot teams, so match the team's callsigns
+  // against the live bookings directly - a shared-slot team has an
+  // assignment too. MIXED when aircraft ended up on different routes.
+  const teamAssignedRoute = (row) => {
+    const pfx = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
+    const set = new Set();
+    for (const b of Object.values(tobtBookingsByKey)) {
+      if (!b || typeof b.slotKey !== 'string' || !b.slotKey.startsWith(pfx)) continue;
+      if (!teamCallsigns.has(String(b.callsign || '').toUpperCase())) continue;
+      if (b.assignedRoute) set.add(b.assignedRoute);
+    }
+    return set.size === 1 ? [...set][0] : (set.size > 1 ? 'MIXED' : '');
+  };
+
   const bookingByCsSector = {};
   if (isMultiSlot) {
     Object.values(tobtBookingsByKey).forEach(b => {
@@ -22879,6 +23610,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                 ${(adminSheetCache || []).filter(r => r.number).map(r => {
                   const flow = getFlowRestriction(r);
                   const restricted = (sharedFlowTypes[`${r.from}-${r.to}`] || 'NONE') !== 'NONE';
+                  const assignedRoute = teamAssignedRoute(r);
                   return fleet.map((t, i) => {
                     const cs = String(t.callsign || '').toUpperCase();
                     const b = bookingByCsSector[`${cs}|${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`] || null;
@@ -22909,7 +23641,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                           ? `<span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span></span>`
                           : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}</td>` : ''}
                       ${showAtcRoute ? `<td>${first ? (r.atc_route && r.atc_route !== '-'
-                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" title="View the agreed ATC route">Route</button>`
+                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a>` : ''}</td>
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a>` : ''}</td>
@@ -23176,6 +23908,9 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                   const acctLabel = ctx.nameByCid[acctCid] ? `${ctx.nameByCid[acctCid]} · ${acctCid}` : String(acctCid || '—');
                   const sbUrl = buildAffiliateSimbriefUrl(wfRow, { callsign: cs }, b ? Number(b.cid) : null, showAtcRoute, 'WorldFlight Team');
                   const sbAttr = String(sbUrl).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+                  // A shared-slot team holds one booking per sector, so the
+                  // assignment is simply the one on that booking.
+                  const assignedRoute = (b && b.assignedRoute) || '';
                   return `
                   <tr data-sector="${escapeHtml(sector)}">
                     <td><a class="sector-details-btn" href="/sector/${escapeHtml(sector)}/${escapeHtml(wfRow?.from || '')}/${escapeHtml(wfRow?.to || '')}" target="_blank" rel="noopener" title="Open the sector overview in a new tab">${escapeHtml(sector)}</a></td>
@@ -23195,7 +23930,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                         : escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))
                     }</span></td>` : ''}
                     ${showAtcRoute ? `<td>${wfRow && wfRow.atc_route && wfRow.atc_route !== '-'
-                      ? `<button type="button" class="aff-route-btn" data-route="${String(wfRow.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${wfRow.atc_route2 && wfRow.atc_route2 !== '-' ? String(wfRow.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(wfRow.from)}" data-to="${escapeHtml(wfRow.to)}" title="View the agreed ATC route">Route</button>`
+                      ? `<button type="button" class="aff-route-btn" data-route="${String(wfRow.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${wfRow.atc_route2 && wfRow.atc_route2 !== '-' ? String(wfRow.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(wfRow.from)}" data-to="${escapeHtml(wfRow.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
                       : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`}</td>` : ''}
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(wfRow?.from || '')}">${escapeHtml(wfRow?.from || '—')}</a></td>
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(wfRow?.to || '')}">${escapeHtml(wfRow?.to || '—')}</a></td>
@@ -23520,11 +24255,40 @@ app.get('/team/hq', requireLogin, async (req, res) => {
         var sectorEl = document.getElementById('affRouteModalSector');
         var sbLink = document.getElementById('affRouteModalSimbrief');
         function closeModal() { modal.hidden = true; }
+        var routeCopyText = '';
         document.addEventListener('click', function(e) {
           var btn = e.target.closest('.aff-route-btn[data-route]');
           if (btn) {
-            var r2 = btn.dataset.route2;
-            body.textContent = btn.dataset.route + (r2 ? '\\n\\n--- Secondary route ---\\n' + r2 : '');
+            var r2 = btn.dataset.route2 || '';
+            var assigned = btn.dataset.assigned || '';
+            // Copy and SimBrief act on the route this team is actually
+            // flying, never the pair.
+            routeCopyText = (assigned === 'B' && r2) ? r2 : (btn.dataset.route || '');
+            body.textContent = '';
+            if (assigned) {
+              var note = document.createElement('div');
+              note.className = 'aff-route-assigned' + (assigned === 'MIXED' ? ' is-mixed' : '');
+              note.textContent = assigned === 'MIXED' ? 'Your aircraft are assigned to different routes \u2014 check each booking.' : 'You have been assigned the ' + (assigned === 'B' ? 'secondary' : 'primary') + ' route.';
+              body.appendChild(note);
+            } else if (r2) {
+              // Split sector, but nothing assigned to this team yet.
+              var none = document.createElement('div');
+              none.className = 'aff-route-assigned is-none';
+              none.textContent = 'No route assigned yet — one is allocated once a slot is booked for this sector.';
+              body.appendChild(none);
+            }
+            var p1 = document.createElement('span');
+            p1.textContent = btn.dataset.route || '';
+            body.appendChild(p1);
+            if (r2) {
+              var sep = document.createElement('div');
+              sep.className = 'aff-route-sep';
+              sep.textContent = 'Secondary Route';
+              body.appendChild(sep);
+              var p2 = document.createElement('span');
+              p2.textContent = r2;
+              body.appendChild(p2);
+            }
             sectorEl.textContent = btn.dataset.from + ' → ' + btn.dataset.to;
             if (sbLink) sbLink.href = btn.dataset.simbrief || '#';
             modal.hidden = false;
@@ -23534,7 +24298,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
             closeModal();
           }
           if (e.target.closest('#affRouteModalCopy')) {
-            navigator.clipboard.writeText(body.textContent || '').catch(function() {});
+            navigator.clipboard.writeText(routeCopyText || '').catch(function() {});
           }
         });
         document.addEventListener('keydown', function(e) {
@@ -41009,6 +41773,180 @@ app.post('/api/request-atc/:id/drop', requireLogin, async (req, res) => {
 
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ===== SECTOR NOTICES (ADMIN) =====
+   A short message from the organisers shown against a sector. Stored in
+   SiteSetting under 'sector-notice:<WF>' so it needs no schema change; the
+   dashboard reads the same key for whichever sector is next. */
+const SECTOR_NOTICE_PREFIX = 'sector-notice:';
+
+async function loadSectorNotices() {
+  const rows = await prisma.siteSetting.findMany({
+    where: { key: { startsWith: SECTOR_NOTICE_PREFIX } }
+  }).catch(() => []);
+  const byWf = {};
+  for (const r of rows) {
+    const wf = String(r.key).slice(SECTOR_NOTICE_PREFIX.length);
+    if (wf) byWf[wf] = r.value || '';
+  }
+  return byWf;
+}
+
+app.get('/sector-notices', requireAdmin, async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+  const notices = await loadSectorNotices();
+  const rows = (adminSheetCache || []).filter(r => r && r.number);
+
+  const body = rows.map(r => {
+    const flow = getFlowRestriction(r);
+    const notice = notices[r.number] || '';
+    const label = scheduleRowLabel(r, Number(user?.cid) || null);
+    return `
+      <tr>
+        <td><a class="sector-details-btn" href="/sector/${escapeHtml(r.number)}/${escapeHtml(r.from)}/${escapeHtml(r.to)}" target="_blank" rel="noopener">${escapeHtml(label)}</a></td>
+        <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a></td>
+        <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a></td>
+        <td><span class="ot-muted">${escapeHtml(r.date_utc || '')}</span></td>
+        <td><span class="ot-muted">${r.dep_time_utc ? utcWindow(r.dep_time_utc) : '\u2014'}</span></td>
+        <td><span class="ot-muted">${r.arr_time_utc ? utcWindow(r.arr_time_utc) : '\u2014'}</span></td>
+        <td><span class="flowtype-pill flowtype-${flow.cls}">${escapeHtml(flow.label)}</span></td>
+        <td>
+          <button type="button" class="action-btn sn-btn${notice ? ' sn-has' : ''}"
+            data-wf="${escapeHtml(r.number)}"
+            data-label="${escapeHtml(label)}"
+            data-leg="${escapeHtml(r.from)} \u2192 ${escapeHtml(r.to)}"
+            data-notice="${escapeHtml(notice)}">Sector Notice</button>
+          ${notice ? '<span class="sn-dot" title="A notice is set for this sector"></span>' : ''}
+        </td>
+      </tr>`;
+  }).join('');
+
+  const content = `
+    <section class="card card-full">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:20px;">
+        <div>
+          <h2 style="margin:0 0 4px;">Sector Notices</h2>
+          <p style="margin:0;color:var(--muted);font-size:13px;max-width:70ch;">A message from the WorldFlight organisers for a given sector. It appears on the dashboard as <strong>Sector Message from WF Organisers</strong> when that sector is next, and on the sector page. Leave a notice empty to remove it.</p>
+        </div>
+      </div>
+
+      <div class="table-scroll">
+        <table class="departures-table">
+          <thead>
+            <tr>
+              <th>Sector</th><th>From</th><th>To</th><th>Date</th>
+              <th>Dep Window</th><th>Arr Window</th><th>Flow</th><th>Notice</th>
+            </tr>
+          </thead>
+          <tbody>${body || '<tr><td colspan="8"><span class="ot-muted">No sectors in the active schedule.</span></td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <div id="snModal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog" style="width:94vw;max-width:640px;padding:24px;">
+        <h3 style="margin:0 0 4px;">Sector Notice</h3>
+        <p id="snModalSector" style="margin:0 0 16px;color:var(--muted);font-size:13px;"></p>
+        <textarea id="snModalText" rows="10" placeholder="Type the message pilots should read before flying this sector..." style="width:100%;padding:10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e5e7eb;font-family:inherit;font-size:13px;line-height:1.6;resize:vertical;"></textarea>
+        <div id="snModalMsg" class="modal-message hidden"></div>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" class="modal-btn modal-btn-cancel" id="snModalCancel">Cancel</button>
+          <button type="button" class="modal-btn modal-btn-submit" id="snModalSave">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      .sn-btn { font-size: 12px; padding: 5px 12px; }
+      .sn-btn.sn-has { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); color: var(--warning); }
+      .sn-dot {
+        display: inline-block; width: 7px; height: 7px; margin-left: 7px;
+        border-radius: 50%; background: var(--warning); vertical-align: middle;
+      }
+    </style>
+
+    <script>
+      (function () {
+        var modal = document.getElementById('snModal');
+        var textEl = document.getElementById('snModalText');
+        var sectorEl = document.getElementById('snModalSector');
+        var msg = document.getElementById('snModalMsg');
+        var saveBtn = document.getElementById('snModalSave');
+        var current = null;
+
+        function close() { modal.classList.add('hidden'); }
+
+        document.addEventListener('click', function (e) {
+          var btn = e.target.closest('.sn-btn');
+          if (btn) {
+            current = btn;
+            sectorEl.textContent = btn.dataset.label + '  \u00b7  ' + btn.dataset.leg;
+            textEl.value = btn.dataset.notice || '';
+            msg.className = 'modal-message hidden';
+            saveBtn.disabled = false; saveBtn.textContent = 'Save';
+            modal.classList.remove('hidden');
+            setTimeout(function () { textEl.focus(); }, 50);
+            return;
+          }
+          if (e.target.closest('#snModalCancel') || e.target.closest('.modal-backdrop')) close();
+        });
+
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+        });
+
+        saveBtn.addEventListener('click', async function () {
+          if (!current) return;
+          saveBtn.disabled = true; saveBtn.textContent = 'Saving...';
+          var res = await fetch('/admin/api/sector-notice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ number: current.dataset.wf, notice: textEl.value })
+          });
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok) {
+            msg.textContent = data.error || 'Could not save the notice.';
+            msg.className = 'modal-message error';
+            saveBtn.disabled = false; saveBtn.textContent = 'Save';
+            return;
+          }
+          location.reload();
+        });
+      })();
+    </script>`;
+
+  res.send(renderLayout({ title: 'Sector Notices', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+// Save (or clear) a sector's notice. An empty message removes the row rather
+// than storing a blank one, so the dashboard falls back to its empty state.
+app.post('/admin/api/sector-notice', requireAdmin, async (req, res) => {
+  const number = String(req.body?.number || '').trim().toUpperCase();
+  const notice = String(req.body?.notice ?? '').trim();
+  if (!number) return res.status(400).json({ error: 'Missing sector.' });
+  if (!(adminSheetCache || []).some(r => r && r.number === number)) {
+    return res.status(404).json({ error: number + ' is not in the active schedule.' });
+  }
+  if (notice.length > 4000) {
+    return res.status(400).json({ error: 'Notice is too long (4000 characters max).' });
+  }
+
+  const key = SECTOR_NOTICE_PREFIX + number;
+  if (!notice) {
+    await prisma.siteSetting.delete({ where: { key } }).catch(() => null);
+    console.log('[SECTOR NOTICE] Cleared ' + number);
+    return res.json({ ok: true, cleared: true });
+  }
+  await prisma.siteSetting.upsert({
+    where: { key },
+    update: { value: notice },
+    create: { key, value: notice }
+  });
+  console.log('[SECTOR NOTICE] Saved ' + number + ' (' + notice.length + ' chars)');
+  res.json({ ok: true });
 });
 
 app.get('/sector-planning', requirePageEnabled('sector-planning'), async (req, res) => {
