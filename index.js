@@ -27944,6 +27944,17 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
       teamGroups.push({ rows: [t], primary: t, multi: !!t.multiSlot, active: t });
     }
   }
+  // Only teams participating in the active event are shown. The admin "Active"
+  // tick is participatingWf26 on each aircraft row: a team with no active row
+  // is dropped, and a multi-slot team rolls up only its active aircraft. The
+  // primary row is kept as-is because the profile photo is keyed on its id.
+  for (let i = teamGroups.length - 1; i >= 0; i--) {
+    const g = teamGroups[i];
+    const activeRows = g.rows.filter(r => r.participatingWf26);
+    if (!activeRows.length) { teamGroups.splice(i, 1); continue; }
+    g.rows = activeRows;
+    if (!g.active || !g.active.participatingWf26) g.active = activeRows[0];
+  }
 
   const globeSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></svg>`;
 
