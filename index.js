@@ -8596,6 +8596,18 @@ function utcWindow(hhmm) {
   return w ? w.replace(/:/g, '').replace(/[–—]/g, '-') + 'z' : '';
 }
 
+// The date a sector's departure window opens. The window is dep -60, so a leg
+// departing just after midnight opens the previous evening, and showing only
+// the departure date hides it from anyone looking at that evening.
+// Display only - date_utc is part of every slot key and must not move.
+function windowOpenDate(dateUtc, depTimeUtc) {
+  const d = parseServerDate(dateUtc);
+  const m = String(depTimeUtc || '').match(/^(\d{1,2}):?(\d{2})$/);
+  if (!d || !m) return dateUtc || '';
+  if (Number(m[1]) * 60 + Number(m[2]) >= 60) return dateUtc;
+  return formatServerDate(new Date(d.getTime() - 86400000));
+}
+
 function addMinutes(timeStr, minutes) {
   const [hh, mm] = timeStr.split(':').map(Number);
   const d = new Date(Date.UTC(2000, 0, 1, hh, mm));
@@ -8746,7 +8758,7 @@ app.get('/', async (req, res) => {
       <td class="db-cell db-cell--num">${r.number ? `<a class="sector-details-btn" href="/sector/${r.number}/${r.from}/${r.to}">${r.number}</a>` : ''}</td>
       <td class="db-cell"><a href="/icao/${r.from}">${r.from || ''}</a></td>
       <td class="db-cell"><a href="/icao/${r.to}">${r.to || ''}</a></td>
-      <td class="db-cell db-cell--muted">${r.date_utc || ''}</td>
+      <td class="db-cell db-cell--muted">${windowOpenDate(r.date_utc, r.dep_time_utc)}</td>
       <td class="db-cell db-cell--muted">${timeWindow(r.dep_time_utc)}</td>
       <td class="db-cell db-cell--muted">${timeWindow(r.arr_time_utc)}</td>
     </tr>
@@ -8837,7 +8849,10 @@ app.get('/', async (req, res) => {
 
   // Departure instant for the sector date. The client formats it to the
   // viewer's own locale; this is only the value and a server-side fallback.
-  const nsDateMs = nextSector ? _legDepMs(nextSector) : null;
+  // Dated by when the departure window opens, not the scheduled departure, so
+  // a leg leaving just after midnight reads as the evening it opens.
+  const _nsDepMs = nextSector ? _legDepMs(nextSector) : null;
+  const nsDateMs = _nsDepMs != null ? _nsDepMs - 60 * 60 * 1000 : null;
 
   // Routes are only shown once published - same gate the schedule uses, so
   // this cannot leak a route that is still being agreed with controllers.
@@ -8975,7 +8990,7 @@ app.get('/', async (req, res) => {
         <div class="db-next-head">
           <span class="db-next-wf">${scheduleRowLabel(nextSector, cid)}</span>
           <span class="db-next-leg">${nextSector.from} <span class="db-next-arrow">\u2192</span> ${nextSector.to}</span>
-          <span class="db-next-date" data-utc-ms="${nsDateMs || ''}">${escapeHtml(nextSector.date_utc || '')}</span>
+          <span class="db-next-date" data-utc-ms="${nsDateMs || ''}">${escapeHtml(windowOpenDate(nextSector.date_utc, nextSector.dep_time_utc))}</span>
         </div>
         ${nextSector.has_variants ? `<div class="db-next-undecided">Destination not yet decided \u2014 this leg has a route alternative.</div>` : ''}
         <script>
@@ -11952,25 +11967,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
                 </span>
               </td>
 
-              <td class="col-date">${(() => {
-                // Show date of window start, not dep time — if dep is 00:45
-                // the window opens 23:45 the day before
-                if (r.dep_time_utc && r.date_utc) {
-                  const [hh, mm] = r.dep_time_utc.split(':').map(Number);
-                  if (hh * 60 + mm < 60) {
-                    const parsed = parseServerDate(r.date_utc);
-                    if (parsed) {
-                      parsed.setUTCDate(parsed.getUTCDate() - 1);
-                      const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-                      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-                      const day = parsed.getUTCDate();
-                      const suffix = day === 1 || day === 21 || day === 31 ? 'st' : day === 2 || day === 22 ? 'nd' : day === 3 || day === 23 ? 'rd' : 'th';
-                      return days[parsed.getUTCDay()] + ' ' + day + suffix + ' ' + months[parsed.getUTCMonth()];
-                    }
-                  }
-                }
-                return r.date_utc;
-              })()}</td>
+              <td class="col-date">${windowOpenDate(r.date_utc, r.dep_time_utc)}</td>
               <td class="col-window">${(() => {
                 const utcStr = buildTimeWindow(r.dep_time_utc);
                 const lw = depWindowLocalByKey[r.number];
@@ -21504,7 +21501,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a>` : ''}</td>
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a>` : ''}</td>
-                      <td><span class="ot-muted">${first ? escapeHtml(r.date_utc || '') : ''}</span></td>
+                      <td><span class="ot-muted">${first ? escapeHtml(windowOpenDate(r.date_utc, r.dep_time_utc)) : ''}</span></td>
                       <td><span class="ot-muted">${first ? timeWindow(r.dep_time_utc) : ''}</span></td>
                       <td><span class="ot-muted">${first ? timeWindow(r.arr_time_utc) : ''}</span></td>
                       <td><a class="aff-route-btn aff-sb-btn" href="${sbAttr}" target="_blank" rel="noopener" title="Plan with SimBrief">Plan</a></td>
@@ -21585,7 +21582,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
         // From / To / Date / Window
         mcBody += '<td>' + (first ? '<a class="aff-icao-link" href="/icao/' + escapeHtml(r.from) + '">' + escapeHtml(r.from) + '</a>' : '') + '</td>';
         mcBody += '<td>' + (first ? '<a class="aff-icao-link" href="/icao/' + escapeHtml(r.to) + '">' + escapeHtml(r.to) + '</a>' : '') + '</td>';
-        mcBody += '<td>' + (first ? '<span class="ot-muted">' + escapeHtml(r.date_utc || '') + '</span>' : '') + '</td>';
+        mcBody += '<td>' + (first ? '<span class="ot-muted">' + escapeHtml(windowOpenDate(r.date_utc, r.dep_time_utc)) + '</span>' : '') + '</td>';
         mcBody += '<td>' + (first ? '<span class="ot-muted">' + timeWindow(r.dep_time_utc) + '</span>' : '') + '</td>';
         // (actions are inline with VATSIM Account)
         mcBody += '</tr>';
@@ -21908,7 +21905,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                     })()}</td>` : ''}
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a></td>
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a></td>
-                    <td><span class="ot-muted">${escapeHtml(r.date_utc || '')}</span></td>
+                    <td><span class="ot-muted">${escapeHtml(windowOpenDate(r.date_utc, r.dep_time_utc))}</span></td>
                     <td><span class="ot-muted">${timeWindow(r.dep_time_utc)}</span></td>
                     <td><span class="ot-muted">${timeWindow(r.arr_time_utc)}</span></td>
                     <td>${(() => {
@@ -23650,7 +23647,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a>` : ''}</td>
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a>` : ''}</td>
-                      <td><span class="ot-muted">${first ? escapeHtml(r.date_utc || '') : ''}</span></td>
+                      <td><span class="ot-muted">${first ? escapeHtml(windowOpenDate(r.date_utc, r.dep_time_utc)) : ''}</span></td>
                       <td><span class="ot-muted">${first ? timeWindow(r.dep_time_utc) : ''}</span></td>
                       <td><span class="ot-muted">${first ? timeWindow(r.arr_time_utc) : ''}</span></td>
                       <td><a class="aff-route-btn aff-sb-btn" href="${sbAttr}" target="_blank" rel="noopener" title="Plan with SimBrief">Plan</a></td>
@@ -23939,7 +23936,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                       : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`}</td>` : ''}
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(wfRow?.from || '')}">${escapeHtml(wfRow?.from || '—')}</a></td>
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(wfRow?.to || '')}">${escapeHtml(wfRow?.to || '—')}</a></td>
-                    <td><span class="ot-muted">${escapeHtml(wfRow?.date_utc || '')}</span></td>
+                    <td><span class="ot-muted">${escapeHtml(windowOpenDate(wfRow?.date_utc, wfRow?.dep_time_utc))}</span></td>
                     <td><span class="ot-muted">${timeWindow(wfRow?.dep_time_utc)}</span></td>
                     <td><span class="ot-muted">${timeWindow(wfRow?.arr_time_utc)}</span></td>
                     <td>${sbUrl ? `<a class="aff-route-btn aff-sb-btn" href="${sbAttr}" target="_blank" rel="noopener" title="Plan with SimBrief">Plan</a>` : '<span class="ot-muted">—</span>'}</td>
@@ -24958,7 +24955,7 @@ app.get('/team/roster', requireLogin, async (req, res) => {
                 + '<td><a class="sector-details-btn" href="/sector/' + escapeHtml(r.number) + '/' + escapeHtml(r.from) + '/' + escapeHtml(r.to) + '" target="_blank" rel="noopener">' + escapeHtml(r.number) + '</a></td>'
                 + '<td><a class="aff-icao-link" href="/icao/' + escapeHtml(r.from) + '">' + escapeHtml(r.from) + '</a></td>'
                 + '<td><a class="aff-icao-link" href="/icao/' + escapeHtml(r.to) + '">' + escapeHtml(r.to) + '</a></td>'
-                + '<td><span class="ot-muted">' + escapeHtml(r.date_utc || '') + '</span></td>'
+                + '<td><span class="ot-muted">' + escapeHtml(windowOpenDate(r.date_utc, r.dep_time_utc)) + '</span></td>'
                 + '<td><span class="ot-muted">' + timeWindow(r.dep_time_utc) + '</span></td>'
                 + '<td><span class="ot-muted">' + timeWindow(r.arr_time_utc) + '</span></td>'
                 + roles.map(role => {
@@ -41824,7 +41821,7 @@ app.get('/sector-notices', requireAdmin, async (req, res) => {
         <td><a class="sector-details-btn" href="/sector/${escapeHtml(r.number)}/${escapeHtml(r.from)}/${escapeHtml(r.to)}" target="_blank" rel="noopener">${escapeHtml(label)}</a></td>
         <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a></td>
         <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a></td>
-        <td><span class="ot-muted">${escapeHtml(r.date_utc || '')}</span></td>
+        <td><span class="ot-muted">${escapeHtml(windowOpenDate(r.date_utc, r.dep_time_utc))}</span></td>
         <td><span class="ot-muted">${r.dep_time_utc ? utcWindow(r.dep_time_utc) : '\u2014'}</span></td>
         <td><span class="ot-muted">${r.arr_time_utc ? utcWindow(r.arr_time_utc) : '\u2014'}</span></td>
         <td><span class="flowtype-pill flowtype-${flow.cls}">${escapeHtml(flow.label)}</span></td>
@@ -50549,6 +50546,9 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
         const suf = [,'st','nd','rd'][day % 10 > 3 ? 0 : (day % 100 - day % 10 !== 10) * (day % 10)] || 'th';
         dateDisplay = `${days[d.getUTCDay()]} ${day}${suf} ${months[d.getUTCMonth()]}`;
       }
+      // Date the departure window opens, matching the schedule and the HQ
+      // tables: a leg departing just after midnight opens the previous evening.
+      dateDisplay = windowOpenDate(dateDisplay, depTimeUtc);
 
       return {
         bookingKey,
