@@ -18702,7 +18702,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
     arrival: (showArrival && arrivalLeg) ? {
       from: arrivalLeg.from,
       to: arrivalLeg.to,
-      dateUtc: arrivalLeg.date_utc,
+      dateUtc: windowOpenDate(arrivalLeg.date_utc, arrivalLeg.dep_time_utc),
       dep_time_utc: arrivalLeg.dep_time_utc,
       arr_time_utc: arrivalLeg.arr_time_utc,
       window: arrivalWindow,
@@ -18717,7 +18717,7 @@ app.get('/api/icao/:icao/wf-slots', (req, res) => {
     departure: (showDeparture && departureLeg) ? {
       from: departureLeg.from,
       to: departureLeg.to,
-      dateUtc: departureLeg.date_utc,
+      dateUtc: windowOpenDate(departureLeg.date_utc, departureLeg.dep_time_utc),
       dep_time_utc: departureLeg.dep_time_utc,
       window: departureWindow,
       atcRoute: showAtcRoute ? departureLeg.atc_route : '',
@@ -19013,7 +19013,8 @@ app.get('/api/schedule.json', async (req, res) => {
       sector: r.number,
       from: r.from,
       to: r.to,
-      dateUtc: r.date_utc,
+      // Dated by when the departure window opens, matching every page.
+      dateUtc: windowOpenDate(r.date_utc, r.dep_time_utc),
       departureWindow: depWindow,
       arrivalWindow: arrWindow,
       blockTime: r.block_time,
@@ -24478,7 +24479,7 @@ app.get('/api/roster/:slug.json', async (req, res) => {
       sector: r.number,
       from: r.from,
       to: r.to,
-      dateUtc: r.date_utc,
+      dateUtc: windowOpenDate(r.date_utc, r.dep_time_utc),
       depWindow: r.dep_time_utc ? subtractMinutes(r.dep_time_utc, 60) + '-' + addMinutes(r.dep_time_utc, 60) + 'z' : null,
       arrWindow: r.arr_time_utc ? subtractMinutes(r.arr_time_utc, 60) + '-' + addMinutes(r.arr_time_utc, 60) + 'z' : null,
       crew
