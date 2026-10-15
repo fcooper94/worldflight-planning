@@ -10999,6 +10999,32 @@ app.get('/auth/login', requireSiteGate, (req, res, next) => {
 // round-trip (which it does across some proxy configurations).
 app.get('/auth/callback', vatsimCallback);
 /* ===== SECTOR INFO PAGE ===== */
+// My Notes on the sector page: save the viewer's private note for a sector.
+// An empty note deletes the row.
+app.post('/api/sector-notes/:wf', async (req, res) => {
+  const cid = Number(req.session?.user?.data?.cid);
+  if (!cid) return res.status(401).json({ error: 'Log in to save notes' });
+  const sector = String(req.params.wf || '').toUpperCase();
+  if (!/^[A-Z0-9.]{1,20}$/.test(sector)) return res.status(400).json({ error: 'Invalid sector' });
+  if (!prisma.userSectorNote) return res.status(503).json({ error: 'Notes are not available yet' });
+  const note = String(req.body?.note ?? '').slice(0, 5000);
+  try {
+    if (!note.trim()) {
+      await prisma.userSectorNote.deleteMany({ where: { cid, sector } });
+    } else {
+      await prisma.userSectorNote.upsert({
+        where: { cid_sector: { cid, sector } },
+        update: { note },
+        create: { cid, sector, note }
+      });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[SECTOR NOTES]', err.message);
+    res.status(500).json({ error: 'Save failed' });
+  }
+});
+
 app.get('/sector/:wf/:from/:to', async (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = user ? Number(user.cid) : null;
@@ -11008,6 +11034,15 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
   const fromIcao = from.toUpperCase();
   const toIcao = to.toUpperCase();
   const wfNum = wf.toUpperCase();
+
+  // The viewer's private notes for this sector (My Notes section).
+  let mySectorNote = '';
+  if (cid) {
+    const noteRow = await prisma.userSectorNote?.findUnique({
+      where: { cid_sector: { cid, sector: wfNum } }
+    }).catch(() => null);
+    mySectorNote = noteRow?.note || '';
+  }
 
   // Resolve team-booking context: if the viewer is a WF_TEAM member whose
   // team is linked + participating + has a mainCid, offer a "Book for {team}"
@@ -11195,6 +11230,49 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
                 + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>'
                 + '<div style="font-size:12px;line-height:1.5;color:var(--text);">This information will be available once an ATC route has been agreed between the two airports.</div>'
                 + '</div></div>'}
+          <div style="border-top:1px solid var(--border);padding-top:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px;">
+              <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);">My Notes</div>
+              <span id="myNotesStatus" style="font-size:10px;color:var(--muted);"></span>
+            </div>
+            ${cid
+              ? `<textarea id="myNotesBox" data-url="/api/sector-notes/${encodeURIComponent(wfNum)}" maxlength="5000" rows="3" placeholder="Private notes for this sector - only you can see them. Saves automatically." style="display:block;width:100%;box-sizing:border-box;min-height:72px;resize:vertical;padding:8px 10px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:12px;line-height:1.5;text-transform:none;text-align:left;">${escapeHtml(mySectorNote)}</textarea>
+            <script>
+(function() {
+  var box = document.getElementById('myNotesBox');
+  if (!box) return;
+  var st = document.getElementById('myNotesStatus');
+  var url = box.getAttribute('data-url');
+  var last = box.value, timer = null;
+  function status(text, color) { st.textContent = text; st.style.color = color || 'var(--muted)'; }
+  function save() {
+    var v = box.value;
+    if (v === last) return;
+    status('Saving...');
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: v }) })
+      .then(function(r) { return r.json().catch(function() { return {}; }).then(function(d) {
+        if (!r.ok) throw new Error(d.error || 'Save failed');
+        last = v;
+        if (box.value === v) status('Saved', 'var(--success, #4ade80)');
+      }); })
+      .catch(function(e) { status(e.message || 'Save failed', '#f87171'); });
+  }
+  box.addEventListener('input', function() {
+    status('Unsaved changes');
+    clearTimeout(timer);
+    timer = setTimeout(save, 800);
+  });
+  box.addEventListener('blur', function() { clearTimeout(timer); save(); });
+  // Leaving mid-typing: send what is there rather than lose it.
+  window.addEventListener('pagehide', function() {
+    if (box.value !== last && navigator.sendBeacon) {
+      navigator.sendBeacon(url, new Blob([JSON.stringify({ note: box.value })], { type: 'application/json' }));
+    }
+  });
+})();
+</script>`
+              : '<div style="font-size:12px;color:var(--muted);padding:10px 12px;background:var(--panel);border:1px dashed var(--border);border-radius:8px;">Log in to keep your own private notes for this sector.</div>'}
+          </div>
         </div>
         ${!isPageVisibleTo('flow-restrictions', isAdmin) ? `
         <div class="sector-banner sector-banner-flow-full" style="width:calc(40% - 8px);min-width:250px;flex-direction:column;justify-content:center;padding:16px;box-sizing:border-box;">
@@ -11898,9 +11976,108 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
     if (sp.depSplitPct != null) splitPctByWf[sp.wf] = sp.depSplitPct;
   }
 
+  // Timezone picker (display only): epoch ms for a UTC date + HH:MM, offset by
+  // addMin. Emitted as data attributes so the browser can re-render the Date
+  // and window cells in the viewer's chosen zone. Slot keys are untouched.
+  const schedUtcMs = (dateUtc, hhmm, addMin) => {
+    const d = parseServerDate(dateUtc);
+    const m = /^(\d{1,2}):?(\d{2})$/.exec(String(hhmm || ''));
+    if (!d || !m) return null;
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+      + (Number(m[1]) * 60 + Number(m[2]) + addMin) * 60000;
+  };
+  const tzSpan = (text, kind, start, end) => (start == null)
+    ? text
+    : '<span class="tz-conv" data-kind="' + kind + '" data-utc="' + escapeHtml(text) + '" data-start="' + start + '"' + (end != null ? ' data-end="' + end + '"' : '') + '>' + text + '</span>';
+  const arrDayShift = (r) => {
+    const toM = s => { const m = /^(\d{1,2}):?(\d{2})$/.exec(String(s || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+    const a = toM(r.arr_time_utc), d = toM(r.dep_time_utc);
+    return (a != null && d != null && a < d) ? 1440 : 0;
+  };
+
   const content = `
   <section class="card card-full">
-    <h2>WorldFlight Event Schedule</h2>
+    <div class="sched-head">
+      <h2>WorldFlight Event Schedule</h2>
+      <div class="sched-tz">
+        <div class="sched-tz-note">All times are in UTC</div>
+        <select id="schedTzSelect" class="sched-tz-select" aria-label="Select my timezone">
+          <option value="">Select my timezone</option>
+          <option value="UTC">UTC</option>
+          <option value="auto">My device timezone</option>
+          <option value="Pacific/Honolulu" data-cities="Hawaii">Hawaii</option>
+          <option value="America/Anchorage" data-cities="Alaska">Alaska</option>
+          <option value="America/Los_Angeles" data-cities="Pacific Time (US &amp; Canada)">Pacific Time (US &amp; Canada)</option>
+          <option value="America/Phoenix" data-cities="Arizona">Arizona</option>
+          <option value="America/Denver" data-cities="Mountain Time (US &amp; Canada)">Mountain Time (US &amp; Canada)</option>
+          <option value="America/Chicago" data-cities="Central Time (US &amp; Canada)">Central Time (US &amp; Canada)</option>
+          <option value="America/Regina" data-cities="Saskatchewan">Saskatchewan</option>
+          <option value="America/Mexico_City" data-cities="Guadalajara, Mexico City, Monterrey">Guadalajara, Mexico City, Monterrey</option>
+          <option value="America/New_York" data-cities="Eastern Time (US &amp; Canada)">Eastern Time (US &amp; Canada)</option>
+          <option value="America/Bogota" data-cities="Bogota, Lima, Quito">Bogota, Lima, Quito</option>
+          <option value="America/Halifax" data-cities="Atlantic Time (Canada)">Atlantic Time (Canada)</option>
+          <option value="America/Caracas" data-cities="Caracas">Caracas</option>
+          <option value="America/Santiago" data-cities="Santiago">Santiago</option>
+          <option value="America/St_Johns" data-cities="Newfoundland">Newfoundland</option>
+          <option value="America/Sao_Paulo" data-cities="Brasilia, Sao Paulo">Brasilia, Sao Paulo</option>
+          <option value="America/Argentina/Buenos_Aires" data-cities="Buenos Aires">Buenos Aires</option>
+          <option value="America/Montevideo" data-cities="Montevideo">Montevideo</option>
+          <option value="Atlantic/Azores" data-cities="Azores">Azores</option>
+          <option value="Atlantic/Cape_Verde" data-cities="Cabo Verde Is.">Cabo Verde Is.</option>
+          <option value="Europe/London" data-cities="Edinburgh, London">Edinburgh, London</option>
+          <option value="Europe/Dublin" data-cities="Dublin">Dublin</option>
+          <option value="Europe/Lisbon" data-cities="Lisbon">Lisbon</option>
+          <option value="Atlantic/Reykjavik" data-cities="Monrovia, Reykjavik">Monrovia, Reykjavik</option>
+          <option value="Africa/Casablanca" data-cities="Casablanca">Casablanca</option>
+          <option value="Europe/Berlin" data-cities="Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna">Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna</option>
+          <option value="Europe/Budapest" data-cities="Belgrade, Bratislava, Budapest, Ljubljana, Prague">Belgrade, Bratislava, Budapest, Ljubljana, Prague</option>
+          <option value="Europe/Paris" data-cities="Brussels, Copenhagen, Madrid, Paris">Brussels, Copenhagen, Madrid, Paris</option>
+          <option value="Europe/Warsaw" data-cities="Sarajevo, Skopje, Warsaw, Zagreb">Sarajevo, Skopje, Warsaw, Zagreb</option>
+          <option value="Africa/Lagos" data-cities="West Central Africa">West Central Africa</option>
+          <option value="Europe/Athens" data-cities="Athens, Bucharest">Athens, Bucharest</option>
+          <option value="Europe/Helsinki" data-cities="Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius">Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius</option>
+          <option value="Africa/Cairo" data-cities="Cairo">Cairo</option>
+          <option value="Africa/Johannesburg" data-cities="Harare, Pretoria, Johannesburg">Harare, Pretoria, Johannesburg</option>
+          <option value="Asia/Jerusalem" data-cities="Jerusalem">Jerusalem</option>
+          <option value="Asia/Beirut" data-cities="Beirut">Beirut</option>
+          <option value="Europe/Istanbul" data-cities="Istanbul">Istanbul</option>
+          <option value="Europe/Moscow" data-cities="Moscow, St. Petersburg">Moscow, St. Petersburg</option>
+          <option value="Asia/Riyadh" data-cities="Kuwait, Riyadh">Kuwait, Riyadh</option>
+          <option value="Asia/Qatar" data-cities="Doha">Doha</option>
+          <option value="Asia/Baghdad" data-cities="Baghdad">Baghdad</option>
+          <option value="Africa/Nairobi" data-cities="Nairobi">Nairobi</option>
+          <option value="Asia/Tehran" data-cities="Tehran">Tehran</option>
+          <option value="Asia/Dubai" data-cities="Abu Dhabi, Dubai, Muscat">Abu Dhabi, Dubai, Muscat</option>
+          <option value="Asia/Kabul" data-cities="Kabul">Kabul</option>
+          <option value="Asia/Karachi" data-cities="Islamabad, Karachi">Islamabad, Karachi</option>
+          <option value="Indian/Maldives" data-cities="Maldives">Maldives</option>
+          <option value="Asia/Kolkata" data-cities="Chennai, Kolkata, Mumbai, New Delhi">Chennai, Kolkata, Mumbai, New Delhi</option>
+          <option value="Asia/Colombo" data-cities="Sri Jayawardenepura">Sri Jayawardenepura</option>
+          <option value="Asia/Kathmandu" data-cities="Kathmandu">Kathmandu</option>
+          <option value="Asia/Dhaka" data-cities="Dhaka">Dhaka</option>
+          <option value="Asia/Yangon" data-cities="Yangon (Rangoon)">Yangon (Rangoon)</option>
+          <option value="Asia/Bangkok" data-cities="Bangkok, Hanoi, Jakarta">Bangkok, Hanoi, Jakarta</option>
+          <option value="Asia/Shanghai" data-cities="Beijing, Chongqing, Urumqi">Beijing, Chongqing, Urumqi</option>
+          <option value="Asia/Hong_Kong" data-cities="Hong Kong">Hong Kong</option>
+          <option value="Asia/Singapore" data-cities="Kuala Lumpur, Singapore">Kuala Lumpur, Singapore</option>
+          <option value="Asia/Taipei" data-cities="Taipei">Taipei</option>
+          <option value="Asia/Manila" data-cities="Manila">Manila</option>
+          <option value="Australia/Perth" data-cities="Perth">Perth</option>
+          <option value="Asia/Tokyo" data-cities="Osaka, Sapporo, Tokyo">Osaka, Sapporo, Tokyo</option>
+          <option value="Asia/Seoul" data-cities="Seoul">Seoul</option>
+          <option value="Australia/Darwin" data-cities="Darwin">Darwin</option>
+          <option value="Australia/Adelaide" data-cities="Adelaide">Adelaide</option>
+          <option value="Australia/Brisbane" data-cities="Brisbane">Brisbane</option>
+          <option value="Pacific/Port_Moresby" data-cities="Guam, Port Moresby">Guam, Port Moresby</option>
+          <option value="Australia/Sydney" data-cities="Canberra, Melbourne, Sydney">Canberra, Melbourne, Sydney</option>
+          <option value="Australia/Hobart" data-cities="Hobart">Hobart</option>
+          <option value="Pacific/Noumea" data-cities="Solomon Is., New Caledonia">Solomon Is., New Caledonia</option>
+          <option value="Pacific/Fiji" data-cities="Fiji">Fiji</option>
+          <option value="Pacific/Auckland" data-cities="Auckland, Wellington">Auckland, Wellington</option>
+          <option value="Pacific/Tongatapu" data-cities="Nuku'alofa">Nuku'alofa</option>
+        </select>
+      </div>
+    </div>
 
     <div class="table-scroll">
       <table class="departures-table">
@@ -11967,12 +12144,13 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
                 </span>
               </td>
 
-              <td class="col-date">${windowOpenDate(r.date_utc, r.dep_time_utc)}</td>
+              <td class="col-date">${tzSpan(windowOpenDate(r.date_utc, r.dep_time_utc), 'date', schedUtcMs(r.date_utc, r.dep_time_utc, -60), null)}</td>
               <td class="col-window">${(() => {
                 const utcStr = buildTimeWindow(r.dep_time_utc);
                 const lw = depWindowLocalByKey[r.number];
-                if (!lw) return utcStr;
-                return '<span class="window-tt">' + utcStr +
+                const conv = tzSpan(utcStr, 'window', schedUtcMs(r.date_utc, r.dep_time_utc, -60), schedUtcMs(r.date_utc, r.dep_time_utc, 60));
+                if (!lw) return conv;
+                return '<span class="window-tt">' + conv +
                   '<span class="window-tt-bubble">' +
                     '<div class="window-tt-row"><span class="window-tt-label">UTC</span><span class="window-tt-value">' + utcStr + '</span></div>' +
                     '<div class="window-tt-row"><span class="window-tt-label">Local</span><span class="window-tt-value">' + escapeHtml(lw.lo) + '–' + escapeHtml(lw.hi) + '</span></div>' +
@@ -11983,8 +12161,10 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
                 if (!r.arr_time_utc) return '-';
                 const utcStr = buildTimeWindow(r.arr_time_utc);
                 const lw = arrWindowLocalByKey[r.number];
-                if (!lw) return utcStr;
-                return '<span class="window-tt">' + utcStr +
+                const shift = arrDayShift(r);
+                const conv = tzSpan(utcStr, 'window', schedUtcMs(r.date_utc, r.arr_time_utc, shift - 60), schedUtcMs(r.date_utc, r.arr_time_utc, shift + 60));
+                if (!lw) return conv;
+                return '<span class="window-tt">' + conv +
                   '<span class="window-tt-bubble">' +
                     '<div class="window-tt-row"><span class="window-tt-label">UTC</span><span class="window-tt-value">' + utcStr + '</span></div>' +
                     '<div class="window-tt-row"><span class="window-tt-label">Local</span><span class="window-tt-value">' + escapeHtml(lw.lo) + '–' + escapeHtml(lw.hi) + '</span></div>' +
@@ -12148,6 +12328,138 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
       </table>
     </div>
     </section>
+
+<script>
+/* Schedule timezone picker - display only. Every converted cell carries its
+   UTC instant(s) in data-start/data-end (epoch ms) and its original UTC text
+   in data-utc, so switching back to UTC just restores that text. */
+(function() {
+  var sel = document.getElementById('schedTzSelect');
+  if (!sel || !window.Intl || !Intl.DateTimeFormat) return;
+  var KEY = 'wfScheduleTz';
+  var deviceTz = '';
+  try { deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function parts(ms, tz, opts) {
+    var o = { timeZone: tz }; for (var k in opts) o[k] = opts[k];
+    var out = {};
+    new Intl.DateTimeFormat('en-GB', o).formatToParts(new Date(ms)).forEach(function(p) { out[p.type] = p.value; });
+    return out;
+  }
+  function hhmm(ms, tz) {
+    var p = parts(ms, tz, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    return pad(Number(p.hour) % 24) + ':' + p.minute;
+  }
+  function dateLabel(ms, tz) {
+    var p = parts(ms, tz, { weekday: 'short', day: 'numeric', month: 'short' });
+    var d = Number(p.day);
+    var sfx = (d === 1 || d === 21 || d === 31) ? 'st' : (d === 2 || d === 22) ? 'nd' : (d === 3 || d === 23) ? 'rd' : 'th';
+    return p.weekday + ' ' + d + sfx + ' ' + p.month;
+  }
+  // Minutes east of UTC for tz at instant ms, from the wall-clock difference.
+  function offsetMins(ms, tz) {
+    var p = parts(ms, tz, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    var wall = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute));
+    return Math.round((wall - Math.floor(ms / 60000) * 60000) / 60000);
+  }
+  // "UTC+11:00" / "UTC-03:30" / "UTC" - Windows-style.
+  function offsetLabel(mins) {
+    var a = Math.abs(mins);
+    return 'UTC' + (mins < 0 ? '-' : '+') + pad(Math.floor(a / 60)) + ':' + pad(a % 60);
+  }
+  // Short zone name (AEDT, BST, EST...). Some locales only know offsets, so
+  // try a few English ones and fall back to "UTC+8" style.
+  function zoneAbbr(ms, tz) {
+    var locales = ['en-US', 'en-GB', 'en-AU', 'en-NZ', 'en-IN', 'en-CA'];
+    for (var i = 0; i < locales.length; i++) {
+      try {
+        var name = '';
+        new Intl.DateTimeFormat(locales[i], { timeZone: tz, timeZoneName: 'short' })
+          .formatToParts(new Date(ms)).forEach(function(p) { if (p.type === 'timeZoneName') name = p.value; });
+        if (name && !/^(GMT|UTC)[+\\-]/.test(name)) return name === 'GMT' && tz !== 'Europe/London' && tz !== 'Europe/Dublin' ? 'UTC' : name;
+      } catch (e) {}
+    }
+    var m = offsetMins(ms, tz), a = Math.abs(m);
+    return m ? 'UTC' + (m < 0 ? '-' : '+') + Math.floor(a / 60) + (a % 60 ? ':' + pad(a % 60) : '') : 'UTC';
+  }
+
+  // Offsets are taken at the first window on the page, so daylight saving is
+  // whatever applies during the event rather than today.
+  var firstCell = document.querySelector('.tz-conv[data-start]');
+  var refMs = firstCell ? Number(firstCell.getAttribute('data-start')) : Date.now();
+
+  // Prefix each zone with its offset and sort the list by it.
+  (function buildList() {
+    var zoneOpts = Array.prototype.slice.call(sel.querySelectorAll('option[data-cities]'));
+    var rows = [];
+    zoneOpts.forEach(function(o) {
+      try {
+        var m = offsetMins(refMs, o.value);
+        o.textContent = '(' + offsetLabel(m) + ') ' + o.getAttribute('data-cities');
+        rows.push({ el: o, m: m, name: o.getAttribute('data-cities') });
+      } catch (e) { o.remove(); }
+    });
+    rows.sort(function(x, y) { return x.m - y.m || x.name.localeCompare(y.name); });
+    rows.forEach(function(r) { sel.appendChild(r.el); });
+    var autoOpt = sel.querySelector('option[value="auto"]');
+    if (autoOpt) {
+      if (deviceTz) {
+        try { autoOpt.textContent = '(' + offsetLabel(offsetMins(refMs, deviceTz)) + ') My device timezone - ' + deviceTz.replace(/_/g, ' '); }
+        catch (e) { autoOpt.remove(); }
+      } else autoOpt.remove();
+    }
+    var utcOpt = sel.querySelector('option[value="UTC"]');
+    if (utcOpt) utcOpt.textContent = '(UTC) Coordinated Universal Time';
+  })();
+
+  function apply(tz) {
+    var cells = document.querySelectorAll('.tz-conv');
+    for (var i = 0; i < cells.length; i++) {
+      var el = cells[i];
+      if (!tz) {
+        el.textContent = el.getAttribute('data-utc');
+        el.classList.remove('tz-local');
+        el.removeAttribute('title');
+        continue;
+      }
+      var a = Number(el.getAttribute('data-start'));
+      if (!a) continue;
+      el.textContent = '';
+      if (el.getAttribute('data-kind') === 'date') {
+        el.textContent = dateLabel(a, tz);
+      } else {
+        var b = Number(el.getAttribute('data-end'));
+        var t = document.createElement('span');
+        t.className = 'tz-time';
+        t.textContent = hhmm(a, tz) + '\\u2013' + hhmm(b, tz);
+        var z = document.createElement('span');
+        z.className = 'tz-abbr';
+        z.textContent = zoneAbbr(a, tz);
+        el.appendChild(t);
+        el.appendChild(z);
+      }
+      el.classList.add('tz-local');
+      el.title = el.getAttribute('data-utc') + ' UTC';
+    }
+  }
+
+  function resolve(v) { return v === 'auto' ? deviceTz : v; }
+
+  var saved = '';
+  try { saved = localStorage.getItem(KEY) || ''; } catch (e) {}
+  if (saved && sel.querySelector('option[value="' + saved.replace(/"/g, '') + '"]')) {
+    sel.value = saved;
+    try { apply(resolve(saved)); } catch (e) { sel.value = ''; }
+  }
+
+  sel.addEventListener('change', function() {
+    var v = sel.value;
+    try { localStorage.setItem(KEY, v); } catch (e) {}
+    try { apply(resolve(v)); } catch (e) { apply(''); sel.value = ''; }
+  });
+})();
+</script>
 
 <script>
 document.addEventListener('click', function(e) {

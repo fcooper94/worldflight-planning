@@ -625,3 +625,15 @@ model AtcNotifyPreference {
   ctr         Boolean  @default(true)
   updatedAt   DateTime @default(now())
 }
+
+// Private per-user notes on a sector page (/sector/:wf/...), one row per CID
+// per sector number. Only ever shown to the CID that wrote it.
+model UserSectorNote {
+  id        Int      @id @default(autoincrement())
+  cid       Int
+  sector    String   // WF sector number, e.g. "WF2624"
+  note      String
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([cid, sector])
+}
