@@ -19403,6 +19403,42 @@ app.get('/api/teams/:wf.json', async (req, res) => {
   });
 });
 
+/* Public briefings feed: the airport's pilot documents as JSON, e.g.
+   GET /api/briefings/einn. Same visibility as a logged-out visitor on the
+   portal's Documents tab - permanent docs plus those tagged to the active
+   event, never archived ones - regardless of who asks. CORS-open so other
+   WorldFlight sites can read it. */
+app.get('/api/briefings/:icao', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'no-cache');
+  const icao = String(req.params.icao || '').toUpperCase();
+  if (!/^[A-Z0-9]{3,4}$/.test(icao)) return res.status(400).json({ error: 'Invalid ICAO' });
+  try {
+    const docs = await prisma.airportDocument.findMany({
+      where: { icao, OR: [{ eventId: null }, ...(activeEventId ? [{ eventId: activeEventId }] : [])] },
+      orderBy: { uploadedAt: 'desc' }
+    });
+    const base = vatisBaseUrl(req);
+    const eventNameMap = Object.fromEntries(wfEvents.map(e => [e.id, e.name]));
+    res.json({
+      icao,
+      count: docs.length,
+      briefings: docs.map(d => ({
+        name: d.filename.replace(/\.[^/.]+$/, ''),
+        filename: d.filename,
+        type: getFileType(d.filename),
+        url: base + '/uploads/' + icao + '/' + encodeURIComponent(d.filename),
+        updated: d.uploadedAt,
+        scope: d.eventId == null ? 'permanent' : 'event',
+        event: d.eventId == null ? null : (eventNameMap[d.eventId] || null)
+      }))
+    });
+  } catch (err) {
+    console.error('[BRIEFINGS API]', err.message);
+    res.status(500).json({ error: 'Failed to load briefings' });
+  }
+});
+
 app.get('/api/slots/:wfNum.json', (req, res) => {
   const out = buildSlotsForWf(req.params.wfNum);
   if (!out) return res.status(404).json({ error: 'Sector not found' });
