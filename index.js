@@ -4,7 +4,7 @@ import fs from 'fs';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import multer from 'multer';
-import { PACK_DIR, PACK_WF_DIR, GROUND_CACHE_DIR, VATIS_DIR, ensurePackDirs } from './lib/paths.mjs';
+import { PACK_DIR, PACK_WF_DIR, GROUND_CACHE_DIR, VATIS_DIR, UPLOADS_DIR, ensurePackDirs } from './lib/paths.mjs';
 import { buildVatisProfile, defaultTemplate as vatisDefaultTemplate, APPROACH_TYPES as VATIS_APPROACH_TYPES, TEMPLATE_SERIAL as VATIS_TEMPLATE_SERIAL } from './lib/vatis-profile.mjs';
 import path from 'path';
 import crypto from 'crypto';
@@ -321,7 +321,7 @@ function closestFix(name, refLat, refLon) {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const icao = req.params.icao.toUpperCase();
-    const dir = path.join(__dirname, 'Uploads', icao);
+    const dir = path.join(UPLOADS_DIR, icao);
 
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
@@ -12672,7 +12672,7 @@ app.delete('/admin/api/documents/:id', requireAdmin, async (req, res) => {
     if (!doc) return res.status(404).json({ error: 'Not found' });
     // Best-effort file removal — don't block deletion if file is missing.
     try {
-      const filePath = path.join(__dirname, 'Uploads', doc.icao, doc.filename);
+      const filePath = path.join(UPLOADS_DIR, doc.icao, doc.filename);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     } catch (e) {
       console.warn('[ADMIN DOC DELETE] file unlink failed:', e.message);
@@ -16239,7 +16239,9 @@ function getWorldFlightLegForAirport(icao) {
 
 
 
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
+// Airport documents. UPLOADS_DIR is on the Railway volume when WF_VOLUME_DIR
+// is set, so uploads survive deploys (lib/paths.mjs).
+app.use('/uploads', express.static(UPLOADS_DIR));
 
 app.get('/icao/:icao', async (req, res) => {
   const icao = req.params.icao.toUpperCase();
