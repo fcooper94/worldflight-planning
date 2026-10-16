@@ -19295,6 +19295,69 @@ function buildSlotsForWf(wfNum) {
 }
 
 // ── Public schedule JSON ─────────────────────────────────────────────────
+// Schedule as CSV, for anyone who wants it in a spreadsheet. Mirrors the
+// gating of the schedule page exactly: route alternatives are filtered per
+// viewer, ATC routes only appear once published, and flow columns only for
+// viewers who may see flow restrictions - a download must not hand out what
+// the page itself withholds.
+app.get('/schedule.csv', requirePageEnabled('schedule'), (req, res) => {
+  const cid = Number(req.session?.user?.data?.cid) || null;
+  const isAdmin = isAdminUser(cid);
+  const showRoute = isAdmin || isPageEnabled('atc-route');
+  const showFlow = isPageVisibleTo('flow-restrictions', isAdmin);
+  const rows = visibleScheduleRows(adminSheetCache || [], cid);
+
+  const cell = (v) => {
+    const t = v == null ? '' : String(v);
+    return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  };
+
+  const headers = [
+    'Sector', 'Option', 'From', 'To', 'Date',
+    'Dep Time (UTC)', 'Dep Window (UTC)', 'Arr Time (UTC)', 'Arr Window (UTC)',
+    'Block Time', 'Flight Time'
+  ];
+  if (showFlow) headers.push('Flow Type', 'Dep Rate (per hour)');
+  if (showRoute) headers.push('ATC Route', 'Secondary Route');
+
+  const lines = [headers.map(cell).join(',')];
+  for (const r of rows) {
+    const flowType = sharedFlowTypes[`${r.from}-${r.to}`] || 'NONE';
+    const flowLabel = flowType === 'SLOTTED' ? 'Booking with Connection Time'
+      : flowType === 'BOOKING_ONLY' ? 'Booking Only' : 'No Restrictions';
+    const out = [
+      r.number,
+      r.variant_label || '',
+      r.from,
+      r.to,
+      windowOpenDate(r.date_utc, r.dep_time_utc),
+      r.dep_time_utc || '',
+      r.dep_time_utc ? utcWindow(r.dep_time_utc) : '',
+      r.arr_time_utc || '',
+      r.arr_time_utc ? utcWindow(r.arr_time_utc) : '',
+      r.block_time || '',
+      r.flight_time || ''
+    ];
+    if (showFlow) {
+      out.push(flowLabel);
+      out.push(flowType === 'NONE' ? '' : (sharedDepFlows[`${r.from}-${r.to}`] || 0));
+    }
+    if (showRoute) {
+      out.push(r.atc_route || '');
+      out.push(r.atc_route2 || '');
+    }
+    lines.push(out.map(cell).join(','));
+  }
+
+  const evt = wfEvents.find(e => e.id === activeEventId);
+  const slug = String(evt?.name || 'worldflight').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${slug}-schedule.csv"`);
+  // BOM so Excel opens it as UTF-8 rather than guessing.
+  res.send('\uFEFF' + lines.join('\r\n') + '\r\n');
+});
+
 app.get('/api/schedule.json', async (req, res) => {
   if (!adminSheetCache || !adminSheetCache.length) {
     return res.status(503).json({ error: 'Schedule not loaded yet' });
@@ -20987,6 +21050,26 @@ const HQ_STYLES = `    <style>
         font-family: inherit;
       }
 
+      .aff-schedule-actions { display: inline-flex; align-items: center; gap: 14px; }
+      .aff-schedule-csv {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        text-decoration: none;
+        color: var(--muted);
+        padding: 4px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        transition: color 0.15s, border-color 0.15s, background 0.15s;
+      }
+      .aff-schedule-csv:hover {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
+      }
+
       .aff-route-btn {
         display: inline-flex;
         align-items: center;
@@ -22166,7 +22249,12 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
       <section class="card aff-schedule-card">
         <header class="aff-schedule-header">
           <h3 class="section-title" style="margin:0;">${isMultiAircraft ? 'Our Bookings &amp; Slots' : soloSchedule ? 'My Bookings &amp; Slots' : 'Assign Pilots / Our Bookings &amp; Slots'}</h3>
-          ${showSchedule ? `<a href="/schedule" class="aff-schedule-link">View full schedule</a>` : ''}
+          ${showSchedule ? `<span class="aff-schedule-actions">
+            <a href="/schedule.csv" class="aff-schedule-csv" download>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export as CSV</a>
+            <a href="/schedule" class="aff-schedule-link">View full schedule</a>
+          </span>` : ''}
         </header>
 
         ${!showSchedule ? `
