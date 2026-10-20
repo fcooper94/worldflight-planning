@@ -2673,60 +2673,175 @@ function optionHasRoom(row) {
   return true;
 }
 
+/* Consecutive route-alternative legs whose options connect - option A lands
+   where the next leg's A departs, B likewise - form a chain (WF2619 -> WF2620
+   -> WF2621 via TBPB/GVAC or TTPP/GVSV). An aircraft has to stay on one
+   option across a chain, or it lands at one airport and departs from
+   another. Returns the chain's legs in running order, each as its options;
+   a leg linked to nothing is a chain of one. */
+function routeAltChainFor(row, rows = adminSheetCache) {
+  const primaries = (rows || []).filter(r => r && r.number && !r.is_variant);
+  const optsOf = p => legOptionsFor(p, rows);
+  const links = (p, q) => {
+    const a = optsOf(p), b = optsOf(q);
+    if (a.length < 2 || a.length !== b.length) return false;
+    return a.every(o => {
+      const n = b.find(x => x.variant_label === o.variant_label);
+      return !!n && n.from === o.to;
+    });
+  };
+  const i = primaries.findIndex(p => p.number === (row?.variant_of || row?.number));
+  if (i < 0) return [];
+  let s = i, e = i;
+  while (s > 0 && links(primaries[s - 1], primaries[s])) s--;
+  while (e < primaries.length - 1 && links(primaries[e], primaries[e + 1])) e++;
+  return primaries.slice(s, e + 1).map(optsOf);
+}
+
+function legKeyOf(leg) {
+  return leg[0].variant_of || leg[0].number;
+}
+
 /* Where each affiliate aircraft flies on a leg whose affiliates are allocated
-   to one option. Walks `affs` (participating, Display Order) top-down: the
-   overspill prefers the other option, everyone else the allocated one, and
-   whoever finds their preferred option full overflows to the other. Room is
-   each option's capacity less its non-affiliate bookings (teams, pilots), so
-   the top of the list holds the allocated option and the bottom overflows.
-   An aircraft released (opted out) on its preferred option is left out.
-   `taken` optionally overrides the non-affiliate count per option label (a
-   preview counts teams where they are about to be, not where they are).
-   Returns null when affiliates are allocated to both options, else
-   Map affId -> { option, reason } where reason is 'allocated' | 'overspill'
-   | 'overflow', or option null with reason 'released' | 'full'. */
-function planAffiliatePlacement(options, affs, releasedKeys, affCallsigns, taken = null) {
+   to one option, planned across the leg's whole chain so an aircraft keeps
+   one option throughout.
+
+   Walks `affs` (participating, Display Order) top-down, an affiliate's
+   aircraft (rows sharing a name) together as one unit ranked by its
+   best-placed aircraft: the unit takes its preferred option if it fits on
+   every chain leg it flies, else the other option whole, and is split only
+   when it fits on neither. The overspill prefers the other option. Room is
+   each option's capacity less teams and pilots, per leg, so the top of the
+   list holds the allocated option and the bottom overflows.
+
+   Opt-outs come from AffiliateSectorClaim per leg - see allowedOn(). An
+   aircraft skips legs it is not flying but keeps its option on the rest.
+
+   `options` is the leg asked about; it may carry preview settings, which
+   then apply to the whole chain. `taken` optionally overrides the
+   non-affiliate count as { [primaryNumber]: { [label]: n } } (a preview
+   counts teams where they are about to be). Returns null when affiliates are
+   allocated to both options, else Map affId -> { option, reason }: reason
+   'allocated' | 'chosen' | 'overspill' | 'overflow', or option null with
+   'released' | 'full'. */
+function planAffiliatePlacement(options, affs, claims, affCallsigns, taken = null) {
   const choice = autoBookChoice(options[0], 'affiliate');
   if (!choice) return null;
   const other = choice === 'A' ? 'B' : 'A';
-  const byLabel = new Map(options.map(o => [o.variant_label, o]));
+  const legNumber = legKeyOf(options);
+  let chain = routeAltChainFor(options[0]);
+  if (!chain.length) chain = [options];
+  chain = chain.map(leg => (legKeyOf(leg) === legNumber ? options : leg));
 
-  const room = {};
-  for (const o of options) {
-    let used = taken ? (taken[o.variant_label] || 0) : 0;
-    if (!taken) {
-      const prefix = optionPrefix(o);
-      for (const [key, b] of Object.entries(tobtBookingsByKey)) {
-        if (!b || key === b.slotKey || !String(b.slotKey || '').startsWith(prefix)) continue;
-        if (!affCallsigns.has(String(b.callsign || '').toUpperCase())) used++;
+  // Room per leg per option: capacity less the teams and pilots booked there.
+  const room = new Map();
+  for (const leg of chain) {
+    const k = legKeyOf(leg);
+    const override = taken && taken[k];
+    const r = {};
+    for (const o of leg) {
+      let used = override ? (override[o.variant_label] || 0) : 0;
+      if (!override) {
+        const prefix = optionPrefix(o);
+        for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+          if (!b || key === b.slotKey || !String(b.slotKey || '').startsWith(prefix)) continue;
+          if (!affCallsigns.has(String(b.callsign || '').toUpperCase())) used++;
+        }
+      }
+      r[o.variant_label] = optionCapacity(o) - used;
+    }
+    room.set(k, r);
+  }
+
+  // The options an aircraft may fly on one leg. Neither released: either.
+  // B released: A only. A released: B only if B carries a claim - ticking an
+  // option on Affiliate HQ records one - because released on A with nothing
+  // on B is an opt-out, often from before B existed. Empty: not flying.
+  const allowedOn = (a, leg) => {
+    const rel = o => claims.released.has(`${a.id}|${o.number}`);
+    const aOpt = leg.find(o => o.variant_label === 'A');
+    const aReleased = aOpt ? rel(aOpt) : true;
+    return leg
+      .filter(o => !rel(o) && (o.variant_label === 'A' || !aReleased || claims.chosen.has(`${a.id}|${o.number}`)))
+      .map(o => o.variant_label);
+  };
+
+  // Per aircraft: the chain legs it flies, and the options open to it on all
+  // of them. Conflicting choices on different legs: the earliest leg wins.
+  const info = new Map();
+  for (const a of affs) {
+    const flies = new Set();
+    let open = null;
+    for (const leg of chain) {
+      const allowed = allowedOn(a, leg);
+      if (!allowed.length) continue;
+      flies.add(legKeyOf(leg));
+      const both = open ? open.filter(l => allowed.includes(l)) : allowed;
+      if (both.length) open = both;
+    }
+    info.set(a.id, { flies, open: open || [] });
+  }
+
+  const fits = (list, l) => chain.every(leg => {
+    const k = legKeyOf(leg);
+    const need = list.filter(a => info.get(a.id).flies.has(k)).length;
+    if (!need) return true;
+    const r = room.get(k)[l];
+    return r != null && need <= r;
+  });
+  const out = new Map(chain.map(leg => [legKeyOf(leg), new Map()]));
+  const place = (a, l, reason) => {
+    const { flies } = info.get(a.id);
+    for (const leg of chain) {
+      const k = legKeyOf(leg);
+      if (!flies.has(k)) { out.get(k).set(a.id, { option: null, reason: 'released' }); continue; }
+      if (l) room.get(k)[l]--;
+      out.get(k).set(a.id, { option: l, reason });
+    }
+  };
+
+  // Overspill counts aircraft that can actually fly the other option.
+  const spill = affiliateOverspillIds(affs.filter(a => info.get(a.id).open.includes(other)), options[0].aff_overspill);
+
+  const units = [];
+  const unitByKey = new Map();
+  for (const a of affs) {
+    const key = String(a.name || a.callsign || a.id).trim().toUpperCase();
+    if (!unitByKey.has(key)) { unitByKey.set(key, []); units.push(unitByKey.get(key)); }
+    unitByKey.get(key).push(a);
+  }
+
+  for (const unit of units) {
+    const free = [];
+    for (const a of unit) {
+      const { flies, open } = info.get(a.id);
+      if (!flies.size) { place(a, null, 'released'); continue; }
+      if (open.length === 1) {
+        // Its own choice, or the only option it has not opted out of.
+        const l = open[0];
+        if (fits([a], l)) place(a, l, l === choice ? 'allocated' : 'chosen');
+        else place(a, null, 'full');
+        continue;
+      }
+      free.push({ a, pref: spill.has(a.id) ? other : choice });
+    }
+    for (const pref of [choice, other]) {
+      const group = free.filter(x => x.pref === pref).map(x => x.a);
+      if (!group.length) continue;
+      const alt = pref === choice ? other : choice;
+      const reason = pref === choice ? 'allocated' : 'overspill';
+      if (fits(group, pref)) group.forEach(a => place(a, pref, reason));
+      else if (fits(group, alt)) group.forEach(a => place(a, alt, 'overflow'));
+      else {
+        for (const a of group) {
+          if (fits([a], pref)) place(a, pref, reason);
+          else if (fits([a], alt)) place(a, alt, 'overflow');
+          else place(a, null, 'full');
+        }
       }
     }
-    room[o.variant_label] = optionCapacity(o) - used;
   }
-
-  const released = (a, l) => !byLabel.has(l) || releasedKeys.has(`${a.id}|${byLabel.get(l).number}`);
-  // Overspill counts aircraft that actually fly the other option, so an
-  // opted-out one near the bottom of the list does not use up a place.
-  const spill = affiliateOverspillIds(affs.filter(a => !released(a, other)), options[0].aff_overspill);
-  const out = new Map();
-  for (const a of affs) {
-    const pref = spill.has(a.id) ? other : choice;
-    const alt = pref === choice ? other : choice;
-    let placed;
-    // Released on the preferred option only: the affiliate chose the other
-    // one (Affiliate HQ flies an aircraft on one option per leg).
-    if (released(a, pref)) {
-      placed = !released(a, alt) && room[alt] > 0
-        ? { option: alt, reason: 'chosen' }
-        : { option: null, reason: released(a, alt) ? 'released' : 'full' };
-    }
-    else if (room[pref] > 0) placed = { option: pref, reason: pref === choice ? 'allocated' : 'overspill' };
-    else if (!released(a, alt) && room[alt] > 0) placed = { option: alt, reason: 'overflow' };
-    else placed = { option: null, reason: 'full' };
-    if (placed.option) room[placed.option]--;
-    out.set(a.id, placed);
-  }
-  return out;
+  return out.get(legNumber);
 }
 
 async function autoAssignTeamBookings({ reason = '' } = {}) {
@@ -2924,22 +3039,26 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
     const affRows = await prisma.affiliate.findMany({
       where: { participatingWf26: true },
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-      select: { id: true, cid: true, callsign: true }
+      select: { id: true, cid: true, callsign: true, name: true }
     });
     // Route alternatives: where each aircraft flies on a leg whose affiliates
     // are allocated to one option. Planned once per leg per run, after the
     // team pass, so the teams' bookings are already counted against room.
-    const allReleased = await prisma.affiliateSectorClaim.findMany({
-      where: { cid: 0 }, select: { affiliateId: true, sectorNumber: true }
+    const allClaims = await prisma.affiliateSectorClaim.findMany({
+      where: { callsign: null }, select: { affiliateId: true, sectorNumber: true, cid: true }
     }).catch(() => []);
-    const releasedKeys = new Set(allReleased.map(r => `${r.affiliateId}|${r.sectorNumber}`));
+    const releasedKeys = new Set(allClaims.filter(r => Number(r.cid) === 0).map(r => `${r.affiliateId}|${r.sectorNumber}`));
+    const claims = {
+      released: releasedKeys,
+      chosen: new Set(allClaims.filter(r => Number(r.cid) > 0).map(r => `${r.affiliateId}|${r.sectorNumber}`))
+    };
     const placeable = affRows.filter(a => Number(a.cid) && a.callsign);
     const affCallsigns = new Set(placeable.map(a => String(a.callsign).toUpperCase()));
     const placementByLeg = new Map();
     const placementFor = row => {
       const key = row.variant_of || row.number;
       if (!placementByLeg.has(key)) {
-        placementByLeg.set(key, planAffiliatePlacement(legOptionsFor(row), placeable, releasedKeys, affCallsigns));
+        placementByLeg.set(key, planAffiliatePlacement(legOptionsFor(row), placeable, claims, affCallsigns));
       }
       return placementByLeg.get(key);
     };
@@ -2972,14 +3091,11 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
           if (opts.some(o => Object.values(tobtBookingsByKey).some(b =>
             b && String(b.slotKey || '').startsWith(optionPrefix(o))
               && String(b.callsign || '').toUpperCase() === callsign))) continue;
-          let target = placementFor(row)?.get(aff.id)?.option || null;
-          // The plan is taken once per run; if its option has filled since,
-          // overflow to the other rather than go unbooked.
-          const targetRow = opts.find(o => o.variant_label === target);
-          if (targetRow && !optionHasRoom(targetRow)) {
-            const alt = opts.find(o => o !== targetRow && optionHasRoom(o) && !releasedKeys.has(`${aff.id}|${o.number}`));
-            target = alt ? alt.variant_label : null;
-          }
+          // Only ever the planned option - booking the other one here would
+          // break the aircraft's chain (land at A's airport, depart from B's).
+          // If the planned option is full because lower-ranked affiliates
+          // hold it, realignRouteAlternativeAffiliates() clears room.
+          const target = placementFor(row)?.get(aff.id)?.option || null;
           if (row.variant_label !== target) continue;
         }
 
@@ -3255,6 +3371,7 @@ async function autoAssignTeamThenAffiliate(opts = {}) {
   return queueBookingMaintenance('auto-assign', async () => {
     try { await autoAssignTeamBookings(opts); } catch (e) { /* logged inside */ }
     try { await autoAssignAffiliateBookings(opts); } catch (e) { /* logged inside */ }
+    try { await realignRouteAlternativeAffiliates(opts); } catch (e) { console.error('[ROUTE ALT] re-sort failed:', e.message); }
     try { await rebalanceSlottedSectors(opts); } catch (e) { /* logged inside */ }
   });
 }
@@ -22160,14 +22277,20 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                     const b = fleetBooking[`${cs}|${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`] || null;
                     const claim = fleetClaims[`${a.id}|${r.number}`];
                     // A route-alternative leg is flown on one option: tick the
-                    // one it is booked on, else the only one not released,
-                    // else the option affiliates are allocated to.
+                    // one it is booked on; else, if released anywhere on the
+                    // leg, only an option it explicitly claims (released with
+                    // no claim elsewhere = not flying the leg); else the option
+                    // affiliates are allocated to.
                     const flying = claim !== 0 && (() => {
                       if (!r.variant_label) return true;
                       const booked = legFlyingOption(r, bk => String(bk.callsign || '').toUpperCase() === cs);
                       if (booked) return booked === r.variant_label;
-                      const open = legOptionsFor(r).filter(o => fleetClaims[`${a.id}|${o.number}`] !== 0);
-                      if (open.length === 1) return open[0].number === r.number;
+                      const opts = legOptionsFor(r);
+                      const claimOf = o => fleetClaims[`${a.id}|${o.number}`];
+                      if (opts.some(o => claimOf(o) === 0)) {
+                        const picked = opts.filter(o => claimOf(o) > 0);
+                        return picked.length === 1 && picked[0].number === r.number;
+                      }
                       const choice = autoBookChoice(r, 'affiliate');
                       return !choice || choice === r.variant_label;
                     })();
@@ -23430,25 +23553,65 @@ app.post('/api/affiliates/fleet/:id/flying', requireLogin, requireAffiliate, asy
     };
 
     // A route-alternative leg is flown on one option. Ticking one releases
-    // the others; unticking releases the whole leg.
+    // the others; unticking releases the whole leg. Legs chained to this one
+    // (A lands where the next A departs, B likewise) follow the same option
+    // wherever this aircraft flies them, so it never lands at one airport
+    // and departs from another.
     const siblings = sched.variant_label ? legOptionsFor(sched).filter(o => o.number !== sched.number) : [];
 
     if (flying) {
-      if (siblings.length && restricted) {
-        const bookedHere = Object.values(tobtBookingsByKey).some(b =>
-          b && String(b.slotKey || '').startsWith(optionPrefix(sched) + '|') && String(b.callsign || '').toUpperCase() === cs);
-        if (!bookedHere && !optionHasRoom(sched)) {
-          const alt = siblings.find(o => optionHasRoom(o));
+      // The options to fly on each leg of the chain - this leg always, the
+      // rest only where the aircraft is flying them already.
+      const pick = [];
+      if (siblings.length) {
+        const label = sched.variant_label;
+        const chain = routeAltChainFor(sched);
+        const claimRows = await prisma.affiliateSectorClaim.findMany({
+          where: { affiliateId: id, callsign: null, sectorNumber: { in: chain.flat().map(o => o.number) } }
+        }).catch(() => []);
+        const claimOf = num => { const c = claimRows.find(x => x.sectorNumber === num); return c ? Number(c.cid) : null; };
+        for (const leg of chain) {
+          const target = leg.find(o => o.variant_label === label);
+          if (!target) continue;
+          if (target.number !== sched.number) {
+            // Same rule as the placement: released on A with no claim on B,
+            // or released everywhere, means it is not flying that leg.
+            const aOpt = leg.find(o => o.variant_label === 'A');
+            const aReleased = aOpt && claimOf(aOpt.number) === 0;
+            const flies = leg.some(o => claimOf(o.number) !== 0
+              && (o.variant_label === 'A' || !aReleased || claimOf(o.number) > 0));
+            if (!flies) continue;
+          }
+          pick.push({ leg, target });
+        }
+        // Room on every option it is about to fly, unless already booked there.
+        for (const { leg, target } of pick) {
+          if ((sharedFlowTypes[`${target.from}-${target.to}`] || 'NONE') === 'NONE') continue;
+          const bookedThere = Object.values(tobtBookingsByKey).some(b =>
+            b && String(b.slotKey || '').startsWith(optionPrefix(target) + '|') && String(b.callsign || '').toUpperCase() === cs);
+          if (bookedThere || optionHasRoom(target)) continue;
+          const alt = leg.find(o => o !== target && optionHasRoom(o));
           return res.status(409).json({
             error: alt
-              ? `No bookings left for ${optionLabel(sched)}. Please book onto ${optionLabel(alt)} instead.`
-              : `No bookings left for ${[sched, ...siblings].map(optionLabel).join(' or ')}.`
+              ? `No bookings left for ${optionLabel(target)}. Please book onto ${optionLabel(alt)} instead.`
+              : `No bookings left for ${leg.map(optionLabel).join(' or ')}.`
           });
         }
       }
-      for (const o of siblings) await releaseOption(o);
-      await prisma.affiliateSectorClaim.deleteMany({ where: { affiliateId: id, sectorNumber, cid: 0 } });
-      if (restricted) {
+      for (const { leg, target } of pick) {
+        for (const o of leg) if (o.number !== target.number) await releaseOption(o);
+        await prisma.affiliateSectorClaim.deleteMany({ where: { affiliateId: id, sectorNumber: target.number, cid: 0 } });
+        // Record the choice explicitly. "Released on A, nothing on B" is also
+        // what an aircraft that opted out before B existed looks like, so the
+        // placement only reads B as chosen when B carries a real claim. The
+        // aircraft's own account, unless one is already assigned there.
+        const existing = await prisma.affiliateSectorClaim.findFirst({ where: { affiliateId: id, sectorNumber: target.number, callsign: null } });
+        if (!existing) await setAffiliateSectorClaim(id, target.number, Number(row.cid));
+      }
+      if (!siblings.length) {
+        await prisma.affiliateSectorClaim.deleteMany({ where: { affiliateId: id, sectorNumber, cid: 0 } });
+      }
+      if (restricted || pick.length) {
         await autoAssignTeamThenAffiliate({ reason: `${row.callsign} opted in to ${sectorNumber}` }).catch(() => {});
       }
     } else {
@@ -33982,14 +34145,13 @@ app.post('/admin/api/schedule-row/add-variant', requireAdmin, async (req, res) =
    bookings. Affiliates follow planAffiliatePlacement (allocated, overspill,
    then overflow when full). Ordinary pilots are counted, never moved. */
 async function routeAltAllocationPlan(primaryNumber, settings = null) {
-  const options = legOptionsFor({ number: primaryNumber });
-  const [teamRows, affRows, releasedRows] = await Promise.all([
+  const [teamRows, affRows, claimRows] = await Promise.all([
     prisma.officialTeam.findMany({ select: { callsign: true, teamName: true, participatingWf26: true } }),
     prisma.affiliate.findMany({
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-      select: { id: true, cid: true, callsign: true, participatingWf26: true }
+      select: { id: true, cid: true, callsign: true, name: true, participatingWf26: true }
     }),
-    prisma.affiliateSectorClaim.findMany({ where: { cid: 0 }, select: { affiliateId: true, sectorNumber: true } }).catch(() => [])
+    prisma.affiliateSectorClaim.findMany({ where: { callsign: null }, select: { affiliateId: true, sectorNumber: true, cid: true } }).catch(() => [])
   ]);
   const teamCs = new Set(teamRows.map(t => String(t.callsign || '').toUpperCase()).filter(Boolean));
   const affIdByCs = new Map(affRows.filter(a => a.callsign).map(a => [String(a.callsign).toUpperCase(), a.id]));
@@ -33997,19 +34159,26 @@ async function routeAltAllocationPlan(primaryNumber, settings = null) {
   const placeable = affRows.filter(a => a.participatingWf26 && Number(a.cid) && a.callsign);
   const placeableIds = new Set(placeable.map(a => a.id));
   const affCallsigns = new Set(placeable.map(a => String(a.callsign).toUpperCase()));
-  const releasedKeys = new Set(releasedRows.map(r => `${r.affiliateId}|${r.sectorNumber}`));
+  const releasedKeys = new Set(claimRows.filter(r => Number(r.cid) === 0).map(r => `${r.affiliateId}|${r.sectorNumber}`));
+  const claims = {
+    released: releasedKeys,
+    chosen: new Set(claimRows.filter(r => Number(r.cid) > 0).map(r => `${r.affiliateId}|${r.sectorNumber}`))
+  };
 
-  const rows = settings
-    ? options.map(o => ({
+  // The whole chain this leg belongs to - an aircraft keeps one option across
+  // it, so the allocation and every move are planned for all of its legs.
+  const chain = routeAltChainFor({ number: primaryNumber });
+  const legs = (chain.length ? chain : [legOptionsFor({ number: primaryNumber })]).map(leg => settings
+    ? leg.map(o => ({
         ...o,
         auto_book_variant: settings.teams,
         aff_book_variant: settings.affiliates || 'BOTH',
         aff_overspill: settings.affiliates ? settings.overspill : 0
       }))
-    : options;
+    : leg);
 
   // What is booked on each option now.
-  const booked = rows.map(o => {
+  const bookedOn = o => {
     const prefix = optionPrefix(o);
     const list = [];
     for (const [key, b] of Object.entries(tobtBookingsByKey)) {
@@ -34019,67 +34188,133 @@ async function routeAltAllocationPlan(primaryNumber, settings = null) {
       list.push({ key, b, cs, kind, affId: affIdByCs.get(cs) });
     }
     return list;
-  });
+  };
+  const bookedByLeg = legs.map(leg => leg.map(bookedOn));
 
   // Planning a change, count the teams where they are about to be: allocated
   // to one option, every team aircraft on the leg ends up there.
   let taken = null;
   if (settings) {
-    const legTeams = new Set(booked.flat().filter(x => x.kind === 'team').map(x => x.cs));
     taken = {};
-    rows.forEach((o, i) => {
-      const nonAff = booked[i].filter(x => !(x.kind === 'affiliate' && affCallsigns.has(x.cs)));
-      const pilots = nonAff.filter(x => x.kind !== 'team').length;
-      const teamsHere = settings.teams
-        ? (o.variant_label === settings.teams ? legTeams.size : 0)
-        : nonAff.length - pilots;
-      taken[o.variant_label] = pilots + teamsHere;
+    legs.forEach((leg, li) => {
+      const legTeams = new Set(bookedByLeg[li].flat().filter(x => x.kind === 'team').map(x => x.cs));
+      const t = {};
+      leg.forEach((o, i) => {
+        const nonAff = bookedByLeg[li][i].filter(x => !(x.kind === 'affiliate' && affCallsigns.has(x.cs)));
+        const pilots = nonAff.filter(x => x.kind !== 'team').length;
+        const teamsHere = settings.teams
+          ? (o.variant_label === settings.teams ? legTeams.size : 0)
+          : nonAff.length - pilots;
+        t[o.variant_label] = pilots + teamsHere;
+      });
+      taken[legKeyOf(leg)] = t;
     });
   }
-  const placement = planAffiliatePlacement(rows, placeable, releasedKeys, affCallsigns, taken);
+
+  // A booking is only moved to an option auto-assign will actually book -
+  // one with no flow restriction is never booked, so moving there loses it.
+  const rebookable = o => !!o && (sharedFlowTypes[`${o.from}-${o.to}`] || 'NONE') !== 'NONE';
 
   const removals = [];
-  const out = rows.map((o, i) => {
-    const s = { number: o.number, label: o.variant_label, from: o.from, to: o.to,
-      teams: 0, affiliates: 0, pilots: 0, removeTeams: 0, removeAffiliates: 0,
-      teamsAllocated: autoBookOptionAllows(o, 'team'),
-      affAllocated: 0, affOverspill: 0, affOverflow: 0, affChosen: 0 };
-    for (const x of booked[i]) {
-      if (x.kind === 'pilot') { s.pilots++; continue; }
-      if (x.kind === 'team') {
-        s.teams++;
-        if (!s.teamsAllocated) { s.removeTeams++; removals.push(x); }
-        continue;
+  const allOptions = [];
+  let asked = null;
+  legs.forEach((leg, li) => {
+    const placement = planAffiliatePlacement(leg, placeable, claims, affCallsigns, taken);
+    const byLabel = new Map(leg.map(o => [o.variant_label, o]));
+    const teamTargetOk = leg.some(o => autoBookOptionAllows(o, 'team') && rebookable(o));
+    const summaries = leg.map((o, i) => {
+      const s = { number: o.number, label: o.variant_label, from: o.from, to: o.to,
+        teams: 0, affiliates: 0, pilots: 0, removeTeams: 0, removeAffiliates: 0,
+        teamsAllocated: autoBookOptionAllows(o, 'team'),
+        affAllocated: 0, affOverspill: 0, affOverflow: 0, affChosen: 0 };
+      for (const x of bookedByLeg[li][i]) {
+        if (x.kind === 'pilot') { s.pilots++; continue; }
+        if (x.kind === 'team') {
+          s.teams++;
+          if (!s.teamsAllocated && teamTargetOk) { s.removeTeams++; removals.push(x); }
+          continue;
+        }
+        s.affiliates++;
+        const want = placement && placeableIds.has(x.affId) ? placement.get(x.affId)?.option : null;
+        if (want && want !== o.variant_label && rebookable(byLabel.get(want))) { s.removeAffiliates++; removals.push(x); }
       }
-      s.affiliates++;
-      const want = placement && placeableIds.has(x.affId) ? placement.get(x.affId)?.option : null;
-      if (want && want !== o.variant_label) { s.removeAffiliates++; removals.push(x); }
-    }
-    if (placement) {
-      for (const p of placement.values()) {
-        if (p.option !== o.variant_label) continue;
-        if (p.reason === 'overflow') s.affOverflow++;
-        else if (p.reason === 'chosen') s.affChosen++;
-        else if (p.reason === 'overspill') s.affOverspill++;
-        else s.affAllocated++;
+      if (placement) {
+        for (const p of placement.values()) {
+          if (p.option !== o.variant_label) continue;
+          if (p.reason === 'overflow') s.affOverflow++;
+          else if (p.reason === 'chosen') s.affChosen++;
+          else if (p.reason === 'overspill') s.affOverspill++;
+          else s.affAllocated++;
+        }
+      } else {
+        s.affAllocated = placeable.filter(a => !releasedKeys.has(`${a.id}|${o.number}`)).length;
       }
-    } else {
-      s.affAllocated = placeable.filter(a => !releasedKeys.has(`${a.id}|${o.number}`)).length;
-    }
-    return s;
+      return s;
+    });
+    allOptions.push(...summaries);
+    if (legKeyOf(leg) === primaryNumber) asked = { summaries, placement };
   });
 
-  const placed = placement ? [...placement.values()] : [];
+  const placed = asked?.placement ? [...asked.placement.values()] : [];
   const teamUnits = new Set(teamRows.filter(t => t.participatingWf26)
     .map(t => String(t.teamName || '').trim().toUpperCase()).filter(Boolean)).size;
   return {
-    options: out,
+    options: asked ? asked.summaries : [],
+    allOptions,
+    chain: legs.map(legKeyOf),
     removals,
     participatingAffiliates: placeable.length,
     teamUnits,
     unplacedFull: placed.filter(p => p.reason === 'full').length,
     unplacedReleased: placed.filter(p => p.reason === 'released').length
   };
+}
+
+// Remove bookings listed by routeAltAllocationPlan (DB, memory, VATCAN).
+async function removeBookingEntries(list) {
+  let n = 0;
+  for (const { key, b } of list) {
+    const cidNum = Number(b.cid);
+    await prisma.tobtBooking.deleteMany({ where: { cid: cidNum, slotKey: b.slotKey } }).catch(() => null);
+    deleteBookingByBookingKey(key);
+    if (tobtBookingsByCid[cidNum]) {
+      tobtBookingsByCid[cidNum].delete(key);
+      if (tobtBookingsByCid[cidNum].size === 0) delete tobtBookingsByCid[cidNum];
+    }
+    try { io.emit('bookingCancelled', { slotKey: b.slotKey }); } catch {}
+    emitToIcao(b.from, 'departures:update');
+    vatcanPushForSlotKey(b.slotKey);
+    n++;
+  }
+  return n;
+}
+
+/* Route alternatives: auto-assign only fills gaps, so an affiliate can end
+   up on the wrong option - QFA100 overflowed to B because lower-ranked
+   affiliates already held A from before. This moves every affiliate booked
+   on an option other than its planned one and rebooks it where it belongs,
+   so the longest-serving keep the allocated option and the bottom of the
+   list overflows. The plan depends only on teams, pilots, opt-outs and the
+   allocation, so a settled leg moves nothing. Runs at the end of every
+   auto-assign, inside the booking-maintenance queue. */
+async function realignRouteAlternativeAffiliates({ reason = '' } = {}) {
+  const legs = new Set((adminSheetCache || [])
+    .filter(r => r?.variant_label && autoBookChoice(r, 'affiliate'))
+    .map(r => r.variant_of || r.number));
+  let moved = 0;
+  const done = new Set();
+  for (const primary of legs) {
+    if (done.has(primary)) continue;
+    // One plan covers the leg's whole chain.
+    const plan = await routeAltAllocationPlan(primary).catch(() => null);
+    (plan?.chain || [primary]).forEach(k => done.add(k));
+    const wrong = plan ? plan.removals.filter(x => x.kind === 'affiliate') : [];
+    if (!wrong.length) continue;
+    moved += await removeBookingEntries(wrong);
+    console.log(`[ROUTE ALT] ${(plan.chain || [primary]).join(' -> ')}: re-sorting ${wrong.length} affiliate booking(s) into Display Order${reason ? ' (' + reason + ')' : ''}`);
+  }
+  if (moved) await autoAssignAffiliateBookings({ reason: 'route alternative re-sort' });
+  return moved;
 }
 
 /* Admin card at the top of a route-alternative leg's Sector Planning page:
@@ -34147,6 +34382,8 @@ function renderRouteAltAllocationCard(sched, alloc) {
       .sp-alloc-warn { color:#fbbf24; font-weight:600; }
       .sp-alloc-note { font-size:11.5px; color:#fbbf24; margin:-4px 0 10px; }
       .sp-alloc-note:empty { display:none; }
+      .sp-alloc-chain { font-size:11.5px; color:var(--muted); margin:-4px 0 10px; }
+      .sp-alloc-chain strong { color:#c4b5fd; }
       .sp-alloc-controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px; }
       .sp-alloc-field { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
       .sp-alloc-seg { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
@@ -34168,6 +34405,7 @@ function renderRouteAltAllocationCard(sched, alloc) {
         <span class="sp-alloc-sub">Which option the WF teams and affiliates are auto-booked onto. Ordinary pilots are not affected.</span>
       </div>
       <div class="sp-alloc-opts">${optionRows}</div>
+      ${alloc.chain && alloc.chain.length > 1 ? `<div class="sp-alloc-chain">Linked legs: <strong>${alloc.chain.join(' → ')}</strong>. Each option lands where the next one departs, so an aircraft stays on one option across all of them, and this allocation applies to every one.</div>` : ''}
       <div class="sp-alloc-note" id="spAllocNote">${noteText(alloc)}</div>
       <div class="sp-alloc-controls">
         <div class="sp-alloc-field">Teams <span class="sp-alloc-seg" data-group="teams">${seg(teams)}</span></div>
@@ -34252,7 +34490,7 @@ function renderRouteAltAllocationCard(sched, alloc) {
       document.getElementById('spAllocSave').addEventListener('click', function () {
         show('Checking bookings…');
         post(false).then(function (p) {
-          var lines = p.options.filter(function (o) { return o.removeTeams || o.removeAffiliates; }).map(function (o) {
+          var lines = (p.allOptions || p.options).filter(function (o) { return o.removeTeams || o.removeAffiliates; }).map(function (o) {
             return '<div>Remove <strong>' + o.removeTeams + '</strong> team and <strong>' + o.removeAffiliates + '</strong> affiliate booking(s) from <strong>' + o.number + '</strong> (' + o.from + ' → ' + o.to + ').</div>';
           });
           show((lines.length ? lines.join('') : '<div>No existing bookings need to move.</div>')
@@ -34313,8 +34551,10 @@ app.post('/admin/api/route-alternative/:wf/allocation', requireAdmin, async (req
     return res.json({ preview: true, ...plan, removals: plan.removals.length });
   }
 
-  await prisma.wfScheduleRow.update({
-    where: { eventId_number: { eventId: activeEventId, number: primary } },
+  // One allocation per chain: every linked leg gets the same settings, or an
+  // aircraft could be sent down A on one leg and B on the next.
+  await prisma.wfScheduleRow.updateMany({
+    where: { eventId: activeEventId, number: { in: plan.chain.length ? plan.chain : [primary] } },
     data: {
       autoBookVariant: settings.teams || null,
       affiliateBookVariant: settings.affiliates || 'BOTH',
@@ -34324,29 +34564,14 @@ app.post('/admin/api/route-alternative/:wf/allocation', requireAdmin, async (req
   await loadScheduleFromDb(activeEventId);
 
   let removed = 0;
-  const removeBookings = async list => {
-    for (const { key, b } of list) {
-      const cidNum = Number(b.cid);
-      await prisma.tobtBooking.deleteMany({ where: { cid: cidNum, slotKey: b.slotKey } }).catch(() => null);
-      deleteBookingByBookingKey(key);
-      if (tobtBookingsByCid[cidNum]) {
-        tobtBookingsByCid[cidNum].delete(key);
-        if (tobtBookingsByCid[cidNum].size === 0) delete tobtBookingsByCid[cidNum];
-      }
-      try { io.emit('bookingCancelled', { slotKey: b.slotKey }); } catch {}
-      emitToIcao(b.from, 'departures:update');
-      vatcanPushForSlotKey(b.slotKey);
-      removed++;
-    }
-  };
   // Teams first, so the affiliates are then placed against where the teams
   // actually ended up rather than the preview's estimate.
   await queueBookingMaintenance('route-alt-allocation', async () => {
     const teamsFirst = await routeAltAllocationPlan(primary);
-    await removeBookings(teamsFirst.removals.filter(x => x.kind === 'team'));
+    removed += await removeBookingEntries(teamsFirst.removals.filter(x => x.kind === 'team'));
     await autoAssignTeamBookings({ reason: 'allocation ' + primary });
     const affPlan = await routeAltAllocationPlan(primary);
-    await removeBookings(affPlan.removals.filter(x => x.kind === 'affiliate'));
+    removed += await removeBookingEntries(affPlan.removals.filter(x => x.kind === 'affiliate'));
   });
   await autoAssignTeamThenAffiliate({ reason: 'allocation ' + primary });
 
