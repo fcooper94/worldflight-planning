@@ -12,6 +12,13 @@ import { spawn } from 'child_process';
 
 const prisma = new PrismaClient();
 
+// Express 4 does not catch rejections from async route handlers, and Node 22
+// exits on an unhandled rejection — so one DB blip (P1001) took the whole site
+// down. Log it and keep serving; the affected request simply fails.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason?.code || '', reason?.message || reason);
+});
+
 /* ===== ICAO WAKE TURBULENCE CATEGORIES ===== */
 const WAKE_CAT = {
   // Super
