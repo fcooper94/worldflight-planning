@@ -192,10 +192,21 @@ async function saveNavdataToDb(targetName, filePath) {
   console.log('[AIRAC] Persisted ' + targetName + ' to DB' + (cycle ? ' (cycle ' + cycle + ')' : ''));
 }
 
+// Boot awaits this, so a stalled transfer must not hang startup forever.
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(label + ' timed out after ' + (ms / 1000) + 's')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function restoreNavdataFromDb() {
+  // List metadata only — the files total ~24 MB, so content is fetched one
+  // file at a time and only when the disk copy actually needs replacing.
   let rows;
   try {
-    rows = await prisma.navdataFile.findMany();
+    rows = await withTimeout(prisma.navdataFile.findMany({ select: { name: true, cycle: true } }), 15000, 'Navdata list');
   } catch (err) {
     console.warn('[AIRAC] Navdata restore skipped -', err.message);
     return;
@@ -211,10 +222,13 @@ async function restoreNavdataFromDb() {
         const diskCycle = parseInt(parseAiracHeader(target)?.cycle, 10);
         const dbCycle = parseInt(row.cycle, 10);
         if (!isNaN(diskCycle) && (isNaN(dbCycle) || dbCycle <= diskCycle)) continue;
-      } else if (fs.existsSync(target) && Buffer.from(row.content).equals(fs.readFileSync(target))) {
+      }
+      const full = await withTimeout(prisma.navdataFile.findUnique({ where: { name: row.name }, select: { content: true } }), 60000, 'Navdata ' + row.name);
+      if (!full) continue;
+      if (!row.name.endsWith('.dat') && fs.existsSync(target) && Buffer.from(full.content).equals(fs.readFileSync(target))) {
         continue;
       }
-      fs.writeFileSync(target, Buffer.from(row.content));
+      fs.writeFileSync(target, Buffer.from(full.content));
       console.log('[AIRAC] Restored ' + row.name + ' from DB' + (row.cycle ? ' (cycle ' + row.cycle + ')' : ''));
     } catch (err) {
       console.warn('[AIRAC] Failed restoring ' + row.name + ':', err.message);
