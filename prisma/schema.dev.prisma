@@ -395,6 +395,14 @@ model WfScheduleRow {
   // means no choice was recorded and both options are booked, as they were
   // before this existed. Only consulted on flow-restricted sectors.
   autoBookVariant String?
+  // Affiliates can be allocated separately from teams: "A", "B" or "BOTH".
+  // NULL follows autoBookVariant, which then governs teams alone. Primary
+  // row only, like autoBookVariant.
+  affiliateBookVariant String?
+  // How many affiliate aircraft, taken from the bottom of the affiliate
+  // Display Order, fly the OTHER option instead. Ignored when affiliates
+  // are allocated to both options.
+  affiliateOverspill   Int?
 
   @@unique([eventId, number])
   @@index([eventId])

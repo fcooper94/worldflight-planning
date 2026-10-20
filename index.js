@@ -2577,6 +2577,38 @@ async function fetchVatsimName(cid) {
    them. The departure window itself is untouched by this. */
 const SLOT_ANCHOR_OFFSET_MIN = 15;
 
+/* ===== ROUTE ALTERNATIVE ALLOCATION =====
+   An undecided leg is carried as two options (WF2619 = A, WF2619.B = B), both
+   flow-restricted, so without a choice every team and affiliate is
+   auto-booked onto both. The admin allocates teams and affiliates to an
+   option separately, and can overspill the bottom N affiliate aircraft (by
+   Display Order) onto the other option. Set on the leg's primary row and
+   mirrored onto every option by loadScheduleFromDb(). */
+
+// The option a group is allocated to, or '' for both options. Affiliates
+// follow the team choice until they are given one of their own.
+function autoBookChoice(row, kind) {
+  const team = row?.auto_book_variant || '';
+  const choice = kind === 'affiliate' ? (row?.aff_book_variant || team) : team;
+  return choice === 'BOTH' ? '' : choice;
+}
+
+// Does this option of a leg take auto-assigned bookings of this kind?
+function autoBookOptionAllows(row, kind, isOverspill = false) {
+  if (!row?.variant_label) return true;           // leg has no alternatives
+  let choice = autoBookChoice(row, kind);
+  if (!choice) return true;                       // allocated to both
+  if (kind === 'affiliate' && isOverspill) choice = choice === 'A' ? 'B' : 'A';
+  return row.variant_label === choice;
+}
+
+// Affiliate row ids that overspill: the last `n` of the participating
+// affiliates in Display Order (sortOrder asc, id asc).
+function affiliateOverspillIds(orderedAffs, n) {
+  const k = Math.max(0, Math.min(Number(n) || 0, orderedAffs.length));
+  return new Set(k ? orderedAffs.slice(-k).map(a => a.id) : []);
+}
+
 async function autoAssignTeamBookings({ reason = '' } = {}) {
   try {
     const teamRows = await prisma.officialTeam.findMany({
@@ -2655,13 +2687,9 @@ async function autoAssignTeamBookings({ reason = '' } = {}) {
         const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
         if (flow === 'NONE') continue;
 
-        // Route alternatives: an undecided leg is carried as two options, and
-        // both are flow-restricted, so without this a team/affiliate is
-        // auto-booked onto BOTH (EINN-EGSS and EINN-EGKB). When a choice has
-        // been recorded, only that option takes auto-assigned bookings. No
-        // choice recorded means book both, exactly as before.
-        if (row.auto_book_variant && row.variant_label
-            && row.variant_label !== row.auto_book_variant) continue;
+        // Route alternatives: only the option teams are allocated to takes
+        // their bookings. No choice recorded means book both, as before.
+        if (!autoBookOptionAllows(row, 'team')) continue;
 
         // The team marked this aircraft as not flying this sector.
         if (row.number && optedOut.has(`${team.fleetId}|${row.number}`)) continue;
@@ -2775,8 +2803,16 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
   try {
     const affRows = await prisma.affiliate.findMany({
       where: { participatingWf26: true },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
       select: { id: true, cid: true, callsign: true }
     });
+    // Overspill sets per count - every leg with the same count shares one.
+    const overspillByCount = new Map();
+    const overspillFor = row => {
+      const n = Number(row.aff_overspill) || 0;
+      if (!overspillByCount.has(n)) overspillByCount.set(n, affiliateOverspillIds(affRows, n));
+      return overspillByCount.get(n);
+    };
 
     let created = 0;
     for (const aff of affRows) {
@@ -2797,13 +2833,9 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
         const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
         if (flow === 'NONE') continue;
 
-        // Route alternatives: an undecided leg is carried as two options, and
-        // both are flow-restricted, so without this a team/affiliate is
-        // auto-booked onto BOTH (EINN-EGSS and EINN-EGKB). When a choice has
-        // been recorded, only that option takes auto-assigned bookings. No
-        // choice recorded means book both, exactly as before.
-        if (row.auto_book_variant && row.variant_label
-            && row.variant_label !== row.auto_book_variant) continue;
+        // Route alternatives: only the option affiliates are allocated to
+        // takes their bookings, except the overspill, which flies the other.
+        if (!autoBookOptionAllows(row, 'affiliate', overspillFor(row).has(aff.id))) continue;
 
         const sectorPrefix = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
 
@@ -7532,8 +7564,13 @@ async function loadScheduleFromDb(eventId) {
   // on the primary and mirrored onto its alternatives so every row of a leg
   // can answer "is this the option that gets booked?" on its own.
   const autoBookByPrimary = {};
+  const affBookByPrimary = {};
+  const affOverspillByPrimary = {};
   dbRows.forEach(r => {
-    if (!r.variantOf && r.autoBookVariant) autoBookByPrimary[r.number] = r.autoBookVariant;
+    if (r.variantOf) return;
+    if (r.autoBookVariant) autoBookByPrimary[r.number] = r.autoBookVariant;
+    if (r.affiliateBookVariant) affBookByPrimary[r.number] = r.affiliateBookVariant;
+    if (r.affiliateOverspill) affOverspillByPrimary[r.number] = r.affiliateOverspill;
   });
 
   const plans = await prisma.sectorPlan.findMany({ where: { eventId } }).catch(() => []);
@@ -7621,7 +7658,11 @@ async function loadScheduleFromDb(eventId) {
         ? (String(r.number).split('.').pop() || 'B')
         : (variantParents.has(r.number) ? 'A' : ''),
       // '' when no choice was recorded - both options keep taking bookings.
-      auto_book_variant: autoBookByPrimary[r.variantOf || r.number] || ''
+      auto_book_variant: autoBookByPrimary[r.variantOf || r.number] || '',
+      // Affiliates' own allocation ('A' / 'B' / 'BOTH'); '' follows
+      // auto_book_variant. See autoBookOptionAllows().
+      aff_book_variant: affBookByPrimary[r.variantOf || r.number] || '',
+      aff_overspill: affOverspillByPrimary[r.variantOf || r.number] || 0
     };
   });
 
@@ -33710,6 +33751,282 @@ app.post('/admin/api/schedule-row/add-variant', requireAdmin, async (req, res) =
   res.json({ ok: true, number: variantNumber });
 });
 
+/* Where an undecided leg's team and affiliate bookings sit, per option, and
+   which of them are on an option their group is not allocated to. Pass
+   `settings` ({ teams, affiliates, overspill }, '' = both options) to plan a
+   change; omit it to check against the leg's current allocation. Ordinary
+   pilots are counted but never listed for removal. */
+async function routeAltAllocationPlan(primaryNumber, settings = null) {
+  const options = (adminSheetCache || []).filter(r =>
+    r?.number === primaryNumber || r?.variant_of === primaryNumber);
+  const [teamRows, affRows] = await Promise.all([
+    prisma.officialTeam.findMany({ select: { callsign: true, teamName: true, participatingWf26: true } }),
+    prisma.affiliate.findMany({
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+      select: { id: true, callsign: true, participatingWf26: true }
+    })
+  ]);
+  const teamCs = new Set(teamRows.map(t => String(t.callsign || '').toUpperCase()).filter(Boolean));
+  const affIdByCs = new Map(affRows.filter(a => a.callsign).map(a => [String(a.callsign).toUpperCase(), a.id]));
+  const participating = affRows.filter(a => a.participatingWf26);
+
+  const rows = settings
+    ? options.map(o => ({
+        ...o,
+        auto_book_variant: settings.teams,
+        aff_book_variant: settings.affiliates || 'BOTH',
+        aff_overspill: settings.affiliates ? settings.overspill : 0
+      }))
+    : options;
+  const overspillIds = affiliateOverspillIds(participating, rows[0]?.aff_overspill);
+
+  const removals = [];
+  const out = rows.map(o => {
+    const prefix = `${o.from}-${o.to}|${o.date_utc}|${o.dep_time_utc}`;
+    const s = { number: o.number, label: o.variant_label, from: o.from, to: o.to,
+      teams: 0, affiliates: 0, pilots: 0, removeTeams: 0, removeAffiliates: 0 };
+    for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+      if (!b || key === b.slotKey || !String(b.slotKey || '').startsWith(prefix)) continue;
+      const cs = String(b.callsign || '').toUpperCase();
+      const kind = teamCs.has(cs) ? 'team' : (affIdByCs.has(cs) ? 'affiliate' : null);
+      if (!kind) { s.pilots++; continue; }
+      const overspill = kind === 'affiliate' && overspillIds.has(affIdByCs.get(cs));
+      if (kind === 'team') s.teams++; else s.affiliates++;
+      if (!autoBookOptionAllows(o, kind, overspill)) {
+        if (kind === 'team') s.removeTeams++; else s.removeAffiliates++;
+        removals.push({ key, b });
+      }
+    }
+    return s;
+  });
+
+  const teamUnits = new Set(teamRows.filter(t => t.participatingWf26)
+    .map(t => String(t.teamName || '').trim().toUpperCase()).filter(Boolean)).size;
+  return { options: out, removals, participatingAffiliates: participating.length, teamUnits };
+}
+
+/* Admin card at the top of a route-alternative leg's Sector Planning page:
+   who each option is allocated, what is booked there now, and the controls
+   to change it. `sched` is the schedule row being viewed. */
+function renderRouteAltAllocationCard(sched, alloc) {
+  const teams = sched.auto_book_variant || '';
+  const affiliates = autoBookChoice(sched, 'affiliate');
+  const overspill = affiliates ? (Number(sched.aff_overspill) || 0) : 0;
+  const optColor = l => (l === 'A' ? '#34d399' : '#e879f9');
+  const seg = value => ['A', 'B', ''].filter(v => !v || alloc.options.some(o => o.label === v)).map(v =>
+    `<button type="button" data-val="${v}" class="${v === value ? 'active' : ''}">${v ? 'Option ' + v : 'Both'}</button>`).join('');
+
+  const optionRows = alloc.options.map(o => {
+    const wrong = o.removeTeams + o.removeAffiliates;
+    return `
+      <div class="sp-alloc-opt" data-label="${o.label}" style="--opt:${optColor(o.label)};">
+        <div class="sp-alloc-opt-head">
+          <span class="sp-alloc-chip">Option ${o.label}</span>
+          <a href="/sector-planning/${o.number}" class="sp-alloc-num">${o.number}</a>
+          <span class="sp-alloc-pair">${o.from} → ${o.to}</span>
+          ${o.number === sched.number ? '<span class="sp-alloc-here">This page</span>' : ''}
+        </div>
+        <div class="sp-alloc-line"><span class="sp-alloc-k">Allocated</span>
+          <span>Teams: <strong data-role="teams"></strong></span>
+          <span>Affiliates: <strong data-role="affs"></strong></span></div>
+        <div class="sp-alloc-line"><span class="sp-alloc-k">Booked now</span>
+          <span>${o.teams} team · ${o.affiliates} affiliate · ${o.pilots} pilot</span>
+          ${wrong ? `<span class="sp-alloc-warn">${wrong} on the wrong option</span>` : ''}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <style>
+      .sp-alloc-card { border:1px solid rgba(167,139,250,0.35) !important; border-left:3px solid #a78bfa !important; }
+      .sp-alloc-title { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+      .sp-alloc-title h3 { margin:0; font-size:14px; color:#c4b5fd; }
+      .sp-alloc-admin { font-size:9.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#a78bfa; border:1px solid rgba(167,139,250,0.45); border-radius:999px; padding:2px 8px; }
+      .sp-alloc-sub { font-size:11.5px; color:var(--muted); }
+      .sp-alloc-opts { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:10px; margin-bottom:12px; }
+      .sp-alloc-opt { background:var(--panel2); border:1px solid var(--border); border-top:2px solid var(--opt); border-radius:6px; padding:8px 10px; display:flex; flex-direction:column; gap:5px; }
+      .sp-alloc-opt-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+      .sp-alloc-chip { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--opt); background:color-mix(in srgb, var(--opt) 15%, transparent); border-radius:4px; padding:2px 7px; }
+      .sp-alloc-num { font-weight:700; font-size:12.5px; color:var(--text); text-decoration:none; }
+      .sp-alloc-num:hover { color:var(--accent); }
+      .sp-alloc-pair { font-family:monospace; font-size:12px; color:var(--muted); }
+      .sp-alloc-here { font-size:10px; color:var(--muted); border:1px solid var(--border); border-radius:999px; padding:1px 7px; }
+      .sp-alloc-line { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:12px; color:var(--text); }
+      .sp-alloc-k { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); min-width:72px; padding-top:2px; }
+      .sp-alloc-warn { color:#fbbf24; font-weight:600; }
+      .sp-alloc-controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px; }
+      .sp-alloc-field { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+      .sp-alloc-seg { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+      .sp-alloc-seg button { background:transparent; border:0; color:var(--muted); font-size:11.5px; font-weight:600; padding:5px 11px; cursor:pointer; }
+      .sp-alloc-seg button + button { border-left:1px solid var(--border); }
+      .sp-alloc-seg button.active { background:rgba(167,139,250,0.18); color:#ddd6fe; }
+      .sp-alloc-field input { width:56px; background:var(--panel2); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:4px 6px; font-size:12px; text-align:center; }
+      .sp-alloc-field input:disabled { opacity:0.4; }
+      .sp-alloc-preview { margin-top:10px; font-size:12px; color:var(--text); background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:8px 10px; }
+      .sp-alloc-preview.hidden { display:none; }
+      .sp-alloc-preview .err { color:#f87171; }
+    </style>
+    <section class="card card-full sp-alloc-card" id="spAllocCard"
+      data-wf="${sched.number}" data-teams="${teams}" data-affiliates="${affiliates}" data-overspill="${overspill}"
+      data-affs="${alloc.participatingAffiliates}" data-teamunits="${alloc.teamUnits}">
+      <div class="sp-alloc-title">
+        <h3>Route Alternatives: Auto-Booking Allocation</h3>
+        <span class="sp-alloc-admin">Admin</span>
+        <span class="sp-alloc-sub">Which option the WF teams and affiliates are auto-booked onto. Ordinary pilots are not affected.</span>
+      </div>
+      <div class="sp-alloc-opts">${optionRows}</div>
+      <div class="sp-alloc-controls">
+        <div class="sp-alloc-field">Teams <span class="sp-alloc-seg" data-group="teams">${seg(teams)}</span></div>
+        <div class="sp-alloc-field">Affiliates <span class="sp-alloc-seg" data-group="affiliates">${seg(affiliates)}</span></div>
+        <div class="sp-alloc-field">Overspill
+          <input type="number" id="spAllocOverspill" min="0" max="${alloc.participatingAffiliates}" value="${overspill}">
+          <span>affiliate aircraft from the bottom of the Display Order fly the other option</span></div>
+        <button type="button" class="action-btn primary" id="spAllocSave" style="font-size:11.5px;padding:5px 14px;margin-left:auto;">Review &amp; Save</button>
+      </div>
+      <div class="sp-alloc-preview hidden" id="spAllocPreview"></div>
+    </section>
+    <script>
+    (function () {
+      var card = document.getElementById('spAllocCard');
+      var state = { teams: card.dataset.teams, affiliates: card.dataset.affiliates, overspill: Number(card.dataset.overspill) || 0 };
+      var P = Number(card.dataset.affs) || 0, T = Number(card.dataset.teamunits) || 0;
+      var input = document.getElementById('spAllocOverspill');
+      var preview = document.getElementById('spAllocPreview');
+
+      function render() {
+        card.querySelectorAll('.sp-alloc-seg').forEach(function (s) {
+          s.querySelectorAll('button').forEach(function (b) { b.classList.toggle('active', b.dataset.val === state[s.dataset.group]); });
+        });
+        input.disabled = !state.affiliates;
+        var k = state.affiliates ? Math.min(state.overspill, P) : 0;
+        var other = state.affiliates === 'A' ? 'B' : 'A';
+        card.querySelectorAll('.sp-alloc-opt').forEach(function (el) {
+          var l = el.dataset.label;
+          var t = !state.teams || state.teams === l;
+          var a = !state.affiliates ? P : (l === state.affiliates ? P - k : 0) + (l === other ? k : 0);
+          el.querySelector('[data-role=teams]').textContent = t ? 'All ' + T : 'None';
+          el.querySelector('[data-role=affs]').textContent = a === P ? 'All ' + P : (a ? a + ' of ' + P : 'None');
+        });
+      }
+      card.querySelectorAll('.sp-alloc-seg button').forEach(function (b) {
+        b.addEventListener('click', function () {
+          state[b.parentNode.dataset.group] = b.dataset.val;
+          preview.classList.add('hidden');
+          render();
+        });
+      });
+      input.addEventListener('input', function () {
+        state.overspill = Math.max(0, Math.floor(Number(input.value) || 0));
+        preview.classList.add('hidden');
+        render();
+      });
+
+      function post(confirm) {
+        return fetch('/admin/api/route-alternative/' + encodeURIComponent(card.dataset.wf) + '/allocation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ teams: state.teams || 'BOTH', affiliates: state.affiliates || 'BOTH', overspill: state.overspill, confirm: confirm })
+        }).then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Request failed'); return j; }); });
+      }
+      function show(html) { preview.innerHTML = html; preview.classList.remove('hidden'); }
+
+      document.getElementById('spAllocSave').addEventListener('click', function () {
+        show('Checking bookings…');
+        post(false).then(function (p) {
+          var lines = p.options.filter(function (o) { return o.removeTeams || o.removeAffiliates; }).map(function (o) {
+            return '<div>Remove <strong>' + o.removeTeams + '</strong> team and <strong>' + o.removeAffiliates + '</strong> affiliate booking(s) from <strong>' + o.number + '</strong> (' + o.from + ' → ' + o.to + ').</div>';
+          });
+          show((lines.length ? lines.join('') : '<div>No existing bookings need to move.</div>')
+            + '<div style="color:var(--muted);margin-top:4px;">Auto-assign then books any team or affiliate missing from its allocated option, subject to that option’s capacity. VATCAN is re-pushed.</div>'
+            + '<div style="display:flex;gap:8px;margin-top:8px;"><button type="button" class="action-btn primary" id="spAllocApply" style="font-size:11.5px;padding:5px 14px;">Apply</button>'
+            + '<button type="button" class="action-btn" id="spAllocCancel" style="font-size:11.5px;padding:5px 14px;">Cancel</button></div>');
+          document.getElementById('spAllocCancel').onclick = function () { preview.classList.add('hidden'); };
+          document.getElementById('spAllocApply').onclick = function () {
+            this.disabled = true; this.textContent = 'Applying…';
+            post(true).then(function (r) {
+              show('Saved. Removed ' + r.removed + ' booking(s) and re-ran auto-assign. Reloading…');
+              setTimeout(function () { location.reload(); }, 900);
+            }).catch(function (e) { show('<span class="err">' + e.message + '</span>'); });
+          };
+        }).catch(function (e) { show('<span class="err">' + e.message + '</span>'); });
+      });
+      render();
+    })();
+    </script>`;
+}
+
+/* Allocate an undecided leg's auto-booked teams and affiliates between its
+   options (Sector Planning, admin only). Without `confirm` it only previews.
+   On confirm the allocation is saved, team/affiliate bookings left on an
+   option their group no longer flies are removed (DB, memory, VATCAN), and
+   auto-assign books everyone missing onto their allocated option. */
+app.post('/admin/api/route-alternative/:wf/allocation', requireAdmin, async (req, res) => {
+  const wf = String(req.params.wf || '').trim().toUpperCase();
+  const row = (adminSheetCache || []).find(r => r?.number === wf);
+  if (!row || !row.variant_label) {
+    return res.status(404).json({ error: wf + ' is not a leg with route alternatives.' });
+  }
+  const primary = row.variant_of || row.number;
+  const labels = new Set((adminSheetCache || [])
+    .filter(r => r?.number === primary || r?.variant_of === primary)
+    .map(r => r.variant_label));
+
+  // '' means both options.
+  const pick = v => {
+    const s = String(v || '').trim().toUpperCase();
+    return s === 'BOTH' || !s ? '' : s.replace(/[^A-Z]/g, '').slice(0, 1);
+  };
+  const settings = {
+    teams: pick(req.body.teams),
+    affiliates: pick(req.body.affiliates),
+    overspill: Math.max(0, Math.floor(Number(req.body.overspill) || 0))
+  };
+  for (const [group, v] of [['Teams', settings.teams], ['Affiliates', settings.affiliates]]) {
+    if (v && !labels.has(v)) return res.status(400).json({ error: group + ' must be allocated to ' + [...labels].join(', ') + ' or both.' });
+  }
+  if (!settings.affiliates) settings.overspill = 0;
+
+  const plan = await routeAltAllocationPlan(primary, settings);
+  if (settings.overspill > plan.participatingAffiliates) {
+    return res.status(400).json({ error: 'Overspill is larger than the ' + plan.participatingAffiliates + ' participating affiliate aircraft.' });
+  }
+  if (req.body.confirm !== true) {
+    return res.json({ preview: true, ...plan, removals: plan.removals.length });
+  }
+
+  await prisma.wfScheduleRow.update({
+    where: { eventId_number: { eventId: activeEventId, number: primary } },
+    data: {
+      autoBookVariant: settings.teams || null,
+      affiliateBookVariant: settings.affiliates || 'BOTH',
+      affiliateOverspill: settings.overspill || null
+    }
+  });
+  await loadScheduleFromDb(activeEventId);
+
+  let removed = 0;
+  await queueBookingMaintenance('route-alt-allocation', async () => {
+    for (const { key, b } of plan.removals) {
+      const cidNum = Number(b.cid);
+      await prisma.tobtBooking.deleteMany({ where: { cid: cidNum, slotKey: b.slotKey } }).catch(() => null);
+      deleteBookingByBookingKey(key);
+      if (tobtBookingsByCid[cidNum]) {
+        tobtBookingsByCid[cidNum].delete(key);
+        if (tobtBookingsByCid[cidNum].size === 0) delete tobtBookingsByCid[cidNum];
+      }
+      try { io.emit('bookingCancelled', { slotKey: b.slotKey }); } catch {}
+      emitToIcao(b.from, 'departures:update');
+      vatcanPushForSlotKey(b.slotKey);
+      removed++;
+    }
+  });
+  await autoAssignTeamThenAffiliate({ reason: 'allocation ' + primary });
+
+  const after = await routeAltAllocationPlan(primary);
+  console.log(`[ROUTE ALT] ${primary}: teams -> ${settings.teams || 'both'}, affiliates -> ${settings.affiliates || 'both'}`
+    + (settings.overspill ? ` (${settings.overspill} overspill)` : '') + ` by CID ${req.session?.user?.data?.cid}; removed ${removed} booking(s)`);
+  res.json({ ok: true, removed, options: after.options });
+});
+
 // Settle a leg whose destination was undecided. The winning routing is written
 // onto the primary row, so the leg keeps the number every sector plan, claim,
 // assignment and booking key already points at, and the alternatives are
@@ -33811,7 +34128,7 @@ app.post('/admin/api/schedule-row/resolve-variant', requireAdmin, async (req, re
   // them - a stale letter would go on filtering a leg that has no options.
   await prisma.wfScheduleRow.update({
     where: { eventId_number: { eventId, number } },
-    data: { autoBookVariant: null }
+    data: { autoBookVariant: null, affiliateBookVariant: null, affiliateOverspill: null }
   }).catch(() => null);
   await prisma.sectorPlan.deleteMany({ where: { wf: { in: variantNumbers }, eventId } }).catch(() => null);
   await prisma.wfScheduleRow.deleteMany({ where: { eventId, variantOf: number } });
@@ -43934,6 +44251,13 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
   const fromIcao = sched.from;
   const toIcao = sched.to;
   const plan = await getOrCreateSectorPlan(wf, fromIcao, toIcao);
+  // Admin-only: how a route-alternative leg's teams and affiliates are
+  // allocated between its options. Never rendered for anyone else.
+  const altAllocCard = (isAdmin && sched.variant_label)
+    ? await routeAltAllocationPlan(sched.variant_of || sched.number)
+        .then(a => renderRouteAltAllocationCard(sched, a))
+        .catch(e => { console.error('[ROUTE ALT] allocation card:', e.message); return ''; })
+    : '';
   const [canEditDep, canEditArr, depFir, arrFir, allFirs, scenery, docs, issues, ownedFirs] = await Promise.all([
     canEditPlanSide(cid, 'DEP', fromIcao, toIcao),
     canEditPlanSide(cid, 'ARR', fromIcao, toIcao),
@@ -44593,6 +44917,8 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
         <h2 style="margin:0;font-size:17px;">${wf} — ${fromIcao} → ${toIcao}</h2>
       </div>
     </section>
+
+    ${altAllocCard}
 
     ${headerFlowMode ? (() => {
       const slotted = headerFlowMode === 'SLOTTED';
