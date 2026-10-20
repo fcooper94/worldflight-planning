@@ -2609,6 +2609,126 @@ function affiliateOverspillIds(orderedAffs, n) {
   return new Set(k ? orderedAffs.slice(-k).map(a => a.id) : []);
 }
 
+// Every option of the leg `row` belongs to (the row itself included).
+function legOptionsFor(row, rows = adminSheetCache) {
+  const primary = row?.variant_of || row?.number;
+  return (rows || []).filter(r => r?.number === primary || r?.variant_of === primary);
+}
+
+function optionPrefix(row) {
+  return `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
+}
+
+// How an option reads to pilots: the primary picks up ".A" on a leg with
+// alternatives, an alternative already carries its letter.
+function optionLabel(row) {
+  return row.is_variant || !row.variant_label ? row.number : `${row.number}.${row.variant_label}`;
+}
+
+// On a route-alternative leg, the option holding a booking that `isMine(b)`
+// claims - '' when none (or the leg has no alternatives).
+function legFlyingOption(row, isMine) {
+  if (!row?.variant_label) return '';
+  for (const o of legOptionsFor(row)) {
+    const prefix = optionPrefix(o) + '|';
+    if (Object.values(tobtBookingsByKey).some(b => b && String(b.slotKey || '').startsWith(prefix) && isMine(b))) {
+      return o.variant_label;
+    }
+  }
+  return '';
+}
+
+// HQ status chip: "Flying route A" on the option flown, muted on the other.
+function flyingRouteTag(row, isMine) {
+  const l = legFlyingOption(row, isMine);
+  if (!l) return '';
+  const colour = l === 'A' ? '#34d399' : '#e879f9';
+  return `<span class="hq-route-tag${l === row.variant_label ? '' : ' hq-route-tag-other'}" style="--opt:${colour};">Flying route ${l}</span>`;
+}
+
+// How many bookings an option can hold; Infinity when nothing caps it.
+function optionCapacity(row) {
+  const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
+  if (flow === 'BOOKING_ONLY') {
+    const cap = getBookingOnlyCapacity(row.from, row.to);
+    return cap.total > 0 ? cap.total : Infinity;
+  }
+  if (flow === 'SLOTTED') {
+    const prefix = optionPrefix(row) + '|';
+    return Object.keys(allTobtSlots).filter(k => k.startsWith(prefix)).length;
+  }
+  return Infinity;
+}
+
+function optionHasRoom(row) {
+  const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
+  if (flow === 'BOOKING_ONLY') {
+    const cap = getBookingOnlyCapacity(row.from, row.to);
+    return cap.total <= 0 || cap.remaining > 0;
+  }
+  if (flow === 'SLOTTED') {
+    const prefix = optionPrefix(row) + '|';
+    return Object.keys(allTobtSlots).some(k => k.startsWith(prefix) && !isSlotTaken(k));
+  }
+  return true;
+}
+
+/* Where each affiliate aircraft flies on a leg whose affiliates are allocated
+   to one option. Walks `affs` (participating, Display Order) top-down: the
+   overspill prefers the other option, everyone else the allocated one, and
+   whoever finds their preferred option full overflows to the other. Room is
+   each option's capacity less its non-affiliate bookings (teams, pilots), so
+   the top of the list holds the allocated option and the bottom overflows.
+   An aircraft released (opted out) on its preferred option is left out.
+   `taken` optionally overrides the non-affiliate count per option label (a
+   preview counts teams where they are about to be, not where they are).
+   Returns null when affiliates are allocated to both options, else
+   Map affId -> { option, reason } where reason is 'allocated' | 'overspill'
+   | 'overflow', or option null with reason 'released' | 'full'. */
+function planAffiliatePlacement(options, affs, releasedKeys, affCallsigns, taken = null) {
+  const choice = autoBookChoice(options[0], 'affiliate');
+  if (!choice) return null;
+  const other = choice === 'A' ? 'B' : 'A';
+  const byLabel = new Map(options.map(o => [o.variant_label, o]));
+
+  const room = {};
+  for (const o of options) {
+    let used = taken ? (taken[o.variant_label] || 0) : 0;
+    if (!taken) {
+      const prefix = optionPrefix(o);
+      for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+        if (!b || key === b.slotKey || !String(b.slotKey || '').startsWith(prefix)) continue;
+        if (!affCallsigns.has(String(b.callsign || '').toUpperCase())) used++;
+      }
+    }
+    room[o.variant_label] = optionCapacity(o) - used;
+  }
+
+  const released = (a, l) => !byLabel.has(l) || releasedKeys.has(`${a.id}|${byLabel.get(l).number}`);
+  // Overspill counts aircraft that actually fly the other option, so an
+  // opted-out one near the bottom of the list does not use up a place.
+  const spill = affiliateOverspillIds(affs.filter(a => !released(a, other)), options[0].aff_overspill);
+  const out = new Map();
+  for (const a of affs) {
+    const pref = spill.has(a.id) ? other : choice;
+    const alt = pref === choice ? other : choice;
+    let placed;
+    // Released on the preferred option only: the affiliate chose the other
+    // one (Affiliate HQ flies an aircraft on one option per leg).
+    if (released(a, pref)) {
+      placed = !released(a, alt) && room[alt] > 0
+        ? { option: alt, reason: 'chosen' }
+        : { option: null, reason: released(a, alt) ? 'released' : 'full' };
+    }
+    else if (room[pref] > 0) placed = { option: pref, reason: pref === choice ? 'allocated' : 'overspill' };
+    else if (!released(a, alt) && room[alt] > 0) placed = { option: alt, reason: 'overflow' };
+    else placed = { option: null, reason: 'full' };
+    if (placed.option) room[placed.option]--;
+    out.set(a.id, placed);
+  }
+  return out;
+}
+
 async function autoAssignTeamBookings({ reason = '' } = {}) {
   try {
     const teamRows = await prisma.officialTeam.findMany({
@@ -2806,12 +2926,22 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
       select: { id: true, cid: true, callsign: true }
     });
-    // Overspill sets per count - every leg with the same count shares one.
-    const overspillByCount = new Map();
-    const overspillFor = row => {
-      const n = Number(row.aff_overspill) || 0;
-      if (!overspillByCount.has(n)) overspillByCount.set(n, affiliateOverspillIds(affRows, n));
-      return overspillByCount.get(n);
+    // Route alternatives: where each aircraft flies on a leg whose affiliates
+    // are allocated to one option. Planned once per leg per run, after the
+    // team pass, so the teams' bookings are already counted against room.
+    const allReleased = await prisma.affiliateSectorClaim.findMany({
+      where: { cid: 0 }, select: { affiliateId: true, sectorNumber: true }
+    }).catch(() => []);
+    const releasedKeys = new Set(allReleased.map(r => `${r.affiliateId}|${r.sectorNumber}`));
+    const placeable = affRows.filter(a => Number(a.cid) && a.callsign);
+    const affCallsigns = new Set(placeable.map(a => String(a.callsign).toUpperCase()));
+    const placementByLeg = new Map();
+    const placementFor = row => {
+      const key = row.variant_of || row.number;
+      if (!placementByLeg.has(key)) {
+        placementByLeg.set(key, planAffiliatePlacement(legOptionsFor(row), placeable, releasedKeys, affCallsigns));
+      }
+      return placementByLeg.get(key);
     };
 
     let created = 0;
@@ -2833,9 +2963,25 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
         const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
         if (flow === 'NONE') continue;
 
-        // Route alternatives: only the option affiliates are allocated to
-        // takes their bookings, except the overspill, which flies the other.
-        if (!autoBookOptionAllows(row, 'affiliate', overspillFor(row).has(aff.id))) continue;
+        // Route alternatives: with affiliates allocated to one option, each
+        // aircraft is booked only where the placement puts it - allocated,
+        // overspill or overflow - and only once per leg. Allocated to both
+        // options means book both, as before.
+        if (row.variant_label && autoBookChoice(row, 'affiliate')) {
+          const opts = legOptionsFor(row);
+          if (opts.some(o => Object.values(tobtBookingsByKey).some(b =>
+            b && String(b.slotKey || '').startsWith(optionPrefix(o))
+              && String(b.callsign || '').toUpperCase() === callsign))) continue;
+          let target = placementFor(row)?.get(aff.id)?.option || null;
+          // The plan is taken once per run; if its option has filled since,
+          // overflow to the other rather than go unbooked.
+          const targetRow = opts.find(o => o.variant_label === target);
+          if (targetRow && !optionHasRoom(targetRow)) {
+            const alt = opts.find(o => o !== targetRow && optionHasRoom(o) && !releasedKeys.has(`${aff.id}|${o.number}`));
+            target = alt ? alt.variant_label : null;
+          }
+          if (row.variant_label !== target) continue;
+        }
 
         const sectorPrefix = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
 
@@ -11882,6 +12028,37 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   const isAdmin = isAdminUser(cid);
   const isLoggedIn = !!cid;
   const myBookings = cid ? tobtBookingsByCid[cid] : null;
+  // Callsigns the viewer flies for as an affiliate (main CID or active
+  // member) - affiliate bookings sit under the main CID, so a member's own
+  // bookings alone would miss them.
+  let myAffCallsigns = new Set();
+  if (cid && isAffiliate(cid)) {
+    const memberOf = await prisma.affiliateMember.findMany({ where: { cid, active: true }, select: { affiliateId: true } }).catch(() => []);
+    const affs = await prisma.affiliate.findMany({
+      where: { OR: [{ cid }, { id: { in: memberOf.map(m => m.affiliateId) } }] },
+      select: { callsign: true }
+    }).catch(() => []);
+    myAffCallsigns = new Set(affs.map(a => String(a.callsign || '').toUpperCase()).filter(Boolean));
+  }
+  // A full option of a route-alternative leg: the other option holding the
+  // viewer's (or their affiliate's) booking, so the row can say it
+  // overflowed there rather than "No Bookings Left!". Only for viewers who
+  // may see alternatives - for anyone else option B does not exist.
+  const overflowPill = r => {
+    if (!cid || !r.variant_label || !canSeeRouteAlternatives(cid)) return '';
+    for (const o of legOptionsFor(r)) {
+      if (o.number === r.number) continue;
+      const prefix = optionPrefix(o) + '|';
+      const mine = Object.values(tobtBookingsByKey).some(b =>
+        b && String(b.slotKey || '').startsWith(prefix)
+          && (Number(b.cid) === cid || myAffCallsigns.has(String(b.callsign || '').toUpperCase())));
+      if (!mine) continue;
+      const colour = o.variant_label === 'A' ? '#34d399' : '#e879f9';
+      return '<td class="col-book"><span class="flowtype-pill flowtype-overflow" style="--opt:' + colour + ';"'
+        + ' title="' + r.number + ' is full - your booking is on ' + o.number + ' (' + o.from + ' → ' + o.to + ')">Overflowed to ' + o.variant_label + '</span></td>';
+    }
+    return '';
+  };
   const showBookSlot = isPageVisibleTo('flow-restrictions', isAdmin);
   const showAtcRoute = isAdmin || isPageEnabled('atc-route');
   const showWfChallenge = isPageVisibleTo('worldflight-challenge', isAdmin);
@@ -12294,7 +12471,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
                 if (flowtype === 'BOOKING_ONLY') {
                   const cap = getBookingOnlyCapacity(r.from, r.to);
                   if (cap.total > 0 && cap.remaining <= 0) {
-                    return '<td class="col-book"><span class="flowtype-pill flowtype-full">No Bookings Left!</span></td>';
+                    return overflowPill(r) || '<td class="col-book"><span class="flowtype-pill flowtype-full">No Bookings Left!</span></td>';
                   }
                   const remainLabel = cap.total > 0 ? cap.remaining + ' Booking' + (cap.remaining !== 1 ? 's' : '') + ' Left' : '';
                   return '<td class="col-book">'
@@ -12319,7 +12496,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
                 const slotRemainLabel = slotTotal > 0 ? slotsLeft + ' Booking' + (slotsLeft !== 1 ? 's' : '') + ' Left' : '';
 
                 if (slotTotal > 0 && slotsLeft <= 0) {
-                  return '<td class="col-book"><span class="flowtype-pill flowtype-full">No Bookings Left!</span></td>';
+                  return overflowPill(r) || '<td class="col-book"><span class="flowtype-pill flowtype-full">No Bookings Left!</span></td>';
                 }
 
                 return '<td class="col-book">'
@@ -20500,6 +20677,13 @@ const HQ_STYLES = `    <style>
       .roster-tip { display:none;position:absolute;bottom:calc(100% + 8px);right:0;width:240px;padding:10px 14px;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;line-height:1.6;font-weight:400;box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:100;pointer-events:none;white-space:normal; }
       .roster-tip::before { content:'';position:absolute;bottom:-6px;right:14px;width:10px;height:10px;background:var(--panel);border-right:1px solid var(--border);border-bottom:1px solid var(--border);transform:rotate(45deg); }
       .roster-tip-host:hover .roster-tip { display:block; }
+      /* In a table header the tip would open above the table, where the
+         scrolling .ot-table-wrap clips it - open it downward instead. */
+      thead .roster-tip { bottom:auto; top:calc(100% + 8px); }
+      thead .roster-tip::before { bottom:auto; top:-6px; transform:rotate(225deg); }
+      /* Route-alternative legs: which option the operator is flying. */
+      .hq-route-tag { display:inline-block; margin-left:6px; padding:2px 7px; border-radius:4px; font-size:10px; font-weight:700; white-space:nowrap; color:var(--opt); background:color-mix(in srgb, var(--opt) 14%, transparent); border:1px solid color-mix(in srgb, var(--opt) 40%, transparent); }
+      .hq-route-tag-other { margin-left:0; opacity:0.75; }
       .aff-switch-banner {
         display:flex; align-items:center; gap:14px; flex-wrap:wrap;
         padding:12px 16px; margin-bottom:16px;
@@ -21796,6 +21980,11 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   // only exists for multi-aircraft affiliates, so match on the fleet's
   // callsigns, the affiliate's own callsign, or the pilot claiming the
   // sector - a solo affiliate has an assignment too.
+  // A booking held by this affiliate - its own callsign or one of its fleet.
+  const affOwnBooking = b => {
+    const cs = String(b.callsign || '').toUpperCase();
+    return !!cs && (fleetCallsignSet.has(cs) || cs === String(affiliate?.callsign || '').toUpperCase());
+  };
   const affAssignedRoute = (row, claimedCidMaybe) => {
     const pfx = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
     const ownCs = String(affiliate?.callsign || '').toUpperCase();
@@ -21970,7 +22159,18 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                     const cs = String(a.callsign || '').toUpperCase();
                     const b = fleetBooking[`${cs}|${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`] || null;
                     const claim = fleetClaims[`${a.id}|${r.number}`];
-                    const flying = claim !== 0;
+                    // A route-alternative leg is flown on one option: tick the
+                    // one it is booked on, else the only one not released,
+                    // else the option affiliates are allocated to.
+                    const flying = claim !== 0 && (() => {
+                      if (!r.variant_label) return true;
+                      const booked = legFlyingOption(r, bk => String(bk.callsign || '').toUpperCase() === cs);
+                      if (booked) return booked === r.variant_label;
+                      const open = legOptionsFor(r).filter(o => fleetClaims[`${a.id}|${o.number}`] !== 0);
+                      if (open.length === 1) return open[0].number === r.number;
+                      const choice = autoBookChoice(r, 'affiliate');
+                      return !choice || choice === r.variant_label;
+                    })();
                     const status = b ? getFlowStatus(r, Number(b.cid)) : null;
                     const acctCid = b ? Number(b.cid) : (claim && claim > 0 ? claim : Number(a.cid));
                     const acctLabel = nameByCid[acctCid] ? `${nameByCid[acctCid]} \u00b7 ${acctCid}` : String(acctCid || '—');
@@ -21988,10 +22188,10 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                       ${showFlowInfo ? `
                       <td>${first ? `<span class="flowtype-pill flowtype-${flow.cls}">${escapeHtml(flow.label)}</span>` : ''}</td>
                       <td class="aff-status-cell">${!flying
-                        ? '<span class="ot-muted">Not flying</span>'
+                        ? (flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) || '<span class="ot-muted">Not flying</span>')
                         : (status && status.kind === 'tobt'
                           ? `<span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span></span>`
-                          : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}</td>` : ''}
+                          : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}${flying ? flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) : ''}</td>` : ''}
                       ${showAtcRoute ? `<td>${first ? (r.atc_route && r.atc_route !== '-'
                         ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
@@ -22070,9 +22270,9 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
           if (!cs) {
             mcBody += '<td class="aff-status-cell"><span class="ot-muted">\u2014</span></td>';
           } else if (status && status.kind === 'tobt') {
-            mcBody += '<td class="aff-status-cell"><span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">' + escapeHtml(status.label) + '</span><span class="aff-tobt-time">' + escapeHtml(status.time) + '</span></span></td>';
+            mcBody += '<td class="aff-status-cell"><span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">' + escapeHtml(status.label) + '</span><span class="aff-tobt-time">' + escapeHtml(status.time) + '</span></span>' + flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) + '</td>';
           } else {
-            mcBody += '<td class="aff-status-cell"><span class="aff-flow-status aff-flow-' + (status ? status.kind : 'empty') + '">' + escapeHtml(status ? status.text : (restricted ? 'Awaiting' : '\u2014')) + '</span></td>';
+            mcBody += '<td class="aff-status-cell"><span class="aff-flow-status aff-flow-' + (status ? status.kind : 'empty') + '">' + escapeHtml(status ? status.text : (restricted ? 'Awaiting' : '\u2014')) + '</span>' + (cs ? flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) : '') + '</td>';
           }
         }
         // From / To / Date / Window
@@ -22395,7 +22595,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                       status.kind === 'tobt'
                         ? `<span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span>`
                         : escapeHtml(status.text)
-                    }</span></td>` : ''}
+                    }</span>${flyingRouteTag(r, affOwnBooking)}</td>` : ''}
                     ${showAtcRoute ? `<td>${(() => {
                       const sbUrl = buildAffiliateSimbriefUrl(r, affiliate, claimedCid, showAtcRoute);
                       const sbAttr = sbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -23210,19 +23410,15 @@ app.post('/api/affiliates/fleet/:id/flying', requireLogin, requireAffiliate, asy
     // every viewer which sectors are flow-restricted, even when the flow
     // columns are hidden from them.
     const restricted = (sharedFlowTypes[`${sched.from}-${sched.to}`] || 'NONE') !== 'NONE';
+    const cs = String(row.callsign || '').toUpperCase();
 
-    if (flying) {
-      await prisma.affiliateSectorClaim.deleteMany({ where: { affiliateId: id, sectorNumber, cid: 0 } });
-      if (restricted) {
-        await autoAssignTeamThenAffiliate({ reason: `${row.callsign} opted in to ${sectorNumber}` }).catch(() => {});
-      }
-    } else {
-      await setAffiliateSectorClaim(id, sectorNumber, 0);
-      const prefix = `${sched.from}-${sched.to}|${sched.date_utc}|${sched.dep_time_utc}`;
-      const cs = String(row.callsign || '').toUpperCase();
-      const bookings = !restricted
+    // Mark this aircraft as not flying an option and release its booking there.
+    const releaseOption = async (opt) => {
+      await setAffiliateSectorClaim(id, opt.number, 0);
+      const optRestricted = (sharedFlowTypes[`${opt.from}-${opt.to}`] || 'NONE') !== 'NONE';
+      const bookings = !optRestricted
         ? []
-        : await prisma.tobtBooking.findMany({ where: { callsign: cs, slotKey: { startsWith: prefix } } });
+        : await prisma.tobtBooking.findMany({ where: { callsign: cs, slotKey: { startsWith: optionPrefix(opt) } } });
       for (const bk of bookings) {
         await prisma.tobtBooking.delete({ where: { id: bk.id } }).catch(() => null);
         const bookingKey = `${Number(bk.cid)}:${bk.slotKey}`;
@@ -23231,8 +23427,36 @@ app.post('/api/affiliates/fleet/:id/flying', requireLogin, requireAffiliate, asy
         try { io.emit('bookingCancelled', { slotKey: bk.slotKey }); } catch {}
         vatcanPushForSlotKey(bk.slotKey);
       }
+    };
+
+    // A route-alternative leg is flown on one option. Ticking one releases
+    // the others; unticking releases the whole leg.
+    const siblings = sched.variant_label ? legOptionsFor(sched).filter(o => o.number !== sched.number) : [];
+
+    if (flying) {
+      if (siblings.length && restricted) {
+        const bookedHere = Object.values(tobtBookingsByKey).some(b =>
+          b && String(b.slotKey || '').startsWith(optionPrefix(sched) + '|') && String(b.callsign || '').toUpperCase() === cs);
+        if (!bookedHere && !optionHasRoom(sched)) {
+          const alt = siblings.find(o => optionHasRoom(o));
+          return res.status(409).json({
+            error: alt
+              ? `No bookings left for ${optionLabel(sched)}. Please book onto ${optionLabel(alt)} instead.`
+              : `No bookings left for ${[sched, ...siblings].map(optionLabel).join(' or ')}.`
+          });
+        }
+      }
+      for (const o of siblings) await releaseOption(o);
+      await prisma.affiliateSectorClaim.deleteMany({ where: { affiliateId: id, sectorNumber, cid: 0 } });
+      if (restricted) {
+        await autoAssignTeamThenAffiliate({ reason: `${row.callsign} opted in to ${sectorNumber}` }).catch(() => {});
+      }
+    } else {
+      await releaseOption(sched);
+      for (const o of siblings) await releaseOption(o);
     }
-    res.json({ success: true, reload: restricted });
+    // The other options' rows changed too, so they need a reload to show it.
+    res.json({ success: true, reload: restricted || siblings.length > 0 });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -24139,10 +24363,10 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                       ${showFlowInfo ? `
                       <td>${first ? `<span class="flowtype-pill flowtype-${flow.cls}">${escapeHtml(flow.label)}</span>` : ''}</td>
                       <td class="aff-status-cell">${!flying
-                        ? '<span class="ot-muted">Not flying</span>'
+                        ? (flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) || '<span class="ot-muted">Not flying</span>')
                         : (status && status.kind === 'tobt'
                           ? `<span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span></span>`
-                          : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}</td>` : ''}
+                          : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}${flying ? flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) : ''}</td>` : ''}
                       ${showAtcRoute ? `<td>${first ? (r.atc_route && r.atc_route !== '-'
                         ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
@@ -24431,7 +24655,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                       status && status.kind === 'tobt'
                         ? `<span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span>`
                         : escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))
-                    }</span></td>` : ''}
+                    }</span>${flyingRouteTag(wfRow, bk => teamCallsigns.has(String(bk.callsign || '').toUpperCase()))}</td>` : ''}
                     ${showAtcRoute ? `<td>${wfRow && wfRow.atc_route && wfRow.atc_route !== '-'
                       ? `<button type="button" class="aff-route-btn" data-route="${String(wfRow.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${wfRow.atc_route2 && wfRow.atc_route2 !== '-' ? String(wfRow.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(wfRow.from)}" data-to="${escapeHtml(wfRow.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
                       : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`}</td>` : ''}
@@ -33751,24 +33975,29 @@ app.post('/admin/api/schedule-row/add-variant', requireAdmin, async (req, res) =
   res.json({ ok: true, number: variantNumber });
 });
 
-/* Where an undecided leg's team and affiliate bookings sit, per option, and
-   which of them are on an option their group is not allocated to. Pass
+/* Where an undecided leg's team and affiliate bookings sit, per option, where
+   each group is allocated, and which bookings are on the wrong option. Pass
    `settings` ({ teams, affiliates, overspill }, '' = both options) to plan a
-   change; omit it to check against the leg's current allocation. Ordinary
-   pilots are counted but never listed for removal. */
+   change; omit it to check against the leg's current allocation and actual
+   bookings. Affiliates follow planAffiliatePlacement (allocated, overspill,
+   then overflow when full). Ordinary pilots are counted, never moved. */
 async function routeAltAllocationPlan(primaryNumber, settings = null) {
-  const options = (adminSheetCache || []).filter(r =>
-    r?.number === primaryNumber || r?.variant_of === primaryNumber);
-  const [teamRows, affRows] = await Promise.all([
+  const options = legOptionsFor({ number: primaryNumber });
+  const [teamRows, affRows, releasedRows] = await Promise.all([
     prisma.officialTeam.findMany({ select: { callsign: true, teamName: true, participatingWf26: true } }),
     prisma.affiliate.findMany({
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-      select: { id: true, callsign: true, participatingWf26: true }
-    })
+      select: { id: true, cid: true, callsign: true, participatingWf26: true }
+    }),
+    prisma.affiliateSectorClaim.findMany({ where: { cid: 0 }, select: { affiliateId: true, sectorNumber: true } }).catch(() => [])
   ]);
   const teamCs = new Set(teamRows.map(t => String(t.callsign || '').toUpperCase()).filter(Boolean));
   const affIdByCs = new Map(affRows.filter(a => a.callsign).map(a => [String(a.callsign).toUpperCase(), a.id]));
-  const participating = affRows.filter(a => a.participatingWf26);
+  // Same list auto-assign places, so the plan and the bookings agree.
+  const placeable = affRows.filter(a => a.participatingWf26 && Number(a.cid) && a.callsign);
+  const placeableIds = new Set(placeable.map(a => a.id));
+  const affCallsigns = new Set(placeable.map(a => String(a.callsign).toUpperCase()));
+  const releasedKeys = new Set(releasedRows.map(r => `${r.affiliateId}|${r.sectorNumber}`));
 
   const rows = settings
     ? options.map(o => ({
@@ -33778,31 +34007,79 @@ async function routeAltAllocationPlan(primaryNumber, settings = null) {
         aff_overspill: settings.affiliates ? settings.overspill : 0
       }))
     : options;
-  const overspillIds = affiliateOverspillIds(participating, rows[0]?.aff_overspill);
 
-  const removals = [];
-  const out = rows.map(o => {
-    const prefix = `${o.from}-${o.to}|${o.date_utc}|${o.dep_time_utc}`;
-    const s = { number: o.number, label: o.variant_label, from: o.from, to: o.to,
-      teams: 0, affiliates: 0, pilots: 0, removeTeams: 0, removeAffiliates: 0 };
+  // What is booked on each option now.
+  const booked = rows.map(o => {
+    const prefix = optionPrefix(o);
+    const list = [];
     for (const [key, b] of Object.entries(tobtBookingsByKey)) {
       if (!b || key === b.slotKey || !String(b.slotKey || '').startsWith(prefix)) continue;
       const cs = String(b.callsign || '').toUpperCase();
-      const kind = teamCs.has(cs) ? 'team' : (affIdByCs.has(cs) ? 'affiliate' : null);
-      if (!kind) { s.pilots++; continue; }
-      const overspill = kind === 'affiliate' && overspillIds.has(affIdByCs.get(cs));
-      if (kind === 'team') s.teams++; else s.affiliates++;
-      if (!autoBookOptionAllows(o, kind, overspill)) {
-        if (kind === 'team') s.removeTeams++; else s.removeAffiliates++;
-        removals.push({ key, b });
+      const kind = teamCs.has(cs) ? 'team' : (affIdByCs.has(cs) ? 'affiliate' : 'pilot');
+      list.push({ key, b, cs, kind, affId: affIdByCs.get(cs) });
+    }
+    return list;
+  });
+
+  // Planning a change, count the teams where they are about to be: allocated
+  // to one option, every team aircraft on the leg ends up there.
+  let taken = null;
+  if (settings) {
+    const legTeams = new Set(booked.flat().filter(x => x.kind === 'team').map(x => x.cs));
+    taken = {};
+    rows.forEach((o, i) => {
+      const nonAff = booked[i].filter(x => !(x.kind === 'affiliate' && affCallsigns.has(x.cs)));
+      const pilots = nonAff.filter(x => x.kind !== 'team').length;
+      const teamsHere = settings.teams
+        ? (o.variant_label === settings.teams ? legTeams.size : 0)
+        : nonAff.length - pilots;
+      taken[o.variant_label] = pilots + teamsHere;
+    });
+  }
+  const placement = planAffiliatePlacement(rows, placeable, releasedKeys, affCallsigns, taken);
+
+  const removals = [];
+  const out = rows.map((o, i) => {
+    const s = { number: o.number, label: o.variant_label, from: o.from, to: o.to,
+      teams: 0, affiliates: 0, pilots: 0, removeTeams: 0, removeAffiliates: 0,
+      teamsAllocated: autoBookOptionAllows(o, 'team'),
+      affAllocated: 0, affOverspill: 0, affOverflow: 0, affChosen: 0 };
+    for (const x of booked[i]) {
+      if (x.kind === 'pilot') { s.pilots++; continue; }
+      if (x.kind === 'team') {
+        s.teams++;
+        if (!s.teamsAllocated) { s.removeTeams++; removals.push(x); }
+        continue;
       }
+      s.affiliates++;
+      const want = placement && placeableIds.has(x.affId) ? placement.get(x.affId)?.option : null;
+      if (want && want !== o.variant_label) { s.removeAffiliates++; removals.push(x); }
+    }
+    if (placement) {
+      for (const p of placement.values()) {
+        if (p.option !== o.variant_label) continue;
+        if (p.reason === 'overflow') s.affOverflow++;
+        else if (p.reason === 'chosen') s.affChosen++;
+        else if (p.reason === 'overspill') s.affOverspill++;
+        else s.affAllocated++;
+      }
+    } else {
+      s.affAllocated = placeable.filter(a => !releasedKeys.has(`${a.id}|${o.number}`)).length;
     }
     return s;
   });
 
+  const placed = placement ? [...placement.values()] : [];
   const teamUnits = new Set(teamRows.filter(t => t.participatingWf26)
     .map(t => String(t.teamName || '').trim().toUpperCase()).filter(Boolean)).size;
-  return { options: out, removals, participatingAffiliates: participating.length, teamUnits };
+  return {
+    options: out,
+    removals,
+    participatingAffiliates: placeable.length,
+    teamUnits,
+    unplacedFull: placed.filter(p => p.reason === 'full').length,
+    unplacedReleased: placed.filter(p => p.reason === 'released').length
+  };
 }
 
 /* Admin card at the top of a route-alternative leg's Sector Planning page:
@@ -33815,6 +34092,21 @@ function renderRouteAltAllocationCard(sched, alloc) {
   const optColor = l => (l === 'A' ? '#34d399' : '#e879f9');
   const seg = value => ['A', 'B', ''].filter(v => !v || alloc.options.some(o => o.label === v)).map(v =>
     `<button type="button" data-val="${v}" class="${v === value ? 'active' : ''}">${v ? 'Option ' + v : 'Both'}</button>`).join('');
+  // Kept in step with affText() in the card script below.
+  const affText = o => {
+    const total = o.affAllocated + o.affOverspill + o.affOverflow + (o.affChosen || 0);
+    const parts = [];
+    if (o.affChosen) parts.push(o.affChosen + ' chosen');
+    if (o.affOverspill) parts.push(o.affOverspill + ' overspill');
+    if (o.affOverflow) parts.push(o.affOverflow + ' overflow');
+    if (!total) return 'None';
+    if (!o.affAllocated) return parts.join(' + ');
+    return total + (parts.length ? ' (' + parts.join(', ') + ')' : '');
+  };
+  const noteText = a => [
+    a.unplacedFull ? a.unplacedFull + ' affiliate aircraft fit on neither option' : '',
+    a.unplacedReleased ? a.unplacedReleased + ' opted out of this leg' : ''
+  ].filter(Boolean).join(' · ');
 
   const optionRows = alloc.options.map(o => {
     const wrong = o.removeTeams + o.removeAffiliates;
@@ -33827,8 +34119,8 @@ function renderRouteAltAllocationCard(sched, alloc) {
           ${o.number === sched.number ? '<span class="sp-alloc-here">This page</span>' : ''}
         </div>
         <div class="sp-alloc-line"><span class="sp-alloc-k">Allocated</span>
-          <span>Teams: <strong data-role="teams"></strong></span>
-          <span>Affiliates: <strong data-role="affs"></strong></span></div>
+          <span>Teams: <strong data-role="teams">${o.teamsAllocated ? 'All ' + alloc.teamUnits : 'None'}</strong></span>
+          <span>Affiliates: <strong data-role="affs">${affText(o)}</strong></span></div>
         <div class="sp-alloc-line"><span class="sp-alloc-k">Booked now</span>
           <span>${o.teams} team · ${o.affiliates} affiliate · ${o.pilots} pilot</span>
           ${wrong ? `<span class="sp-alloc-warn">${wrong} on the wrong option</span>` : ''}</div>
@@ -33853,6 +34145,8 @@ function renderRouteAltAllocationCard(sched, alloc) {
       .sp-alloc-line { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:12px; color:var(--text); }
       .sp-alloc-k { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); min-width:72px; padding-top:2px; }
       .sp-alloc-warn { color:#fbbf24; font-weight:600; }
+      .sp-alloc-note { font-size:11.5px; color:#fbbf24; margin:-4px 0 10px; }
+      .sp-alloc-note:empty { display:none; }
       .sp-alloc-controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px; }
       .sp-alloc-field { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
       .sp-alloc-seg { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
@@ -33874,6 +34168,7 @@ function renderRouteAltAllocationCard(sched, alloc) {
         <span class="sp-alloc-sub">Which option the WF teams and affiliates are auto-booked onto. Ordinary pilots are not affected.</span>
       </div>
       <div class="sp-alloc-opts">${optionRows}</div>
+      <div class="sp-alloc-note" id="spAllocNote">${noteText(alloc)}</div>
       <div class="sp-alloc-controls">
         <div class="sp-alloc-field">Teams <span class="sp-alloc-seg" data-group="teams">${seg(teams)}</span></div>
         <div class="sp-alloc-field">Affiliates <span class="sp-alloc-seg" data-group="affiliates">${seg(affiliates)}</span></div>
@@ -33892,32 +34187,57 @@ function renderRouteAltAllocationCard(sched, alloc) {
       var input = document.getElementById('spAllocOverspill');
       var preview = document.getElementById('spAllocPreview');
 
+      var note = document.getElementById('spAllocNote');
+
+      // Same wording as the server-rendered affText() / noteText().
+      function affText(o) {
+        var total = o.affAllocated + o.affOverspill + o.affOverflow + (o.affChosen || 0), parts = [];
+        if (o.affChosen) parts.push(o.affChosen + ' chosen');
+        if (o.affOverspill) parts.push(o.affOverspill + ' overspill');
+        if (o.affOverflow) parts.push(o.affOverflow + ' overflow');
+        if (!total) return 'None';
+        if (!o.affAllocated) return parts.join(' + ');
+        return total + (parts.length ? ' (' + parts.join(', ') + ')' : '');
+      }
+      function noteText(a) {
+        return [a.unplacedFull ? a.unplacedFull + ' affiliate aircraft fit on neither option' : '',
+                a.unplacedReleased ? a.unplacedReleased + ' opted out of this leg' : ''].filter(Boolean).join(' · ');
+      }
       function render() {
         card.querySelectorAll('.sp-alloc-seg').forEach(function (s) {
           s.querySelectorAll('button').forEach(function (b) { b.classList.toggle('active', b.dataset.val === state[s.dataset.group]); });
         });
         input.disabled = !state.affiliates;
-        var k = state.affiliates ? Math.min(state.overspill, P) : 0;
-        var other = state.affiliates === 'A' ? 'B' : 'A';
-        card.querySelectorAll('.sp-alloc-opt').forEach(function (el) {
-          var l = el.dataset.label;
-          var t = !state.teams || state.teams === l;
-          var a = !state.affiliates ? P : (l === state.affiliates ? P - k : 0) + (l === other ? k : 0);
-          el.querySelector('[data-role=teams]').textContent = t ? 'All ' + T : 'None';
-          el.querySelector('[data-role=affs]').textContent = a === P ? 'All ' + P : (a ? a + ' of ' + P : 'None');
-        });
+      }
+      // The allocation depends on capacity and what is booked, so the server
+      // works it out - refreshed whenever the controls change.
+      var refreshTimer = null;
+      function refresh() {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(function () {
+          post(false).then(function (p) {
+            p.options.forEach(function (o) {
+              var el = card.querySelector('.sp-alloc-opt[data-label="' + o.label + '"]');
+              if (!el) return;
+              el.querySelector('[data-role=teams]').textContent = o.teamsAllocated ? 'All ' + T : 'None';
+              el.querySelector('[data-role=affs]').textContent = affText(o);
+            });
+            note.textContent = noteText(p);
+          }).catch(function (e) { note.textContent = e.message; });
+        }, 250);
       }
       card.querySelectorAll('.sp-alloc-seg button').forEach(function (b) {
         b.addEventListener('click', function () {
           state[b.parentNode.dataset.group] = b.dataset.val;
           preview.classList.add('hidden');
           render();
+          refresh();
         });
       });
       input.addEventListener('input', function () {
         state.overspill = Math.max(0, Math.floor(Number(input.value) || 0));
         preview.classList.add('hidden');
-        render();
+        refresh();
       });
 
       function post(confirm) {
@@ -33936,7 +34256,7 @@ function renderRouteAltAllocationCard(sched, alloc) {
             return '<div>Remove <strong>' + o.removeTeams + '</strong> team and <strong>' + o.removeAffiliates + '</strong> affiliate booking(s) from <strong>' + o.number + '</strong> (' + o.from + ' → ' + o.to + ').</div>';
           });
           show((lines.length ? lines.join('') : '<div>No existing bookings need to move.</div>')
-            + '<div style="color:var(--muted);margin-top:4px;">Auto-assign then books any team or affiliate missing from its allocated option, subject to that option’s capacity. VATCAN is re-pushed.</div>'
+            + '<div style="color:var(--muted);margin-top:4px;">Auto-assign then books any team or affiliate missing from its allocated option; affiliates that don’t fit overflow to the other option, from the bottom of the Display Order. VATCAN is re-pushed.</div>'
             + '<div style="display:flex;gap:8px;margin-top:8px;"><button type="button" class="action-btn primary" id="spAllocApply" style="font-size:11.5px;padding:5px 14px;">Apply</button>'
             + '<button type="button" class="action-btn" id="spAllocCancel" style="font-size:11.5px;padding:5px 14px;">Cancel</button></div>');
           document.getElementById('spAllocCancel').onclick = function () { preview.classList.add('hidden'); };
@@ -34004,8 +34324,8 @@ app.post('/admin/api/route-alternative/:wf/allocation', requireAdmin, async (req
   await loadScheduleFromDb(activeEventId);
 
   let removed = 0;
-  await queueBookingMaintenance('route-alt-allocation', async () => {
-    for (const { key, b } of plan.removals) {
+  const removeBookings = async list => {
+    for (const { key, b } of list) {
       const cidNum = Number(b.cid);
       await prisma.tobtBooking.deleteMany({ where: { cid: cidNum, slotKey: b.slotKey } }).catch(() => null);
       deleteBookingByBookingKey(key);
@@ -34018,6 +34338,15 @@ app.post('/admin/api/route-alternative/:wf/allocation', requireAdmin, async (req
       vatcanPushForSlotKey(b.slotKey);
       removed++;
     }
+  };
+  // Teams first, so the affiliates are then placed against where the teams
+  // actually ended up rather than the preview's estimate.
+  await queueBookingMaintenance('route-alt-allocation', async () => {
+    const teamsFirst = await routeAltAllocationPlan(primary);
+    await removeBookings(teamsFirst.removals.filter(x => x.kind === 'team'));
+    await autoAssignTeamBookings({ reason: 'allocation ' + primary });
+    const affPlan = await routeAltAllocationPlan(primary);
+    await removeBookings(affPlan.removals.filter(x => x.kind === 'affiliate'));
   });
   await autoAssignTeamThenAffiliate({ reason: 'allocation ' + primary });
 

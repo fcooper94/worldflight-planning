@@ -6641,6 +6641,20 @@ html[data-map-theme="light"] .ac-label {
   white-space: nowrap;
   display: inline-block;
 }
+/* A full option of a route-alternative leg whose booking for this viewer
+   overflowed to the other option. --opt is that option's colour. */
+.flowtype-pill.flowtype-overflow {
+  background: color-mix(in srgb, var(--opt, #e879f9) 14%, transparent);
+  color: var(--opt, #e879f9);
+  border: 1px solid color-mix(in srgb, var(--opt, #e879f9) 40%, transparent);
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  display: inline-block;
+  text-decoration: none;
+}
 .sector-banner-text {
   display: flex;
   flex-direction: column;
