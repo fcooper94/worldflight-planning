@@ -587,7 +587,11 @@ model RosterAssignment {
   entityName      String   // teamName (uppercase) or affiliate key
   sectorNumber    String
   role            String   // 'captain', 'fo', 'fe', 'obs1', 'obs2'
-  cid             Int
+  cid             Int?
+  // A roster seat is either a VATSIM member (cid) or a roster member with
+  // no account of their own (teamMemberId). The roster is not tied to slots,
+  // so someone with no CID can hold any crew role here.
+  teamMemberId    Int?
   updatedAt       DateTime @default(now())
 
   @@unique([entityType, entityName, sectorNumber, role])
@@ -656,4 +660,22 @@ model UserSectorNote {
   updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([cid, sector])
+}
+
+// Team roster entry. Carries the nickname for members who have a CID, and is
+// the only home for members who do not have a VATSIM account yet.
+// UserAdditionalRole remains the WF_TEAM access record: a row here with a cid
+// pairs with one there, a row without a cid has no access and cannot log in.
+// Attaching a cid later fills it in and grants access at that point.
+model TeamMember {
+  id          Int      @id @default(autoincrement())
+  teamName    String   // uppercase, matches OfficialTeam.teamName
+  cid         Int?     // null until they have a VATSIM account
+  displayName String?  // shown when there is no cid to resolve a name from
+  nickname    String?  // replaces the shown name wherever the member appears
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([teamName])
+  @@index([cid])
 }

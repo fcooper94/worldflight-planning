@@ -2610,6 +2610,43 @@ function affiliateOverspillIds(orderedAffs, n) {
 }
 
 // Every option of the leg `row` belongs to (the row itself included).
+// Is this operator booked on this option of a leg? Matched on callsign,
+// which covers both a shared slot and a whole fleet.
+function callsignBookedOnOption(row, callsigns) {
+  if (!row || !callsigns || !callsigns.size) return false;
+  const pfx = optionPrefix(row);
+  for (const b of Object.values(tobtBookingsByKey)) {
+    if (!b || typeof b.slotKey !== 'string' || !b.slotKey.startsWith(pfx)) continue;
+    if (callsigns.has(String(b.callsign || '').toUpperCase())) return true;
+  }
+  return false;
+}
+
+// The legs a team or affiliate should be shown. An undecided leg is carried
+// as two options (WF2619 and WF2619.B); an operator flies one of them, so
+// showing both is noise. Prefer whichever option they actually hold a
+// booking on - that is the booking logic's own answer, chain-aware and
+// already settled. Before any booking exists, fall back to the allocation
+// the admin set. Legs with no alternatives pass through untouched.
+function legOptionsVisibleTo(rows, kind, callsigns, isOverspill = false) {
+  const list = rows || [];
+  const out = [];
+  const done = new Set();
+  for (const r of list) {
+    if (!r?.variant_label) { out.push(r); continue; }
+    const primary = r.variant_of || r.number;
+    if (done.has(primary)) continue;
+    done.add(primary);
+
+    const options = legOptionsFor(r, list);
+    const booked = options.filter(o => callsignBookedOnOption(o, callsigns));
+    const allowed = options.filter(o => autoBookOptionAllows(o, kind, isOverspill));
+    // Last resort is every option: better to show both than hide the leg.
+    out.push(...(booked.length ? booked : (allowed.length ? allowed : options)));
+  }
+  return out;
+}
+
 function legOptionsFor(row, rows = adminSheetCache) {
   const primary = row?.variant_of || row?.number;
   return (rows || []).filter(r => r?.number === primary || r?.variant_of === primary);
@@ -8907,6 +8944,239 @@ function hhmmToNextUtcDate(hhmm, nowUtc = new Date()) {
   return d;
 }
 
+/* ===== TIMEZONE PICKER (display only) =====
+   Shared by the schedule page and the public roster so there is one list of
+   zones and one conversion script. Cells opt in by carrying their UTC
+   instant in data-start / data-end and their original text in data-utc;
+   the script rewrites them and UTC is restored by putting data-utc back.
+   Nothing here touches stored times - slot keys are unaffected. */
+const TZ_SELECT_HTML = `        <select id="schedTzSelect" class="sched-tz-select" aria-label="Select my timezone">
+          <option value="">Select my timezone</option>
+          <option value="UTC">UTC</option>
+          <option value="auto">My device timezone</option>
+          <option value="Pacific/Honolulu" data-cities="Hawaii">Hawaii</option>
+          <option value="America/Anchorage" data-cities="Alaska">Alaska</option>
+          <option value="America/Los_Angeles" data-cities="Pacific Time (US &amp; Canada)">Pacific Time (US &amp; Canada)</option>
+          <option value="America/Phoenix" data-cities="Arizona">Arizona</option>
+          <option value="America/Denver" data-cities="Mountain Time (US &amp; Canada)">Mountain Time (US &amp; Canada)</option>
+          <option value="America/Chicago" data-cities="Central Time (US &amp; Canada)">Central Time (US &amp; Canada)</option>
+          <option value="America/Regina" data-cities="Saskatchewan">Saskatchewan</option>
+          <option value="America/Mexico_City" data-cities="Guadalajara, Mexico City, Monterrey">Guadalajara, Mexico City, Monterrey</option>
+          <option value="America/New_York" data-cities="Eastern Time (US &amp; Canada)">Eastern Time (US &amp; Canada)</option>
+          <option value="America/Bogota" data-cities="Bogota, Lima, Quito">Bogota, Lima, Quito</option>
+          <option value="America/Halifax" data-cities="Atlantic Time (Canada)">Atlantic Time (Canada)</option>
+          <option value="America/Caracas" data-cities="Caracas">Caracas</option>
+          <option value="America/Santiago" data-cities="Santiago">Santiago</option>
+          <option value="America/St_Johns" data-cities="Newfoundland">Newfoundland</option>
+          <option value="America/Sao_Paulo" data-cities="Brasilia, Sao Paulo">Brasilia, Sao Paulo</option>
+          <option value="America/Argentina/Buenos_Aires" data-cities="Buenos Aires">Buenos Aires</option>
+          <option value="America/Montevideo" data-cities="Montevideo">Montevideo</option>
+          <option value="Atlantic/Azores" data-cities="Azores">Azores</option>
+          <option value="Atlantic/Cape_Verde" data-cities="Cabo Verde Is.">Cabo Verde Is.</option>
+          <option value="Europe/London" data-cities="Edinburgh, London">Edinburgh, London</option>
+          <option value="Europe/Dublin" data-cities="Dublin">Dublin</option>
+          <option value="Europe/Lisbon" data-cities="Lisbon">Lisbon</option>
+          <option value="Atlantic/Reykjavik" data-cities="Monrovia, Reykjavik">Monrovia, Reykjavik</option>
+          <option value="Africa/Casablanca" data-cities="Casablanca">Casablanca</option>
+          <option value="Europe/Berlin" data-cities="Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna">Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna</option>
+          <option value="Europe/Budapest" data-cities="Belgrade, Bratislava, Budapest, Ljubljana, Prague">Belgrade, Bratislava, Budapest, Ljubljana, Prague</option>
+          <option value="Europe/Paris" data-cities="Brussels, Copenhagen, Madrid, Paris">Brussels, Copenhagen, Madrid, Paris</option>
+          <option value="Europe/Warsaw" data-cities="Sarajevo, Skopje, Warsaw, Zagreb">Sarajevo, Skopje, Warsaw, Zagreb</option>
+          <option value="Africa/Lagos" data-cities="West Central Africa">West Central Africa</option>
+          <option value="Europe/Athens" data-cities="Athens, Bucharest">Athens, Bucharest</option>
+          <option value="Europe/Helsinki" data-cities="Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius">Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius</option>
+          <option value="Africa/Cairo" data-cities="Cairo">Cairo</option>
+          <option value="Africa/Johannesburg" data-cities="Harare, Pretoria, Johannesburg">Harare, Pretoria, Johannesburg</option>
+          <option value="Asia/Jerusalem" data-cities="Jerusalem">Jerusalem</option>
+          <option value="Asia/Beirut" data-cities="Beirut">Beirut</option>
+          <option value="Europe/Istanbul" data-cities="Istanbul">Istanbul</option>
+          <option value="Europe/Moscow" data-cities="Moscow, St. Petersburg">Moscow, St. Petersburg</option>
+          <option value="Asia/Riyadh" data-cities="Kuwait, Riyadh">Kuwait, Riyadh</option>
+          <option value="Asia/Qatar" data-cities="Doha">Doha</option>
+          <option value="Asia/Baghdad" data-cities="Baghdad">Baghdad</option>
+          <option value="Africa/Nairobi" data-cities="Nairobi">Nairobi</option>
+          <option value="Asia/Tehran" data-cities="Tehran">Tehran</option>
+          <option value="Asia/Dubai" data-cities="Abu Dhabi, Dubai, Muscat">Abu Dhabi, Dubai, Muscat</option>
+          <option value="Asia/Kabul" data-cities="Kabul">Kabul</option>
+          <option value="Asia/Karachi" data-cities="Islamabad, Karachi">Islamabad, Karachi</option>
+          <option value="Indian/Maldives" data-cities="Maldives">Maldives</option>
+          <option value="Asia/Kolkata" data-cities="Chennai, Kolkata, Mumbai, New Delhi">Chennai, Kolkata, Mumbai, New Delhi</option>
+          <option value="Asia/Colombo" data-cities="Sri Jayawardenepura">Sri Jayawardenepura</option>
+          <option value="Asia/Kathmandu" data-cities="Kathmandu">Kathmandu</option>
+          <option value="Asia/Dhaka" data-cities="Dhaka">Dhaka</option>
+          <option value="Asia/Yangon" data-cities="Yangon (Rangoon)">Yangon (Rangoon)</option>
+          <option value="Asia/Bangkok" data-cities="Bangkok, Hanoi, Jakarta">Bangkok, Hanoi, Jakarta</option>
+          <option value="Asia/Shanghai" data-cities="Beijing, Chongqing, Urumqi">Beijing, Chongqing, Urumqi</option>
+          <option value="Asia/Hong_Kong" data-cities="Hong Kong">Hong Kong</option>
+          <option value="Asia/Singapore" data-cities="Kuala Lumpur, Singapore">Kuala Lumpur, Singapore</option>
+          <option value="Asia/Taipei" data-cities="Taipei">Taipei</option>
+          <option value="Asia/Manila" data-cities="Manila">Manila</option>
+          <option value="Australia/Perth" data-cities="Perth">Perth</option>
+          <option value="Asia/Tokyo" data-cities="Osaka, Sapporo, Tokyo">Osaka, Sapporo, Tokyo</option>
+          <option value="Asia/Seoul" data-cities="Seoul">Seoul</option>
+          <option value="Australia/Darwin" data-cities="Darwin">Darwin</option>
+          <option value="Australia/Adelaide" data-cities="Adelaide">Adelaide</option>
+          <option value="Australia/Brisbane" data-cities="Brisbane">Brisbane</option>
+          <option value="Pacific/Port_Moresby" data-cities="Guam, Port Moresby">Guam, Port Moresby</option>
+          <option value="Australia/Sydney" data-cities="Canberra, Melbourne, Sydney">Canberra, Melbourne, Sydney</option>
+          <option value="Australia/Hobart" data-cities="Hobart">Hobart</option>
+          <option value="Pacific/Noumea" data-cities="Solomon Is., New Caledonia">Solomon Is., New Caledonia</option>
+          <option value="Pacific/Fiji" data-cities="Fiji">Fiji</option>
+          <option value="Pacific/Auckland" data-cities="Auckland, Wellington">Auckland, Wellington</option>
+          <option value="Pacific/Tongatapu" data-cities="Nuku'alofa">Nuku'alofa</option>
+        </select>`;
+
+const TZ_PICKER_SCRIPT = `<script>
+/* Schedule timezone picker - display only. Every converted cell carries its
+   UTC instant(s) in data-start/data-end (epoch ms) and its original UTC text
+   in data-utc, so switching back to UTC just restores that text. */
+(function() {
+  var sel = document.getElementById('schedTzSelect');
+  if (!sel || !window.Intl || !Intl.DateTimeFormat) return;
+  var KEY = 'wfScheduleTz';
+  var deviceTz = '';
+  try { deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function parts(ms, tz, opts) {
+    var o = { timeZone: tz }; for (var k in opts) o[k] = opts[k];
+    var out = {};
+    new Intl.DateTimeFormat('en-GB', o).formatToParts(new Date(ms)).forEach(function(p) { out[p.type] = p.value; });
+    return out;
+  }
+  function hhmm(ms, tz) {
+    var p = parts(ms, tz, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    return pad(Number(p.hour) % 24) + ':' + p.minute;
+  }
+  function dateLabel(ms, tz) {
+    var p = parts(ms, tz, { weekday: 'short', day: 'numeric', month: 'short' });
+    var d = Number(p.day);
+    var sfx = (d === 1 || d === 21 || d === 31) ? 'st' : (d === 2 || d === 22) ? 'nd' : (d === 3 || d === 23) ? 'rd' : 'th';
+    return p.weekday + ' ' + d + sfx + ' ' + p.month;
+  }
+  // Minutes east of UTC for tz at instant ms, from the wall-clock difference.
+  function offsetMins(ms, tz) {
+    var p = parts(ms, tz, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    var wall = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute));
+    return Math.round((wall - Math.floor(ms / 60000) * 60000) / 60000);
+  }
+  // "UTC+11:00" / "UTC-03:30" / "UTC" - Windows-style.
+  function offsetLabel(mins) {
+    var a = Math.abs(mins);
+    return 'UTC' + (mins < 0 ? '-' : '+') + pad(Math.floor(a / 60)) + ':' + pad(a % 60);
+  }
+  // Short zone name (AEDT, BST, EST...). Some locales only know offsets, so
+  // try a few English ones and fall back to "UTC+8" style.
+  function zoneAbbr(ms, tz) {
+    var locales = ['en-US', 'en-GB', 'en-AU', 'en-NZ', 'en-IN', 'en-CA'];
+    for (var i = 0; i < locales.length; i++) {
+      try {
+        var name = '';
+        new Intl.DateTimeFormat(locales[i], { timeZone: tz, timeZoneName: 'short' })
+          .formatToParts(new Date(ms)).forEach(function(p) { if (p.type === 'timeZoneName') name = p.value; });
+        if (name && !/^(GMT|UTC)[+\\-]/.test(name)) return name === 'GMT' && tz !== 'Europe/London' && tz !== 'Europe/Dublin' ? 'UTC' : name;
+      } catch (e) {}
+    }
+    var m = offsetMins(ms, tz), a = Math.abs(m);
+    return m ? 'UTC' + (m < 0 ? '-' : '+') + Math.floor(a / 60) + (a % 60 ? ':' + pad(a % 60) : '') : 'UTC';
+  }
+
+  // Offsets are taken at the first window on the page, so daylight saving is
+  // whatever applies during the event rather than today.
+  var firstCell = document.querySelector('.tz-conv[data-start]');
+  var refMs = firstCell ? Number(firstCell.getAttribute('data-start')) : Date.now();
+
+  // Prefix each zone with its offset and sort the list by it.
+  (function buildList() {
+    var zoneOpts = Array.prototype.slice.call(sel.querySelectorAll('option[data-cities]'));
+    var rows = [];
+    zoneOpts.forEach(function(o) {
+      try {
+        var m = offsetMins(refMs, o.value);
+        o.textContent = '(' + offsetLabel(m) + ') ' + o.getAttribute('data-cities');
+        rows.push({ el: o, m: m, name: o.getAttribute('data-cities') });
+      } catch (e) { o.remove(); }
+    });
+    rows.sort(function(x, y) { return x.m - y.m || x.name.localeCompare(y.name); });
+    rows.forEach(function(r) { sel.appendChild(r.el); });
+    var autoOpt = sel.querySelector('option[value="auto"]');
+    if (autoOpt) {
+      if (deviceTz) {
+        try { autoOpt.textContent = '(' + offsetLabel(offsetMins(refMs, deviceTz)) + ') My device timezone - ' + deviceTz.replace(/_/g, ' '); }
+        catch (e) { autoOpt.remove(); }
+      } else autoOpt.remove();
+    }
+    var utcOpt = sel.querySelector('option[value="UTC"]');
+    if (utcOpt) utcOpt.textContent = '(UTC) Coordinated Universal Time';
+  })();
+
+  function apply(tz) {
+    var cells = document.querySelectorAll('.tz-conv');
+    for (var i = 0; i < cells.length; i++) {
+      var el = cells[i];
+      if (!tz) {
+        el.textContent = el.getAttribute('data-utc');
+        el.classList.remove('tz-local');
+        el.removeAttribute('title');
+        continue;
+      }
+      var a = Number(el.getAttribute('data-start'));
+      if (!a) continue;
+      el.textContent = '';
+      if (el.getAttribute('data-kind') === 'date') {
+        el.textContent = dateLabel(a, tz);
+      } else {
+        var b = Number(el.getAttribute('data-end'));
+        var t = document.createElement('span');
+        t.className = 'tz-time';
+        t.textContent = hhmm(a, tz) + '\\u2013' + hhmm(b, tz);
+        var z = document.createElement('span');
+        z.className = 'tz-abbr';
+        z.textContent = zoneAbbr(a, tz);
+        el.appendChild(t);
+        el.appendChild(z);
+      }
+      el.classList.add('tz-local');
+      el.title = el.getAttribute('data-utc') + ' UTC';
+    }
+  }
+
+  function resolve(v) { return v === 'auto' ? deviceTz : v; }
+
+  var saved = '';
+  try { saved = localStorage.getItem(KEY) || ''; } catch (e) {}
+  if (saved && sel.querySelector('option[value="' + saved.replace(/"/g, '') + '"]')) {
+    sel.value = saved;
+    try { apply(resolve(saved)); } catch (e) { sel.value = ''; }
+  }
+
+  sel.addEventListener('change', function() {
+    var v = sel.value;
+    try { localStorage.setItem(KEY, v); } catch (e) {}
+    try { apply(resolve(v)); } catch (e) { apply(''); sel.value = ''; }
+  });
+})();
+</script>`;
+
+// Epoch ms for a UTC date + HH:MM, offset by addMin. Returns null when
+// either part is unparseable, which callers treat as "do not convert".
+function utcInstantMs(dateUtc, hhmm, addMin = 0) {
+  const d = parseServerDate(dateUtc);
+  const m = /^(\d{1,2}):?(\d{2})$/.exec(String(hhmm || ''));
+  if (!d || !m) return null;
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+    + (Number(m[1]) * 60 + Number(m[2]) + addMin) * 60000;
+}
+
+// Wraps a cell so the picker can rewrite it. Falls back to plain text when
+// there is no instant to convert.
+function tzSpanHtml(text, kind, start, end) {
+  if (start == null) return text;
+  return '<span class="tz-conv" data-kind="' + kind + '" data-utc="' + escapeHtml(text)
+    + '" data-start="' + start + '"'
+    + (end != null ? ' data-end="' + end + '"' : '') + '>' + text + '</span>';
+}
+
 function buildTimeWindow(hhmm) {
   if (!hhmm) return '';
   return `${subtractMinutes(hhmm, 60)}–${addMinutes(hhmm, 60)}`;
@@ -12335,16 +12605,8 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   // Timezone picker (display only): epoch ms for a UTC date + HH:MM, offset by
   // addMin. Emitted as data attributes so the browser can re-render the Date
   // and window cells in the viewer's chosen zone. Slot keys are untouched.
-  const schedUtcMs = (dateUtc, hhmm, addMin) => {
-    const d = parseServerDate(dateUtc);
-    const m = /^(\d{1,2}):?(\d{2})$/.exec(String(hhmm || ''));
-    if (!d || !m) return null;
-    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
-      + (Number(m[1]) * 60 + Number(m[2]) + addMin) * 60000;
-  };
-  const tzSpan = (text, kind, start, end) => (start == null)
-    ? text
-    : '<span class="tz-conv" data-kind="' + kind + '" data-utc="' + escapeHtml(text) + '" data-start="' + start + '"' + (end != null ? ' data-end="' + end + '"' : '') + '>' + text + '</span>';
+  const schedUtcMs = (dateUtc, hhmm, addMin) => utcInstantMs(dateUtc, hhmm, addMin);
+  const tzSpan = (text, kind, start, end) => tzSpanHtml(text, kind, start, end);
   const arrDayShift = (r) => {
     const toM = s => { const m = /^(\d{1,2}):?(\d{2})$/.exec(String(s || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
     const a = toM(r.arr_time_utc), d = toM(r.dep_time_utc);
@@ -12357,81 +12619,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
       <h2>WorldFlight Event Schedule</h2>
       <div class="sched-tz">
         <div class="sched-tz-note">All times are in UTC</div>
-        <select id="schedTzSelect" class="sched-tz-select" aria-label="Select my timezone">
-          <option value="">Select my timezone</option>
-          <option value="UTC">UTC</option>
-          <option value="auto">My device timezone</option>
-          <option value="Pacific/Honolulu" data-cities="Hawaii">Hawaii</option>
-          <option value="America/Anchorage" data-cities="Alaska">Alaska</option>
-          <option value="America/Los_Angeles" data-cities="Pacific Time (US &amp; Canada)">Pacific Time (US &amp; Canada)</option>
-          <option value="America/Phoenix" data-cities="Arizona">Arizona</option>
-          <option value="America/Denver" data-cities="Mountain Time (US &amp; Canada)">Mountain Time (US &amp; Canada)</option>
-          <option value="America/Chicago" data-cities="Central Time (US &amp; Canada)">Central Time (US &amp; Canada)</option>
-          <option value="America/Regina" data-cities="Saskatchewan">Saskatchewan</option>
-          <option value="America/Mexico_City" data-cities="Guadalajara, Mexico City, Monterrey">Guadalajara, Mexico City, Monterrey</option>
-          <option value="America/New_York" data-cities="Eastern Time (US &amp; Canada)">Eastern Time (US &amp; Canada)</option>
-          <option value="America/Bogota" data-cities="Bogota, Lima, Quito">Bogota, Lima, Quito</option>
-          <option value="America/Halifax" data-cities="Atlantic Time (Canada)">Atlantic Time (Canada)</option>
-          <option value="America/Caracas" data-cities="Caracas">Caracas</option>
-          <option value="America/Santiago" data-cities="Santiago">Santiago</option>
-          <option value="America/St_Johns" data-cities="Newfoundland">Newfoundland</option>
-          <option value="America/Sao_Paulo" data-cities="Brasilia, Sao Paulo">Brasilia, Sao Paulo</option>
-          <option value="America/Argentina/Buenos_Aires" data-cities="Buenos Aires">Buenos Aires</option>
-          <option value="America/Montevideo" data-cities="Montevideo">Montevideo</option>
-          <option value="Atlantic/Azores" data-cities="Azores">Azores</option>
-          <option value="Atlantic/Cape_Verde" data-cities="Cabo Verde Is.">Cabo Verde Is.</option>
-          <option value="Europe/London" data-cities="Edinburgh, London">Edinburgh, London</option>
-          <option value="Europe/Dublin" data-cities="Dublin">Dublin</option>
-          <option value="Europe/Lisbon" data-cities="Lisbon">Lisbon</option>
-          <option value="Atlantic/Reykjavik" data-cities="Monrovia, Reykjavik">Monrovia, Reykjavik</option>
-          <option value="Africa/Casablanca" data-cities="Casablanca">Casablanca</option>
-          <option value="Europe/Berlin" data-cities="Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna">Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna</option>
-          <option value="Europe/Budapest" data-cities="Belgrade, Bratislava, Budapest, Ljubljana, Prague">Belgrade, Bratislava, Budapest, Ljubljana, Prague</option>
-          <option value="Europe/Paris" data-cities="Brussels, Copenhagen, Madrid, Paris">Brussels, Copenhagen, Madrid, Paris</option>
-          <option value="Europe/Warsaw" data-cities="Sarajevo, Skopje, Warsaw, Zagreb">Sarajevo, Skopje, Warsaw, Zagreb</option>
-          <option value="Africa/Lagos" data-cities="West Central Africa">West Central Africa</option>
-          <option value="Europe/Athens" data-cities="Athens, Bucharest">Athens, Bucharest</option>
-          <option value="Europe/Helsinki" data-cities="Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius">Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius</option>
-          <option value="Africa/Cairo" data-cities="Cairo">Cairo</option>
-          <option value="Africa/Johannesburg" data-cities="Harare, Pretoria, Johannesburg">Harare, Pretoria, Johannesburg</option>
-          <option value="Asia/Jerusalem" data-cities="Jerusalem">Jerusalem</option>
-          <option value="Asia/Beirut" data-cities="Beirut">Beirut</option>
-          <option value="Europe/Istanbul" data-cities="Istanbul">Istanbul</option>
-          <option value="Europe/Moscow" data-cities="Moscow, St. Petersburg">Moscow, St. Petersburg</option>
-          <option value="Asia/Riyadh" data-cities="Kuwait, Riyadh">Kuwait, Riyadh</option>
-          <option value="Asia/Qatar" data-cities="Doha">Doha</option>
-          <option value="Asia/Baghdad" data-cities="Baghdad">Baghdad</option>
-          <option value="Africa/Nairobi" data-cities="Nairobi">Nairobi</option>
-          <option value="Asia/Tehran" data-cities="Tehran">Tehran</option>
-          <option value="Asia/Dubai" data-cities="Abu Dhabi, Dubai, Muscat">Abu Dhabi, Dubai, Muscat</option>
-          <option value="Asia/Kabul" data-cities="Kabul">Kabul</option>
-          <option value="Asia/Karachi" data-cities="Islamabad, Karachi">Islamabad, Karachi</option>
-          <option value="Indian/Maldives" data-cities="Maldives">Maldives</option>
-          <option value="Asia/Kolkata" data-cities="Chennai, Kolkata, Mumbai, New Delhi">Chennai, Kolkata, Mumbai, New Delhi</option>
-          <option value="Asia/Colombo" data-cities="Sri Jayawardenepura">Sri Jayawardenepura</option>
-          <option value="Asia/Kathmandu" data-cities="Kathmandu">Kathmandu</option>
-          <option value="Asia/Dhaka" data-cities="Dhaka">Dhaka</option>
-          <option value="Asia/Yangon" data-cities="Yangon (Rangoon)">Yangon (Rangoon)</option>
-          <option value="Asia/Bangkok" data-cities="Bangkok, Hanoi, Jakarta">Bangkok, Hanoi, Jakarta</option>
-          <option value="Asia/Shanghai" data-cities="Beijing, Chongqing, Urumqi">Beijing, Chongqing, Urumqi</option>
-          <option value="Asia/Hong_Kong" data-cities="Hong Kong">Hong Kong</option>
-          <option value="Asia/Singapore" data-cities="Kuala Lumpur, Singapore">Kuala Lumpur, Singapore</option>
-          <option value="Asia/Taipei" data-cities="Taipei">Taipei</option>
-          <option value="Asia/Manila" data-cities="Manila">Manila</option>
-          <option value="Australia/Perth" data-cities="Perth">Perth</option>
-          <option value="Asia/Tokyo" data-cities="Osaka, Sapporo, Tokyo">Osaka, Sapporo, Tokyo</option>
-          <option value="Asia/Seoul" data-cities="Seoul">Seoul</option>
-          <option value="Australia/Darwin" data-cities="Darwin">Darwin</option>
-          <option value="Australia/Adelaide" data-cities="Adelaide">Adelaide</option>
-          <option value="Australia/Brisbane" data-cities="Brisbane">Brisbane</option>
-          <option value="Pacific/Port_Moresby" data-cities="Guam, Port Moresby">Guam, Port Moresby</option>
-          <option value="Australia/Sydney" data-cities="Canberra, Melbourne, Sydney">Canberra, Melbourne, Sydney</option>
-          <option value="Australia/Hobart" data-cities="Hobart">Hobart</option>
-          <option value="Pacific/Noumea" data-cities="Solomon Is., New Caledonia">Solomon Is., New Caledonia</option>
-          <option value="Pacific/Fiji" data-cities="Fiji">Fiji</option>
-          <option value="Pacific/Auckland" data-cities="Auckland, Wellington">Auckland, Wellington</option>
-          <option value="Pacific/Tongatapu" data-cities="Nuku'alofa">Nuku'alofa</option>
-        </select>
+${TZ_SELECT_HTML}
       </div>
     </div>
 
@@ -12685,137 +12873,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
     </div>
     </section>
 
-<script>
-/* Schedule timezone picker - display only. Every converted cell carries its
-   UTC instant(s) in data-start/data-end (epoch ms) and its original UTC text
-   in data-utc, so switching back to UTC just restores that text. */
-(function() {
-  var sel = document.getElementById('schedTzSelect');
-  if (!sel || !window.Intl || !Intl.DateTimeFormat) return;
-  var KEY = 'wfScheduleTz';
-  var deviceTz = '';
-  try { deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
-
-  function pad(n) { return (n < 10 ? '0' : '') + n; }
-  function parts(ms, tz, opts) {
-    var o = { timeZone: tz }; for (var k in opts) o[k] = opts[k];
-    var out = {};
-    new Intl.DateTimeFormat('en-GB', o).formatToParts(new Date(ms)).forEach(function(p) { out[p.type] = p.value; });
-    return out;
-  }
-  function hhmm(ms, tz) {
-    var p = parts(ms, tz, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-    return pad(Number(p.hour) % 24) + ':' + p.minute;
-  }
-  function dateLabel(ms, tz) {
-    var p = parts(ms, tz, { weekday: 'short', day: 'numeric', month: 'short' });
-    var d = Number(p.day);
-    var sfx = (d === 1 || d === 21 || d === 31) ? 'st' : (d === 2 || d === 22) ? 'nd' : (d === 3 || d === 23) ? 'rd' : 'th';
-    return p.weekday + ' ' + d + sfx + ' ' + p.month;
-  }
-  // Minutes east of UTC for tz at instant ms, from the wall-clock difference.
-  function offsetMins(ms, tz) {
-    var p = parts(ms, tz, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-    var wall = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute));
-    return Math.round((wall - Math.floor(ms / 60000) * 60000) / 60000);
-  }
-  // "UTC+11:00" / "UTC-03:30" / "UTC" - Windows-style.
-  function offsetLabel(mins) {
-    var a = Math.abs(mins);
-    return 'UTC' + (mins < 0 ? '-' : '+') + pad(Math.floor(a / 60)) + ':' + pad(a % 60);
-  }
-  // Short zone name (AEDT, BST, EST...). Some locales only know offsets, so
-  // try a few English ones and fall back to "UTC+8" style.
-  function zoneAbbr(ms, tz) {
-    var locales = ['en-US', 'en-GB', 'en-AU', 'en-NZ', 'en-IN', 'en-CA'];
-    for (var i = 0; i < locales.length; i++) {
-      try {
-        var name = '';
-        new Intl.DateTimeFormat(locales[i], { timeZone: tz, timeZoneName: 'short' })
-          .formatToParts(new Date(ms)).forEach(function(p) { if (p.type === 'timeZoneName') name = p.value; });
-        if (name && !/^(GMT|UTC)[+\\-]/.test(name)) return name === 'GMT' && tz !== 'Europe/London' && tz !== 'Europe/Dublin' ? 'UTC' : name;
-      } catch (e) {}
-    }
-    var m = offsetMins(ms, tz), a = Math.abs(m);
-    return m ? 'UTC' + (m < 0 ? '-' : '+') + Math.floor(a / 60) + (a % 60 ? ':' + pad(a % 60) : '') : 'UTC';
-  }
-
-  // Offsets are taken at the first window on the page, so daylight saving is
-  // whatever applies during the event rather than today.
-  var firstCell = document.querySelector('.tz-conv[data-start]');
-  var refMs = firstCell ? Number(firstCell.getAttribute('data-start')) : Date.now();
-
-  // Prefix each zone with its offset and sort the list by it.
-  (function buildList() {
-    var zoneOpts = Array.prototype.slice.call(sel.querySelectorAll('option[data-cities]'));
-    var rows = [];
-    zoneOpts.forEach(function(o) {
-      try {
-        var m = offsetMins(refMs, o.value);
-        o.textContent = '(' + offsetLabel(m) + ') ' + o.getAttribute('data-cities');
-        rows.push({ el: o, m: m, name: o.getAttribute('data-cities') });
-      } catch (e) { o.remove(); }
-    });
-    rows.sort(function(x, y) { return x.m - y.m || x.name.localeCompare(y.name); });
-    rows.forEach(function(r) { sel.appendChild(r.el); });
-    var autoOpt = sel.querySelector('option[value="auto"]');
-    if (autoOpt) {
-      if (deviceTz) {
-        try { autoOpt.textContent = '(' + offsetLabel(offsetMins(refMs, deviceTz)) + ') My device timezone - ' + deviceTz.replace(/_/g, ' '); }
-        catch (e) { autoOpt.remove(); }
-      } else autoOpt.remove();
-    }
-    var utcOpt = sel.querySelector('option[value="UTC"]');
-    if (utcOpt) utcOpt.textContent = '(UTC) Coordinated Universal Time';
-  })();
-
-  function apply(tz) {
-    var cells = document.querySelectorAll('.tz-conv');
-    for (var i = 0; i < cells.length; i++) {
-      var el = cells[i];
-      if (!tz) {
-        el.textContent = el.getAttribute('data-utc');
-        el.classList.remove('tz-local');
-        el.removeAttribute('title');
-        continue;
-      }
-      var a = Number(el.getAttribute('data-start'));
-      if (!a) continue;
-      el.textContent = '';
-      if (el.getAttribute('data-kind') === 'date') {
-        el.textContent = dateLabel(a, tz);
-      } else {
-        var b = Number(el.getAttribute('data-end'));
-        var t = document.createElement('span');
-        t.className = 'tz-time';
-        t.textContent = hhmm(a, tz) + '\\u2013' + hhmm(b, tz);
-        var z = document.createElement('span');
-        z.className = 'tz-abbr';
-        z.textContent = zoneAbbr(a, tz);
-        el.appendChild(t);
-        el.appendChild(z);
-      }
-      el.classList.add('tz-local');
-      el.title = el.getAttribute('data-utc') + ' UTC';
-    }
-  }
-
-  function resolve(v) { return v === 'auto' ? deviceTz : v; }
-
-  var saved = '';
-  try { saved = localStorage.getItem(KEY) || ''; } catch (e) {}
-  if (saved && sel.querySelector('option[value="' + saved.replace(/"/g, '') + '"]')) {
-    sel.value = saved;
-    try { apply(resolve(saved)); } catch (e) { sel.value = ''; }
-  }
-
-  sel.addEventListener('change', function() {
-    var v = sel.value;
-    try { localStorage.setItem(KEY, v); } catch (e) {}
-    try { apply(resolve(v)); } catch (e) { apply(''); sel.value = ''; }
-  });
-})();
-</script>
+${TZ_PICKER_SCRIPT}
 
 <script>
 document.addEventListener('click', function(e) {
@@ -20435,6 +20493,157 @@ app.post('/api/team/members', requireLogin, requireTeamManager, async (req, res)
   return res.json({ success: true });
 });
 
+/* ===== TEAM ROSTER: NICKNAMES AND NON-VATSIM MEMBERS =====
+   TeamMember carries the nickname for members who have a CID, and is the
+   only record for members who do not have a VATSIM account yet.
+   UserAdditionalRole stays the access record: no row there, no access. */
+
+// The viewer's team name, as stored on their WF_TEAM role.
+async function viewerTeamNameFor(req) {
+  const viewerCid = Number(req.session?.user?.data?.cid);
+  if (req._viewerTeamName) return req._viewerTeamName;
+  const row = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: viewerCid, role: 'WF_TEAM' } }
+  }).catch(() => null);
+  return row?.teamName || null;
+}
+
+// Add a roster member with no VATSIM account. They hold no role and cannot
+// log in; a CID can be attached later, which is what grants access.
+app.post('/api/team/members/guest', requireLogin, requireTeamManager, async (req, res) => {
+  const name = String(req.body?.displayName || '').trim();
+  if (!name) return res.status(400).json({ error: 'Enter a name for this member.' });
+  if (name.length > 80) return res.status(400).json({ error: 'Name is too long (80 characters max).' });
+
+  const teamName = await viewerTeamNameFor(req);
+  if (!teamName) return res.status(403).json({ error: 'Your team is not linked.' });
+  if (!prisma.teamMember) {
+    return res.status(503).json({ error: 'Roster storage is not ready on this server yet.' });
+  }
+
+  const row = await prisma.teamMember.create({
+    data: { teamName, cid: null, displayName: name, nickname: String(req.body?.nickname || '').trim() || null }
+  });
+  console.log('[TEAM ROSTER] ' + teamName + ' added non-VATSIM member "' + name + '" (#' + row.id + ')');
+  return res.json({ success: true, id: row.id });
+});
+
+// Set or clear a member's nickname. Works for CID members and guests alike;
+// for a CID member the row is created on first use.
+app.post('/api/team/members/nickname', requireLogin, requireTeamManager, async (req, res) => {
+  const teamName = await viewerTeamNameFor(req);
+  if (!teamName) return res.status(403).json({ error: 'Your team is not linked.' });
+  if (!prisma.teamMember) {
+    return res.status(503).json({ error: 'Roster storage is not ready on this server yet.' });
+  }
+
+  const nickname = String(req.body?.nickname ?? '').trim();
+  if (nickname.length > 60) return res.status(400).json({ error: 'Nickname is too long (60 characters max).' });
+  const id = req.body?.id != null ? Number(req.body.id) : null;
+  const cid = req.body?.cid != null ? Number(req.body.cid) : null;
+
+  if (id) {
+    const row = await prisma.teamMember.findUnique({ where: { id } }).catch(() => null);
+    if (!row || row.teamName !== teamName) {
+      return res.status(404).json({ error: 'That member is not on your team.' });
+    }
+    await prisma.teamMember.update({ where: { id }, data: { nickname: nickname || null } });
+    return res.json({ success: true });
+  }
+
+  if (!cid || !Number.isInteger(cid)) return res.status(400).json({ error: 'Invalid member.' });
+  // Only for someone who is actually on this team.
+  const role = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid, role: 'WF_TEAM' } }
+  }).catch(() => null);
+  const owns = await prisma.officialTeam.findFirst({ where: { teamName, mainCid: cid } }).catch(() => null);
+  if ((!role || role.teamName !== teamName) && !owns) {
+    return res.status(404).json({ error: 'That member is not on your team.' });
+  }
+
+  const existing = await prisma.teamMember.findFirst({ where: { teamName, cid } }).catch(() => null);
+  if (existing) {
+    await prisma.teamMember.update({ where: { id: existing.id }, data: { nickname: nickname || null } });
+  } else if (nickname) {
+    await prisma.teamMember.create({ data: { teamName, cid, nickname } });
+  }
+  return res.json({ success: true });
+});
+
+// Attach a VATSIM CID to a roster member who did not have one. This is what
+// grants them WF_TEAM access, so it runs the same checks as adding a member.
+app.post('/api/team/members/:id/cid', requireLogin, requireTeamManager, async (req, res) => {
+  const id = Number(req.params.id);
+  const targetCid = Number(req.body?.cid);
+  if (!targetCid || !Number.isInteger(targetCid)) return res.status(400).json({ error: 'Invalid CID' });
+
+  const teamName = await viewerTeamNameFor(req);
+  if (!teamName) return res.status(403).json({ error: 'Your team is not linked.' });
+  if (!prisma.teamMember) {
+    return res.status(503).json({ error: 'Roster storage is not ready on this server yet.' });
+  }
+
+  const row = await prisma.teamMember.findUnique({ where: { id } }).catch(() => null);
+  if (!row || row.teamName !== teamName) {
+    return res.status(404).json({ error: 'That member is not on your team.' });
+  }
+  if (row.cid != null) return res.status(409).json({ error: 'That member already has a CID.' });
+
+  // Same guard as adding a member: a CID belongs to one team only.
+  const existingRole = await prisma.userAdditionalRole.findUnique({
+    where: { cid_role: { cid: targetCid, role: 'WF_TEAM' } }
+  }).catch(() => null);
+  if (existingRole) {
+    return res.status(409).json({
+      error: existingRole.teamName === teamName
+        ? 'That CID is already a member of this team.'
+        : 'That CID is already assigned to another team.'
+    });
+  }
+  const clash = await prisma.teamMember.findFirst({ where: { teamName, cid: targetCid } }).catch(() => null);
+  if (clash) return res.status(409).json({ error: 'That CID is already on your roster.' });
+
+  await prisma.teamMember.update({ where: { id }, data: { cid: targetCid } });
+  await prisma.userAdditionalRole.create({
+    data: {
+      cid: targetCid,
+      role: 'WF_TEAM',
+      teamName,
+      // Same as a freshly added member: view-only until granted more.
+      canEditBookings: false,
+      canManageMembers: false,
+      participating: true
+    }
+  });
+  teamMemberCids.add(targetCid);
+  console.log('[TEAM ROSTER] ' + teamName + ' attached CID ' + targetCid + ' to member #' + id);
+  return res.json({ success: true });
+});
+
+// Remove a roster member who has no CID. Members with a CID are removed
+// through the existing DELETE /api/team/members/:cid, which drops the role.
+app.delete('/api/team/members/guest/:id', requireLogin, requireTeamManager, async (req, res) => {
+  const id = Number(req.params.id);
+  const teamName = await viewerTeamNameFor(req);
+  if (!teamName) return res.status(403).json({ error: 'Your team is not linked.' });
+  if (!prisma.teamMember) return res.status(503).json({ error: 'Roster storage is not ready on this server yet.' });
+
+  const row = await prisma.teamMember.findUnique({ where: { id } }).catch(() => null);
+  if (!row || row.teamName !== teamName) {
+    return res.status(404).json({ error: 'That member is not on your team.' });
+  }
+  if (row.cid != null) {
+    return res.status(400).json({ error: 'That member has a CID - remove them from the members list instead.' });
+  }
+  await prisma.teamMember.delete({ where: { id } });
+  // Any sector planned for them falls back to the booking CID already stored.
+  await prisma.teamSectorAssignment?.updateMany({
+    where: { teamMemberId: id }, data: { teamMemberId: null }
+  }).catch(() => null);
+  console.log('[TEAM ROSTER] ' + teamName + ' removed non-VATSIM member #' + id);
+  return res.json({ success: true });
+});
+
 app.post('/api/team/members/:cid/perms', requireLogin, requireTeamManager, async (req, res) => {
   const targetCid = Number(req.params.cid);
   if (!targetCid) return res.status(400).json({ error: 'Invalid CID' });
@@ -21744,7 +21953,61 @@ const HQ_STYLES = `    <style>
 
 /* Shared members-page stylesheet — used by both /affiliates/my-members and
    /team/manage-members so the two surfaces stay identical. Pure CSS. */
-const MM_STYLES = `    <style>
+const MM_STYLES = `
+    <style>
+      /* Roster: nicknames and members with no VATSIM account. */
+      .mm-nick-btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        margin-left: 7px; padding: 2px; vertical-align: middle;
+        background: none; border: none; cursor: pointer;
+        color: var(--muted2); opacity: 0.6; transition: color .15s, opacity .15s;
+      }
+      .mm-nick-btn:hover { color: var(--accent); opacity: 1; }
+      /* Lit when a nickname is in use, so it is obvious which names are
+         overridden without opening each one. */
+      .mm-nick-btn.has-nick { color: var(--accent); opacity: 1; }
+      .mm-guest-row { background: color-mix(in srgb, var(--warning) 4%, transparent); }
+      .mm-guest-badge {
+        display: inline-block; margin-left: 6px; padding: 1px 7px;
+        border-radius: 999px; font-size: 10px; font-weight: 700;
+        background: rgba(245,158,11,0.15); color: var(--warning);
+      }
+      .mm-guest-cid { display: inline-flex; gap: 6px; align-items: center; }
+      .mm-guest-cid-input { width: 92px; }
+      .mm-guest-add {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 16px; flex-wrap: wrap; margin-top: 16px; padding: 14px 16px;
+        border: 1px dashed var(--border); border-radius: 10px;
+      }
+      .mm-guest-add-text strong { display: block; font-size: 13px; color: var(--text); }
+      .mm-guest-add-text span { font-size: 12px; color: var(--muted); }
+      .mm-guest-add-controls { display: flex; gap: 8px; align-items: center; }
+      .mm-guest-add-controls input {
+        width: 200px; padding: 6px 10px; font-size: 12px;
+        background: var(--panel2); color: var(--text);
+        border: 1px solid var(--border); border-radius: 6px;
+      }
+      .mm-add-choice { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+      .mm-add-opt {
+        display: flex; align-items: flex-start; gap: 10px; cursor: pointer;
+        padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+        background: var(--panel2); transition: border-color .15s;
+      }
+      .mm-add-opt:has(input:checked) { border-color: var(--accent); }
+      .mm-add-opt input { margin-top: 2px; }
+      .mm-add-opt strong { display: block; font-size: 13px; color: var(--text); }
+      .mm-add-opt em { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
+      .mm-add-field input {
+        width: 100%; margin-top: 4px; padding: 8px 10px; font-size: 13px;
+        background: var(--panel2); color: var(--text);
+        border: 1px solid var(--border); border-radius: 6px;
+      }
+      #mmNickModal .modal-dialog { width: 92vw; max-width: 380px; padding: 22px; }
+      #mmNickModal input {
+        width: 100%; margin-top: 4px; padding: 8px 10px; font-size: 13px;
+        background: var(--panel2); color: var(--text);
+        border: 1px solid var(--border); border-radius: 6px;
+      }
       .mm-wrap { width: 100%; max-width: 4400px; margin: 0 auto; }
       .mm-card { width: 100%; }
 
@@ -22179,7 +22442,15 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   // "WF Schedule / Flow" grant, and the admin read-only view keep the preview.
   const canPreviewFlow = readOnly || isSuperAdmin(cid) || hasAdminPageAccess(cid, 'wf-schedule');
   const showFlowInfo = canPreviewFlow || isPageEnabled('flow-restrictions');
-  const scheduleRows = showSchedule ? (adminSheetCache || []).filter(r => r.from && r.to && r.number) : [];
+  // Only the option this affiliate is on: an undecided leg has two, and the
+  // booking logic puts them on one of them.
+  // fleetCallsignSet already holds the fleet; add the affiliate's own callsign
+  // so a solo affiliate (empty fleet) still matches its bookings.
+  const _affCallsigns = new Set([...fleetCallsignSet,
+    String(affiliate?.callsign || '').toUpperCase()].filter(Boolean));
+  const scheduleRows = showSchedule
+    ? legOptionsVisibleTo((adminSheetCache || []).filter(r => r.from && r.to && r.number), 'affiliate', _affCallsigns)
+    : [];
 
   function timeWindow(hhmm) {
     const m = (hhmm || '').match(/^(\d{2}):?(\d{2})$/);
@@ -24229,9 +24500,15 @@ async function resolveUserTeamName(cid) {
 // Everything both team pages need. teamNameUpper is the uppercase key used on
 // UserAdditionalRole; OfficialTeam rows may be mixed case, so match loosely.
 async function loadTeamContext(teamNameUpper, viewerCid, sessionName) {
-  const [allTeams, allRoles] = await Promise.all([
+  const [allTeams, allRoles, rosterRows] = await Promise.all([
     prisma.officialTeam.findMany({ orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] }),
-    prisma.userAdditionalRole.findMany({ where: { role: 'WF_TEAM' } })
+    prisma.userAdditionalRole.findMany({ where: { role: 'WF_TEAM' } }),
+    // Guarded: the delegate is missing until the Prisma client is regenerated
+    // for the new model, and the team pages should still render without it.
+    prisma.teamMember?.findMany({
+      where: { teamName: teamNameUpper },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }]
+    }).catch(() => []) || []
   ]);
   const fleet = allTeams.filter(t => String(t.teamName || '').trim().toUpperCase() === teamNameUpper);
   const roles = allRoles.filter(r => String(r.teamName || '').trim().toUpperCase() === teamNameUpper);
@@ -24284,6 +24561,36 @@ async function loadTeamContext(teamNameUpper, viewerCid, sessionName) {
     }
   }
 
+  // A nickname replaces the resolved name wherever the member appears. It is
+  // written into nameByCid so every consumer of this context picks it up
+  // without each page having to know about nicknames.
+  const roster = Array.isArray(rosterRows) ? rosterRows : [];
+  const rosterByCid = {};
+  for (const row of roster) {
+    if (row.cid == null) continue;
+    rosterByCid[Number(row.cid)] = row;
+    const nick = String(row.nickname || '').trim();
+    if (nick) nameByCid[Number(row.cid)] = nick;
+  }
+
+  // Roster members with no VATSIM account yet. They hold no WF_TEAM role and
+  // cannot log in; they exist so the team can plan around them.
+  const guests = roster
+    .filter(row => row.cid == null)
+    .map(row => {
+      const name = String(row.nickname || row.displayName || '').trim();
+      return {
+        id: row.id,
+        cid: null,
+        name: name || 'Unnamed member',
+        label: name || 'Unnamed member',
+        displayName: row.displayName || '',
+        nickname: row.nickname || '',
+        isOwner: false,
+        isGuest: true
+      };
+    });
+
   // name is '' when unknown — callers show the CID alone rather than a
   // placeholder that would read as "CID 123 · 123" next to the CID column.
   const members = allCids.map(c => {
@@ -24293,11 +24600,14 @@ async function loadTeamContext(teamNameUpper, viewerCid, sessionName) {
       name,
       label: name ? `${name} · ${c}` : String(c),
       isOwner: ownerCids.has(c),
+      isGuest: false,
+      teamMemberId: rosterByCid[c]?.id || null,
+      nickname: rosterByCid[c]?.nickname || '',
       perms: permsByCid[c] || { canEditBookings: true, canManageMembers: false, participating: true }
     };
   }).sort((a, b) => (a.isOwner !== b.isOwner ? (a.isOwner ? -1 : 1) : (a.name || String(a.cid)).localeCompare(b.name || String(b.cid))));
 
-  return { fleet, primary, displayName, ownerCids, memberCids, members, nameByCid, permsByCid };
+  return { fleet, primary, displayName, ownerCids, memberCids, members, guests, roster, rosterByCid, nameByCid, permsByCid };
 }
 
 // The WF Team charter, shown on every team's HQ.
@@ -24411,7 +24721,9 @@ app.get('/team/hq', requireLogin, async (req, res) => {
     const p = String(b.slotKey).split('|');
     teamBookingBySector[`${p[0]}|${p[1]}|${p[2]}`] = b;
   });
-  const sectorRows = (adminSheetCache || []).filter(r => r.number).map(r => ({
+  // Only the option this team is on - see legOptionsVisibleTo().
+  const teamLegRows = legOptionsVisibleTo((adminSheetCache || []).filter(r => r.number), 'team', teamCallsigns);
+  const sectorRows = teamLegRows.map(r => ({
     wfRow: r,
     sector: r.number,
     b: teamBookingBySector[`${r.from}-${r.to}|${r.date_utc}|${r.dep_time_utc}`] || null
@@ -24497,7 +24809,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                 </tr>
               </thead>
               <tbody>
-                ${(adminSheetCache || []).filter(r => r.number).map(r => {
+                ${teamLegRows.map(r => {
                   const flow = getFlowRestriction(r);
                   const restricted = (sharedFlowTypes[`${r.from}-${r.to}`] || 'NONE') !== 'NONE';
                   const assignedRoute = teamAssignedRoute(r);
@@ -25301,12 +25613,27 @@ app.post('/api/team/roster/assign', requireLogin, async (req, res) => {
         where: { entityType: 'team', entityName: teamNameUpper, sectorNumber, role }
       });
     } else {
-      const targetCid = Number(assignCid);
-      if (!Number.isFinite(targetCid)) return res.status(400).json({ error: 'Invalid CID' });
+      // "g:<id>" is a roster member with no VATSIM account. They can hold any
+      // crew role - the roster is not tied to slots - so the seat records the
+      // roster row instead of a CID.
+      const guestMatch = /^g:(\d+)$/.exec(String(assignCid).trim());
+      let seat;
+      if (guestMatch) {
+        const memberId = Number(guestMatch[1]);
+        const row = await prisma.teamMember?.findUnique({ where: { id: memberId } }).catch(() => null);
+        if (!row || row.teamName !== teamNameUpper) {
+          return res.status(404).json({ error: 'That member is not on your team.' });
+        }
+        seat = { cid: null, teamMemberId: memberId };
+      } else {
+        const targetCid = Number(assignCid);
+        if (!Number.isFinite(targetCid)) return res.status(400).json({ error: 'Invalid CID' });
+        seat = { cid: targetCid, teamMemberId: null };
+      }
       await prisma.rosterAssignment.upsert({
         where: { entityType_entityName_sectorNumber_role: { entityType: 'team', entityName: teamNameUpper, sectorNumber, role } },
-        update: { cid: targetCid, updatedAt: new Date() },
-        create: { entityType: 'team', entityName: teamNameUpper, sectorNumber, role, cid: targetCid }
+        update: { ...seat, updatedAt: new Date() },
+        create: { entityType: 'team', entityName: teamNameUpper, sectorNumber, role, ...seat }
       });
     }
     res.json({ success: true });
@@ -25316,17 +25643,20 @@ app.post('/api/team/roster/assign', requireLogin, async (req, res) => {
 });
 
 // Public roster JSON API
-app.get('/api/roster/:slug.json', async (req, res) => {
-  const slug = String(req.params.slug || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (!slug) return res.status(400).json({ error: 'Invalid team slug' });
+/* ===== PUBLIC ROSTER =====
+   One assembly used by both the JSON feed and the public page, so the two
+   cannot drift. Returns null when the slug matches no team, or that team
+   has not enabled its roster. No login: a team's roster is theirs to
+   publish, and both surfaces are read-only. */
+async function buildPublicRoster(slugRaw) {
+  const slug = String(slugRaw || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!slug) return null;
 
   const allTeams = await prisma.officialTeam.findMany().catch(() => []);
   const match = allTeams.find(t => String(t.teamName || '').toLowerCase().replace(/[^a-z0-9]+/g, '') === slug);
-  if (!match) return res.status(404).json({ error: 'Team not found' });
-  if (!match.rosterEnabled) return res.status(404).json({ error: 'Roster not enabled for this team' });
+  if (!match || !match.rosterEnabled) return null;
 
   const teamNameUpper = String(match.teamName).trim().toUpperCase();
-
   const [config, assignments, users] = await Promise.all([
     prisma.rosterConfig.findUnique({
       where: { entityType_entityName: { entityType: 'team', entityName: teamNameUpper } }
@@ -25341,10 +25671,22 @@ app.get('/api/roster/:slug.json', async (req, res) => {
   const nameByCid = {};
   users.forEach(u => { if (u.name) nameByCid[u.cid] = u.name; });
 
+  // A nickname replaces the shown name here too, and a seat may belong to a
+  // roster member with no VATSIM account at all.
+  const roster = await prisma.teamMember?.findMany({ where: { teamName: teamNameUpper } }).catch(() => []) || [];
+  const guestNameById = {};
+  roster.forEach(r => {
+    const nick = String(r.nickname || '').trim();
+    if (r.cid != null) { if (nick) nameByCid[Number(r.cid)] = nick; return; }
+    guestNameById[r.id] = nick || String(r.displayName || '').trim() || null;
+  });
+
   const assignMap = {};
   assignments.forEach(a => {
     if (!assignMap[a.sectorNumber]) assignMap[a.sectorNumber] = {};
-    assignMap[a.sectorNumber][a.role] = { cid: a.cid, name: nameByCid[a.cid] || null };
+    assignMap[a.sectorNumber][a.role] = a.teamMemberId
+      ? { cid: null, name: guestNameById[a.teamMemberId] || null }
+      : { cid: a.cid, name: nameByCid[a.cid] || null };
   });
 
   const enabledRoles = ['captain'];
@@ -25352,11 +25694,9 @@ app.get('/api/roster/:slug.json', async (req, res) => {
   if (cfg.feEnabled) enabledRoles.push('fe');
   if (cfg.obs1Enabled) enabledRoles.push('obs1');
   if (cfg.obs2Enabled) enabledRoles.push('obs2');
-
   const roleLabels = { captain: 'Captain', fo: 'First Officer', fe: cfg.feLabel || 'Flight Engineer', obs1: 'Observer 1', obs2: 'Observer 2' };
 
-  const scheduleRows = adminSheetCache || [];
-  const sectors = scheduleRows.map(r => {
+  const sectors = (adminSheetCache || []).map(r => {
     const crew = {};
     for (const role of enabledRoles) {
       const a = assignMap[r.number]?.[role];
@@ -25369,21 +25709,151 @@ app.get('/api/roster/:slug.json', async (req, res) => {
       dateUtc: windowOpenDate(r.date_utc, r.dep_time_utc),
       depWindow: r.dep_time_utc ? subtractMinutes(r.dep_time_utc, 60) + '-' + addMinutes(r.dep_time_utc, 60) + 'z' : null,
       arrWindow: r.arr_time_utc ? subtractMinutes(r.arr_time_utc, 60) + '-' + addMinutes(r.arr_time_utc, 60) + 'z' : null,
+      // UTC instants for the window edges. The public page uses them to
+      // re-render in the viewer's timezone; API consumers get them too.
+      depStartMs: utcInstantMs(r.date_utc, r.dep_time_utc, -60),
+      depEndMs: utcInstantMs(r.date_utc, r.dep_time_utc, 60),
+      arrStartMs: utcInstantMs(r.date_utc, r.arr_time_utc, -60),
+      arrEndMs: utcInstantMs(r.date_utc, r.arr_time_utc, 60),
       crew
     };
   });
 
-  res.setHeader('Cache-Control', 'public, max-age=30');
-  res.json({
+  return {
     team: match.teamName,
+    slug,
     generatedAt: new Date().toISOString(),
     roles: enabledRoles.map(r => roleLabels[r]),
     sectors
-  });
+  };
+}
+
+app.get('/api/roster/:slug.json', async (req, res) => {
+  const data = await buildPublicRoster(req.params.slug);
+  if (!data) return res.status(404).json({ error: 'Roster not found' });
+  res.setHeader('Cache-Control', 'public, max-age=30');
+  // Readable from another site: that is the point of publishing it.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const { slug, ...body } = data;
+  res.json(body);
 });
 
-// Main CID (or admin) edits the team's public profile. Applied to EVERY
-// OfficialTeam row of the team so all its fleet cards on /teams stay in sync.
+// The same roster as a page anyone can open or embed. No login, read-only.
+// ?embed=1 drops the heading so it sits cleanly in an iframe.
+app.get('/roster/:slug', async (req, res) => {
+  const data = await buildPublicRoster(req.params.slug);
+  const embed = req.query.embed === '1' || req.query.embed === 'true';
+  if (!data) {
+    return res.status(404).send(publicRosterHtml(null, embed, ''));
+  }
+  res.setHeader('Cache-Control', 'public, max-age=30');
+  res.send(publicRosterHtml(data, embed, String(req.query.theme || '')));
+});
+
+// Self-contained: its own styles, no nav, nothing that needs a session. It
+// has to render correctly inside someone else's page.
+function publicRosterHtml(data, embed, theme) {
+  const light = String(theme).toLowerCase() === 'light';
+  const esc = (v) => escapeHtml(String(v == null ? '' : v));
+  const head = data
+    ? `<h1>${esc(data.team)} <span>Crew Roster</span></h1><p class="sub">WorldFlight sectors and who is flying them.</p>`
+    : '';
+
+  const body = !data
+    ? `<div class="empty"><strong>Roster not available</strong><span>This team has not published a crew roster.</span></div>`
+    : !data.sectors.length
+      ? `<div class="empty"><strong>No sectors yet</strong><span>The schedule has not been published.</span></div>`
+      : `<table>
+          <thead><tr>
+            <th>Sector</th><th>Route</th><th>Date</th><th>Dep</th>
+            ${data.roles.map(r => `<th>${esc(r)}</th>`).join('')}
+          </tr></thead>
+          <tbody>
+            ${data.sectors.map(s => `<tr>
+              <td class="wf">${esc(s.sector)}</td>
+              <td class="route">${esc(s.from)} <span class="arrow">\u2192</span> ${esc(s.to)}</td>
+              <td class="muted">${tzSpanHtml(esc(s.dateUtc || ''), 'date', s.depStartMs, null)}</td>
+              <td class="muted mono">${s.depWindow ? tzSpanHtml(esc(s.depWindow), 'window', s.depStartMs, s.depEndMs) : '\u2014'}</td>
+              ${data.roles.map(role => {
+                const c = s.crew[role];
+                if (!c || (!c.name && !c.cid)) return '<td class="muted">\u2014</td>';
+                const who = c.name || String(c.cid);
+                return `<td>${esc(who)}${c.cid ? `<span class="cid">${esc(c.cid)}</span>` : ''}</td>`;
+              }).join('')}
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+
+  return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${data ? esc(data.team) + ' \u2014 Crew Roster' : 'Crew Roster'}</title>
+<meta name="robots" content="index, follow" />
+<style>
+  :root {
+    --bg: ${light ? '#ffffff' : '#0b1220'};
+    --panel: ${light ? '#f8fafc' : '#111827'};
+    --text: ${light ? '#0f172a' : '#e5e7eb'};
+    --muted: ${light ? '#64748b' : '#94a3b8'};
+    --border: ${light ? '#e2e8f0' : '#1f2937'};
+    --accent: ${light ? '#2563eb' : '#38bdf8'};
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: ${embed ? '12px' : '28px 20px'};
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 20px; font-weight: 700; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .sub { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+  .scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); }
+  th, td { padding: 9px 12px; text-align: left; white-space: nowrap; }
+  th {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+    color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 700;
+  }
+  tbody tr + tr td { border-top: 1px solid var(--border); }
+  .wf { font-weight: 700; color: var(--accent); }
+  .route { font-weight: 600; }
+  .arrow { color: var(--muted); }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .cid { margin-left: 6px; font-size: 11px; color: var(--muted); }
+  .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+  .empty strong { display: block; color: var(--text); margin-bottom: 4px; }
+  .foot { margin-top: 12px; font-size: 11px; color: var(--muted); }
+  .foot a { color: var(--accent); }
+  .tzbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tznote { font-size: 12px; color: var(--muted); }
+  .sched-tz-select {
+    padding: 6px 10px; font-size: 12px; max-width: 320px;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  /* The picker adds this once a cell has been converted. */
+  .tz-local { color: var(--text); }
+  /* Class names the picker script applies to a converted cell. */
+  .tz-time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .tz-abbr { margin-left: 5px; font-size: 10px; color: var(--muted); }
+</style></head><body><div class="wrap">
+  ${embed ? '' : head}
+  ${data ? `<div class="tzbar">
+    <span class="tznote">All times are in UTC</span>
+    ${TZ_SELECT_HTML}
+  </div>` : ''}
+  <div class="scroll">${body}</div>
+  <p class="foot">
+    ${data ? 'Updated ' + esc(new Date(data.generatedAt).toUTCString()) + ' \u00b7 ' : ''}
+    <a href="https://planning.worldflight.center" target="_blank" rel="noopener">WorldFlight Planning</a>
+  </p>
+</div>
+${data ? TZ_PICKER_SCRIPT : ''}
+</body></html>`;
+}
 app.post('/api/team/hq/profile', requireLogin, (req, res, next) => {
   profilePhotoUpload.single('photo')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Photo must be under 5 MB' : 'Upload failed: ' + err.message });
@@ -25737,14 +26207,17 @@ app.get('/team/roster', requireLogin, async (req, res) => {
   if (!teamNameUpper) return renderForbidden(req, res, 'No team linked to your account.');
 
   const ctx = await loadTeamContext(teamNameUpper, cid, user?.personal?.name_full);
-  const { fleet, primary, displayName, ownerCids, members } = ctx;
+  const { fleet, primary, displayName, ownerCids, members, guests } = ctx;
 
   if (!primary?.rosterEnabled) {
     return res.redirect('/team/hq');
   }
 
   const isMainHolder = ownerCids.has(cid);
-  const scheduleRows = adminSheetCache || [];
+  // Only the option this team is on, so the crew roster does not list both
+  // halves of an undecided leg.
+  const _rosterCallsigns = new Set((fleet || []).map(t => String(t.callsign || '').toUpperCase()).filter(Boolean));
+  const scheduleRows = legOptionsVisibleTo(adminSheetCache || [], 'team', _rosterCallsigns);
   const showSchedule = isPageVisibleTo('schedule', isAdmin);
 
   function timeWindow(hhmm) {
@@ -25768,7 +26241,11 @@ app.get('/team/roster', requireLogin, async (req, res) => {
     where: { entityType: 'team', entityName: teamNameUpper }
   }).catch(() => []);
   const assignMap = {};
-  assignments.forEach(a => { assignMap[a.sectorNumber + '|' + a.role] = a.cid; });
+  // Matches the option values above: a CID, or "g:<id>" for a roster member
+  // with no account.
+  assignments.forEach(a => {
+    assignMap[a.sectorNumber + '|' + a.role] = a.teamMemberId ? ('g:' + a.teamMemberId) : a.cid;
+  });
 
   // Build role columns
   const roles = [{ key: 'captain', label: 'Captain', enabled: true }];
@@ -25777,8 +26254,21 @@ app.get('/team/roster', requireLogin, async (req, res) => {
   if (rosterConfig.obs1Enabled) roles.push({ key: 'obs1', label: 'Observer 1', enabled: true });
   if (rosterConfig.obs2Enabled) roles.push({ key: 'obs2', label: 'Observer 2', enabled: true });
 
+  // The team slug the public roster and its JSON feed are published under.
+  const rosterSlug = encodeURIComponent(displayName.toLowerCase().replace(/[^a-z0-9]+/g, ''));
+
+  // Roster-only members sit alongside the CID members here. Their value is
+  // "g:<id>" because they have no CID to identify them by.
+  // Everything a team needs to put this roster on their own site. The host
+  // is taken from the request so the snippets are copy-pasteable as shown.
+  const rosterOrigin = `${req.protocol}://${req.get('host')}`;
+  const rosterPageUrl = `${rosterOrigin}/roster/${rosterSlug}`;
+  const rosterJsonUrl = `${rosterOrigin}/api/roster/${rosterSlug}.json`;
+
   const memberOptsHtml = members
     .map(m => '<option value="' + m.cid + '">' + escapeHtml(m.name ? m.name + ' \u00b7 ' + m.cid : String(m.cid)) + '</option>')
+    .concat((guests || []).map(g =>
+      '<option value="g:' + g.id + '">' + escapeHtml(g.name) + ' \u00b7 no CID</option>'))
     .join('');
 
   // Config section (main CID only)
@@ -25788,7 +26278,9 @@ app.get('/team/roster', requireLogin, async (req, res) => {
         <h3 style="margin:0;color:var(--accent);font-size:15px;">Roster Configuration</h3>
         <div style="display:flex;align-items:center;gap:10px;">
           <span id="rosterConfigMsg" style="font-size:12px;display:none;"></span>
-          <a href="/api/roster/${encodeURIComponent(displayName.toLowerCase().replace(/[^a-z0-9]+/g, ''))}.json" target="_blank" rel="noopener" class="action-btn" style="font-size:11px;padding:5px 14px;text-decoration:none;" title="Live JSON feed of your crew roster.&#10;&#10;Use it to display your roster data on your own website or tools.">Roster API ?</a>
+          <a href="/api/roster/${rosterSlug}.json" target="_blank" rel="noopener" class="action-btn" style="font-size:11px;padding:5px 14px;text-decoration:none;" title="Live JSON feed of your crew roster.&#10;&#10;Use it to display your roster data on your own website or tools.">Roster API ?</a>
+          <button type="button" id="rosterEmbedBtn" class="action-btn" style="font-size:11px;padding:5px 14px;" title="How to put this roster on your own website">Integration instructions</button>
+          <a href="/roster/${rosterSlug}" target="_blank" rel="noopener" class="action-btn" style="font-size:11px;padding:5px 14px;text-decoration:none;" title="A read-only page anyone can open — no login needed.&#10;&#10;Share it with your members or link it from your site.">Public Roster Page</a>
         </div>
       </div>
       <form id="rosterConfigForm" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
@@ -25868,6 +26360,63 @@ app.get('/team/roster', requireLogin, async (req, res) => {
       ${scheduleHtml}
     </div>
 
+    <div id="rosterEmbedModal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog" style="width:94vw;max-width:680px;padding:24px;max-height:86vh;overflow-y:auto;">
+        <h3 style="margin:0 0 4px;">Put your roster on your website</h3>
+        <p style="margin:0 0 18px;color:var(--muted);font-size:13px;">Three ways to share it. All are read-only and need no login, and they update themselves as you edit the roster here.</p>
+
+        <div class="embed-block">
+          <div class="embed-head"><strong>1. Share a link</strong><span>Simplest \u2014 send it to your members.</span></div>
+          <div class="embed-row"><pre id="embedLink">${rosterPageUrl}</pre><button type="button" class="ot-btn embed-copy" data-target="embedLink">Copy</button></div>
+        </div>
+
+        <div class="embed-block">
+          <div class="embed-head"><strong>2. Embed it in a page</strong><span>Drops the heading and fits your layout. Add <code>&amp;theme=light</code> for a light background.</span></div>
+          <div class="embed-row"><pre id="embedIframe">&lt;iframe src="${rosterPageUrl}?embed=1"
+        width="100%" height="520" style="border:0;" loading="lazy"
+        title="${escapeHtml(displayName)} crew roster"&gt;&lt;/iframe&gt;</pre><button type="button" class="ot-btn embed-copy" data-target="embedIframe">Copy</button></div>
+        </div>
+
+        <div class="embed-block">
+          <div class="embed-head"><strong>3. Build your own from the JSON</strong><span>Full control over the markup. The feed allows cross-origin requests.</span></div>
+          <div class="embed-row"><pre id="embedJson">fetch('${rosterJsonUrl}')
+  .then(r =&gt; r.json())
+  .then(data =&gt; {
+    // data.team, data.roles, data.sectors
+    data.sectors.forEach(s =&gt; {
+      console.log(s.sector, s.from + '\\u2192' + s.to, s.crew);
+    });
+  });</pre><button type="button" class="ot-btn embed-copy" data-target="embedJson">Copy</button></div>
+        </div>
+
+        <p style="margin:14px 0 0;color:var(--muted2);font-size:11px;line-height:1.6;">Each sector carries <code>sector</code>, <code>from</code>, <code>to</code>, <code>dateUtc</code>, <code>depWindow</code>, <code>arrWindow</code> and a <code>crew</code> object keyed by role name. A crew member has a <code>name</code>, and a <code>cid</code> when they have a VATSIM account.</p>
+
+        <div class="modal-actions" style="margin-top:18px;">
+          <button type="button" class="modal-btn modal-btn-cancel" id="rosterEmbedClose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      .embed-block + .embed-block { margin-top: 16px; }
+      .embed-head strong { display: block; font-size: 13px; color: var(--text); }
+      .embed-head span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 7px; }
+      .embed-head code, .modal-dialog p code {
+        background: var(--panel2); border: 1px solid var(--border);
+        border-radius: 4px; padding: 0 4px; font-size: 11px;
+      }
+      .embed-row { display: flex; align-items: flex-start; gap: 8px; }
+      .embed-row pre {
+        flex: 1 1 auto; min-width: 0; margin: 0;
+        padding: 10px 12px; background: #0f172a; color: #e5e7eb;
+        border: 1px solid #1e293b; border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+      }
+      .embed-copy { flex: 0 0 auto; font-size: 11px; padding: 5px 12px; }
+    </style>
+
     <script>
     (function() {
       // Config live-save on any checkbox/select change
@@ -25934,8 +26483,35 @@ app.get('/team/roster', requireLogin, async (req, res) => {
           alert('Failed to save');
         }
       });
+
+      // --- Integration instructions ---
+      var embedBtn = document.getElementById('rosterEmbedBtn');
+      var embedModal = document.getElementById('rosterEmbedModal');
+      if (embedBtn && embedModal) {
+        function closeEmbed() { embedModal.classList.add('hidden'); }
+        embedBtn.addEventListener('click', function () { embedModal.classList.remove('hidden'); });
+        embedModal.addEventListener('click', function (e) {
+          if (e.target.closest('.modal-backdrop') || e.target.closest('#rosterEmbedClose')) closeEmbed();
+        });
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape' && !embedModal.classList.contains('hidden')) closeEmbed();
+        });
+        // Copy buttons on each snippet.
+        embedModal.addEventListener('click', function (e) {
+          var b = e.target.closest('.embed-copy');
+          if (!b) return;
+          var pre = document.getElementById(b.dataset.target);
+          if (!pre) return;
+          navigator.clipboard.writeText(pre.textContent.trim()).then(function () {
+            var prev = b.textContent;
+            b.textContent = 'Copied';
+            setTimeout(function () { b.textContent = prev; }, 1400);
+          }).catch(function () {});
+        });
+      }
     })();
     </script>
+
   `;
 
   res.send(renderLayout({ title: 'Crew Roster', user, isAdmin, content, layoutClass: 'dashboard-full' }));
@@ -25953,7 +26529,7 @@ app.get('/team/manage-members', requireLogin, async (req, res) => {
   if (!teamNameUpper) return renderForbidden(req, res, 'Your team is not linked.');
 
   const ctx = await loadTeamContext(teamNameUpper, cid, user?.personal?.name_full);
-  const { displayName, members, fleet } = ctx;
+  const { displayName, members, guests, fleet } = ctx;
   const activeCallsigns = fleet.filter(t => t.participatingWf26).map(t => String(t.callsign || '').toUpperCase());
   const discordCids = await discordPresenceCids();
 
@@ -25974,7 +26550,7 @@ app.get('/team/manage-members', requireLogin, async (req, res) => {
             ${activeCallsigns.map(c => `<span class="ot-cell-actype">${escapeHtml(c)}</span>`).join('')}
             <span class="mm-count">${members.length} member${members.length === 1 ? '' : 's'}</span>
           </div>
-          ${mmAddRow(' id="teamAddCid"', ' id="teamAddBtn"')}
+          <button type="button" class="ot-btn mm-add-btn" id="teamAddBtn">Add Member</button>
         </div>
         <div id="teamMemberMsg" style="display:none;font-size:12px;margin:0 0 10px;"></div>
 
@@ -25993,7 +26569,7 @@ app.get('/team/manage-members', requireLogin, async (req, res) => {
             <tbody>
               ${members.map(m => `
                 <tr data-cid="${m.cid}"${!m.perms.participating ? ' class="mm-inactive-row"' : ''}>
-                  <td class="ot-cell-name">${escapeHtml(m.name || '—')}${m.isOwner ? ' <span class="aff-main-badge">Main</span>' : ''}</td>
+                  <td class="ot-cell-name">${escapeHtml(m.name || '\u2014')}${m.isOwner ? ' <span class="aff-main-badge">Main</span>' : ''}<button type="button" class="mm-nick-btn${m.nickname ? ' has-nick' : ''}" data-cid="${m.cid}" data-nick="${escapeHtml(m.nickname || '')}" data-who="${escapeHtml(m.name || String(m.cid))}" title="Set a nickname"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></td>
                   <td class="ot-cell-cid">${m.cid}${discordCids && !discordCids.has(Number(m.cid)) ? ` <span class="mm-no-discord" title="Member has not joined the WorldFlight Discord">&#9888;</span><button type="button" class="mm-copy-invite" title="Copy the Discord invite link to send to them">Copy invite</button>` : ''}</td>
                   <td class="ot-cell-active">
                     <input type="checkbox" class="wf-check team-perm" data-cid="${m.cid}" data-perm="participating" ${m.perms.participating ? 'checked' : ''} ${m.isOwner ? 'disabled title="Managed by Admins"' : ''} />
@@ -26009,8 +26585,19 @@ app.get('/team/manage-members', requireLogin, async (req, res) => {
                       : `<button class="ot-btn ot-btn-danger team-remove-btn" data-cid="${m.cid}" data-name="${escapeHtml(m.name || String(m.cid))}">Remove</button>`}
                   </td>
                 </tr>`).join('')}
+              ${(guests || []).map(g => `
+                <tr data-member-id="${g.id}" class="mm-guest-row">
+                  <td class="ot-cell-name">${escapeHtml(g.name)} <span class="mm-guest-badge" title="No VATSIM account linked yet">No CID</span><button type="button" class="mm-nick-btn${g.nickname ? ' has-nick' : ''}" data-member-id="${g.id}" data-nick="${escapeHtml(g.nickname || '')}" data-who="${escapeHtml(g.displayName || g.name)}" title="Set a nickname"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></td>
+                  <td class="ot-cell-cid"><span class="mm-guest-cid"><input type="text" class="mm-cid-input mm-guest-cid-input" data-member-id="${g.id}" placeholder="Add CID" maxlength="9" /><button type="button" class="ot-btn mm-guest-cid-btn" data-member-id="${g.id}">Link</button></span></td>
+                  <td class="ot-cell-active"><span class="ot-muted" style="font-size:11px;">—</span></td>
+                  <td class="ot-cell-active"><span class="ot-muted" style="font-size:11px;">—</span></td>
+                  <td class="ot-cell-active"><span class="ot-muted" style="font-size:11px;">—</span></td>
+                  <td class="ot-cell-actions"><button class="ot-btn ot-btn-danger mm-guest-remove" data-member-id="${g.id}" data-name="${escapeHtml(g.displayName || g.name)}">Remove</button></td>
+                </tr>`).join('')}
             </tbody>
           </table>
+        </div>
+
         </div>
       </section>
     </div>
@@ -26018,6 +26605,57 @@ app.get('/team/manage-members', requireLogin, async (req, res) => {
     ${HQ_STYLES}
     ${MM_STYLES}
 
+    <div id="mmNickModal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog">
+        <h3 style="margin:0 0 4px;">Nickname</h3>
+        <p style="margin:0 0 14px;color:var(--muted);font-size:12px;line-height:1.5;">Shown instead of <strong id="mmNickWho"></strong> everywhere on the site. Leave it empty to go back to their real name.</p>
+        <label style="display:block;font-size:12px;color:var(--muted);">Nickname
+          <input type="text" id="mmNickInput" maxlength="60" placeholder="e.g. Tracy" />
+        </label>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" class="modal-btn modal-btn-cancel" id="mmNickClear">Clear</button>
+          <button type="button" class="modal-btn modal-btn-cancel" id="mmNickCancel">Cancel</button>
+          <button type="button" class="modal-btn modal-btn-submit" id="mmNickSave">Save</button>
+        </div>
+      </div>
+    </div>
+    <div id="mmAddModal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog" style="width:92vw;max-width:440px;padding:22px;">
+        <h3 style="margin:0 0 4px;">Add Member</h3>
+        <p style="margin:0 0 16px;color:var(--muted);font-size:12px;line-height:1.5;">Adding a CID grants that person <strong>WF Team</strong> access to your HQ.</p>
+
+        <div class="mm-add-choice">
+          <label class="mm-add-opt">
+            <input type="radio" name="mmAddType" value="vatsim" checked />
+            <span><strong>VATSIM member</strong><em>They have a CID and can log in.</em></span>
+          </label>
+          <label class="mm-add-opt">
+            <input type="radio" name="mmAddType" value="guest" />
+            <span><strong>Non-VATSIM member</strong><em>Roster only. A CID can be linked later.</em></span>
+          </label>
+        </div>
+
+        <div id="mmAddVatsim" class="mm-add-field">
+          <label style="display:block;font-size:12px;color:var(--muted);">VATSIM CID
+            <input type="text" id="mmAddCid" class="mm-cid-input" inputmode="numeric" pattern="[0-9]*" maxlength="9" autocomplete="off" placeholder="Enter CID" />
+          </label>
+        </div>
+        <div id="mmAddGuest" class="mm-add-field" hidden>
+          <label style="display:block;font-size:12px;color:var(--muted);">Full name
+            <input type="text" id="mmAddName" maxlength="80" autocomplete="off" placeholder="e.g. Tracy Shiffman" />
+          </label>
+        </div>
+
+        <div id="mmAddMsg" style="display:none;font-size:12px;margin-top:10px;"></div>
+
+        <div class="modal-actions" style="margin-top:18px;">
+          <button type="button" class="modal-btn modal-btn-cancel" id="mmAddCancel">Cancel</button>
+          <button type="button" class="modal-btn modal-btn-submit" id="mmAddSave">Add Member</button>
+        </div>
+      </div>
+    </div>
     <script>
       (function() {
         var msg = document.getElementById('teamMemberMsg');
@@ -26026,6 +26664,88 @@ app.get('/team/manage-members', requireLogin, async (req, res) => {
           msg.style.color = ok ? '#4ade80' : '#f87171';
           msg.style.display = '';
         }
+
+        // --- Nickname popup. The nickname replaces the shown name everywhere,
+        // --- so the page reloads once it is saved.
+        var nickModal = document.getElementById('mmNickModal');
+        var nickInput = document.getElementById('mmNickInput');
+        var nickWho = document.getElementById('mmNickWho');
+        var nickTarget = null;
+        function closeNick() { nickModal.classList.add('hidden'); nickTarget = null; }
+
+        document.addEventListener('click', function (e) {
+          var b = e.target.closest && e.target.closest('.mm-nick-btn');
+          if (!b || !nickModal) return;
+          nickTarget = b;
+          nickWho.textContent = b.dataset.who || '';
+          nickInput.value = b.dataset.nick || '';
+          nickModal.classList.remove('hidden');
+          setTimeout(function () { nickInput.focus(); nickInput.select(); }, 50);
+        });
+
+        async function saveNick(value) {
+          if (!nickTarget) return;
+          var body = { nickname: value };
+          if (nickTarget.dataset.memberId) body.id = Number(nickTarget.dataset.memberId);
+          else body.cid = Number(nickTarget.dataset.cid);
+          try {
+            var r = await fetch('/api/team/members/nickname', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify(body)
+            });
+            var d = await r.json().catch(function () { return {}; });
+            if (!r.ok) { show(d.error || 'Could not save the nickname.', false); closeNick(); return; }
+            location.reload();
+          } catch (err) { show('Could not save the nickname.', false); closeNick(); }
+        }
+
+        if (nickModal) {
+          document.getElementById('mmNickSave').addEventListener('click', function () { saveNick(nickInput.value.trim()); });
+          document.getElementById('mmNickClear').addEventListener('click', function () { saveNick(''); });
+          document.getElementById('mmNickCancel').addEventListener('click', closeNick);
+          nickModal.querySelector('.modal-backdrop').addEventListener('click', closeNick);
+          nickInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); saveNick(nickInput.value.trim()); }
+            if (e.key === 'Escape') closeNick();
+          });
+        }
+        // --- Link a CID to a member who did not have one. This grants access.
+        document.addEventListener('click', async function (e) {
+          var btn = e.target.closest && e.target.closest('.mm-guest-cid-btn');
+          if (!btn) return;
+          var id = btn.dataset.memberId;
+          var field = document.querySelector('.mm-guest-cid-input[data-member-id="' + id + '"]');
+          var val = Number((field.value || '').trim());
+          if (!val) { show('Enter their VATSIM CID.', false); field.focus(); return; }
+          btn.disabled = true;
+          try {
+            var r = await fetch('/api/team/members/' + id + '/cid', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ cid: val })
+            });
+            var d = await r.json().catch(function () { return {}; });
+            if (!r.ok) { show(d.error || 'Could not link that CID.', false); btn.disabled = false; return; }
+            location.reload();
+          } catch (err) { show('Could not link that CID.', false); btn.disabled = false; }
+        });
+
+        // --- Remove a member who has no CID.
+        document.addEventListener('click', async function (e) {
+          var btn = e.target.closest && e.target.closest('.mm-guest-remove');
+          if (!btn) return;
+          var ok = await openConfirmModal({ title: 'Remove Member', message: 'Remove ' + btn.dataset.name + ' from the team?' });
+          if (!ok) return;
+          var r = await fetch('/api/team/members/guest/' + btn.dataset.memberId, {
+            method: 'DELETE', credentials: 'same-origin'
+          });
+          var d = await r.json().catch(function () { return {}; });
+          if (!r.ok) { show(d.error || 'Could not remove that member.', false); return; }
+          location.reload();
+        });
 
         // Digits only — the field is type=text so it renders without spinners
         document.addEventListener('input', function(e) {
@@ -26059,23 +26779,82 @@ app.get('/team/manage-members', requireLogin, async (req, res) => {
           }
         });
 
-        document.getElementById('teamAddBtn').addEventListener('click', async function() {
-          var input = document.getElementById('teamAddCid');
-          var cid = Number(input.value);
-          if (!cid) { show('Enter a valid CID', false); return; }
+        // --- Add Member. One button for both kinds: a VATSIM member, who
+        // --- gets WF Team access, or a roster-only member with no account.
+        var addModal = document.getElementById('mmAddModal');
+        var addMsg = document.getElementById('mmAddMsg');
+        var addSave = document.getElementById('mmAddSave');
+        function addType() {
+          var r = addModal.querySelector('input[name="mmAddType"]:checked');
+          return r ? r.value : 'vatsim';
+        }
+        function syncAddFields() {
+          var guest = addType() === 'guest';
+          document.getElementById('mmAddVatsim').hidden = guest;
+          document.getElementById('mmAddGuest').hidden = !guest;
+          addMsg.style.display = 'none';
+          setTimeout(function () {
+            document.getElementById(guest ? 'mmAddName' : 'mmAddCid').focus();
+          }, 50);
+        }
+        function closeAdd() {
+          addModal.classList.add('hidden');
+          addMsg.style.display = 'none';
+          addSave.disabled = false;
+        }
+        function addErr(text) {
+          addMsg.textContent = text;
+          addMsg.style.color = '#f87171';
+          addMsg.style.display = '';
+          addSave.disabled = false;
+        }
+
+        document.getElementById('teamAddBtn').addEventListener('click', function () {
+          document.getElementById('mmAddCid').value = '';
+          document.getElementById('mmAddName').value = '';
+          addModal.querySelector('input[value="vatsim"]').checked = true;
+          addModal.classList.remove('hidden');
+          syncAddFields();
+        });
+        addModal.addEventListener('change', function (e) {
+          if (e.target.name === 'mmAddType') syncAddFields();
+        });
+        document.getElementById('mmAddCancel').addEventListener('click', closeAdd);
+        addModal.querySelector('.modal-backdrop').addEventListener('click', closeAdd);
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape' && !addModal.classList.contains('hidden')) closeAdd();
+          if (e.key === 'Enter' && !addModal.classList.contains('hidden')) {
+            e.preventDefault(); addSave.click();
+          }
+        });
+
+        addSave.addEventListener('click', async function () {
+          var guest = addType() === 'guest';
+          var url, body;
+          if (guest) {
+            var name = document.getElementById('mmAddName').value.trim();
+            if (!name) return addErr('Enter a name for this member.');
+            url = '/api/team/members/guest';
+            body = { displayName: name };
+          } else {
+            var cidVal = Number(document.getElementById('mmAddCid').value.trim());
+            if (!cidVal) return addErr('Enter a VATSIM CID.');
+            url = '/api/team/members';
+            body = { cid: cidVal };
+          }
+          addSave.disabled = true;
           try {
-            var r = await fetch('/api/team/members', {
+            var r = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               credentials: 'same-origin',
-              body: JSON.stringify({ cid: cid })
+              body: JSON.stringify(body)
             });
-            var d = await r.json().catch(function() { return {}; });
-            if (!r.ok) { show(d.error || 'Failed to add member', false); return; }
+            var d = await r.json().catch(function () { return {}; });
+            if (!r.ok) return addErr(d.error || 'Could not add that member.');
             location.reload();
-          } catch (e) { show('Failed to add member', false); }
+          } catch (err) { addErr('Could not add that member.'); }
         });
-
         document.addEventListener('change', async function(e) {
           var cb = e.target.closest('.team-perm');
           if (!cb) return;
@@ -41857,7 +42636,14 @@ app.get('/request-atc', requirePageEnabled('request-atc'), async (req, res) => {
           + (timeStr ? '<span style="font-size:11px;color:var(--muted);">' + escapeHtml(timeStr) + '</span>' : '')
           + (r.status === 'accepted' ? '<span style="font-size:11px;color:#4ade80;font-weight:600;">\u2713 ' + escapeHtml(acceptedName) + '</span>' : '')
           + (isCancelled ? '<span style="font-size:10px;color:var(--muted);">Cancelled</span>' : '')
-          + (canManage && !isCancelled && r.status !== 'accepted' ? '' : '')
+          // Per position, so a leg can lose one callsign to a local
+          // controller without cancelling the rest.
+          + (canManage && !isCancelled
+            ? '<button type="button" class="action-btn ra-pos-cancel-btn" data-id="' + r.id + '"'
+              + ' data-cs="' + escapeHtml(cs) + '" style="margin-left:auto;font-size:10px;padding:2px 9px;'
+              + 'background:rgba(245,158,11,0.1);color:#f59e0b;border-color:#f59e0b;"'
+              + ' title="Tell WF ATC this position is no longer needed">No longer required</button>'
+            : '')
           + '</div>';
       }).join('') + '</div>'
       + (first.sectorFileUrl ? '<div style="font-size:12px;margin-bottom:6px;"><a href="' + escapeHtml(first.sectorFileUrl) + '" target="_blank" rel="noopener" style="color:var(--accent);">Sector File / Controller Pack \u2197</a></div>' : '')
@@ -42098,6 +42884,35 @@ app.get('/request-atc', requirePageEnabled('request-atc'), async (req, res) => {
       });
       // Cancel / Delete request handlers
       document.addEventListener('click', async function(e) {
+        var posBtn = e.target.closest('.ra-pos-cancel-btn');
+        if (posBtn) {
+          (async function () {
+            var ok = await openConfirmModal({
+              title: 'No Longer Required',
+              message: 'Cancel the request for ' + posBtn.dataset.cs + '? WF ATC will be notified on Discord.'
+            });
+            if (!ok) return;
+            posBtn.disabled = true;
+            posBtn.textContent = 'Cancelling...';
+            try {
+              var r = await fetch('/api/request-atc/' + posBtn.dataset.id + '/cancel', {
+                method: 'POST', credentials: 'same-origin'
+              });
+              var d = await r.json().catch(function () { return {}; });
+              if (!r.ok) {
+                alert(d.error || 'Could not cancel that position.');
+                posBtn.disabled = false; posBtn.textContent = 'No longer required';
+                return;
+              }
+              location.reload();
+            } catch (err) {
+              alert('Could not cancel that position.');
+              posBtn.disabled = false; posBtn.textContent = 'No longer required';
+            }
+          })();
+          return;
+        }
+
         var cancelBtn = e.target.closest('.ra-cancel-btn');
         if (cancelBtn) {
           var ok = await new Promise(function(resolve) {
@@ -42332,6 +43147,45 @@ app.post('/api/atc-notify-prefs', requireLogin, async (req, res) => {
 });
 
 // Cancel ATC request (mark as no longer required)
+// Tell #wf-atc-requests a position is no longer needed. Anyone who had
+// signed up for it is @-mentioned so they know to stand down; when nobody
+// had taken it the message still goes out, just without a mention.
+async function notifyAtcPositionCancelled(row, coveringCids, byName) {
+  if (!row) return;
+
+  let mentions = [];
+  let coveringNames = [];
+  if (coveringCids.length) {
+    const [links, users] = await Promise.all([
+      prisma.discordLink?.findMany({ where: { cid: { in: coveringCids } } }).catch(() => []) ?? [],
+      prisma.user.findMany({ where: { cid: { in: coveringCids } }, select: { cid: true, name: true } }).catch(() => [])
+    ]);
+    const nameByCid = Object.fromEntries(users.map(u => [Number(u.cid), u.name]));
+    mentions = links.map(l => '<@' + l.discordId + '>');
+    coveringNames = coveringCids.map(c => nameByCid[c] ? nameByCid[c] + ' · ' + c : String(c));
+  }
+
+  const leg = row.sectorNumber + ' ' + row.fromIcao + ' \u2192 ' + row.toIcao;
+  const cs = row.callsign || '(position)';
+  const lines = [
+    '\u274c **' + cs + '** on **' + leg + '** is no longer required.',
+    'It is now covered by a local controller.'
+  ];
+  if (coveringNames.length) {
+    lines.push('Previously signed up: ' + coveringNames.join(', ') + '.');
+  }
+
+  await sendChannelMessage('wf-atc-requests', {
+    content: mentions.join(' '),
+    embeds: [{
+      color: 0xf59e0b,
+      description: lines.join('\n'),
+      footer: { text: 'Cancelled by ' + byName + ' \u00b7 WorldFlight Planning Portal' },
+      timestamp: new Date().toISOString()
+    }]
+  });
+}
+
 app.post('/api/request-atc/:id/cancel', requireLogin, async (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
   const id = Number(req.params.id);
@@ -42339,8 +43193,21 @@ app.post('/api/request-atc/:id/cancel', requireLogin, async (req, res) => {
     const row = await prisma.atcRequest.findUnique({ where: { id } });
     if (!row) return res.status(404).json({ error: 'Request not found' });
     if (row.requestedBy !== cid && !isAdminUser(cid)) return res.status(403).json({ error: 'Not your request' });
+
+    // Who was covering it, before the claims go away: the whole-request
+    // accepter plus anyone holding part of the window.
+    const claims = await prisma.atcRequestClaim.findMany({ where: { requestId: id } }).catch(() => []);
+    const coveringCids = [...new Set([
+      ...(row.acceptedBy ? [Number(row.acceptedBy)] : []),
+      ...claims.map(c => Number(c.cid))
+    ].filter(Boolean))];
+
     await prisma.atcRequest.update({ where: { id }, data: { status: 'cancelled' } });
     refreshOpenAtcRequestCount();
+
+    notifyAtcPositionCancelled(row, coveringCids, req.session?.user?.data?.personal?.name_full || String(cid))
+      .catch(e => console.error('[DISCORD] ATC cancel notification failed:', e.message));
+
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

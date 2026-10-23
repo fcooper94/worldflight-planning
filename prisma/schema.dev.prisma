@@ -575,7 +575,8 @@ model RosterAssignment {
   entityName      String
   sectorNumber    String
   role            String
-  cid             Int
+  cid             Int?
+  teamMemberId    Int?
   updatedAt       DateTime @default(now())
 
   @@unique([entityType, entityName, sectorNumber, role])
@@ -644,4 +645,17 @@ model UserSectorNote {
   updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([cid, sector])
+}
+
+model TeamMember {
+  id          Int      @id @default(autoincrement())
+  teamName    String
+  cid         Int?
+  displayName String?
+  nickname    String?
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([teamName])
+  @@index([cid])
 }
