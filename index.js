@@ -3681,7 +3681,17 @@ async function rebalanceSlottedSectors({ reason = '' } = {}) {
               to: row.to,
               dateUtc: row.date_utc,
               depTimeUtc: row.dep_time_utc,
-              tobtTimeUtc: mv.to.tobt
+              tobtTimeUtc: mv.to.tobt,
+              // A move is a delete + create, so every field the booking
+              // carried has to be restated or the new row silently takes the
+              // schema default. The in-memory mirror below spreads the old
+              // booking, so omitting them here also left DB and memory
+              // disagreeing until the next restart decided in favour of the
+              // DB: a Route B booking came back as A, and a reserved
+              // placeholder came back looking like a confirmed aircraft.
+              assignedRoute: mv.u.b.assignedRoute || 'A',
+              manual: mv.u.b.manual === true,
+              reserved: mv.u.b.reserved === true
             }
           }))
         ]);
