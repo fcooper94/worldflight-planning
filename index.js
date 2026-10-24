@@ -781,6 +781,7 @@ async function loadTobtBookingsFromDb() {
     tobtTimeUtc: b.tobtTimeUtc,
     assignedRoute: b.assignedRoute || 'A',
     manual: !!b.manual,
+    reserved: !!b.reserved,
     createdAtISO: b.createdAt.toISOString()
   };
 
@@ -2744,6 +2745,74 @@ function vatsimMemberCacheStats(cids) {
   return { loaded, total: cids.length, running: vatsimWarmRunning };
 }
 
+/* A place auto-assignment is holding for an operator who names their
+   aircraft per sector shows as [Reserved], not as their base callsign -
+   that callsign is a placeholder, and showing it reads as a confirmed
+   aircraft to everyone else. Use this anywhere a booking callsign is
+   rendered. */
+const RESERVED_LABEL = '[Reserved]';
+function bookingCallsign(b) {
+  if (!b) return '';
+  return b.reserved ? RESERVED_LABEL : String(b.callsign || '').toUpperCase();
+}
+/* A reserved place is held for an operator who names their aircraft per
+   sector. One still unclaimed close to departure is dead weight on a capped
+   sector, so it goes back to the public.
+
+   LOG-ONLY until RESERVED_AUTO_RELEASE=true. It reports what it would drop so
+   the timing can be watched against real bookings before it starts deleting
+   them; flipping the env var needs no code change. */
+const RESERVED_RELEASE_HOURS = 12;
+
+function reservedReleaseEnabled() {
+  return String(process.env.RESERVED_AUTO_RELEASE || '').trim().toLowerCase() === 'true';
+}
+
+// Reserved places whose departure is inside the window, newest departure last.
+function dueReservedBookings(now = Date.now()) {
+  const due = [];
+  for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+    if (!b || !b.reserved) continue;
+    if (key === b.slotKey) continue;                       // raw-slotKey alias
+    const dep = parseUtcDateTime(b.dateUtc, b.depTimeUtc);
+    if (!dep || isNaN(dep.getTime())) continue;
+    if (dep.getTime() - now > RESERVED_RELEASE_HOURS * 60 * 60 * 1000) continue;
+    due.push({ bookingKey: key, b, dep });
+  }
+  return due.sort((x, y) => x.dep - y.dep);
+}
+
+async function releaseUnclaimedReservedBookings() {
+  const due = dueReservedBookings();
+  if (!due.length) return 0;
+
+  if (!reservedReleaseEnabled()) {
+    console.log(`[RESERVED] ${due.length} unclaimed place(s) within ${RESERVED_RELEASE_HOURS}h of departure would be released `
+      + '(log-only - set RESERVED_AUTO_RELEASE=true to actually release):');
+    for (const d of due) {
+      console.log(`[RESERVED]   ${d.b.callsign} cid ${d.b.cid} ${d.b.slotKey} (dep ${d.dep.toISOString()})`);
+    }
+    return 0;
+  }
+
+  let released = 0;
+  for (const d of due) {
+    try {
+      await prisma.tobtBooking.deleteMany({ where: { cid: Number(d.b.cid), slotKey: d.b.slotKey } });
+      deleteBookingByBookingKey(d.bookingKey);
+      if (tobtBookingsByCid[Number(d.b.cid)]) tobtBookingsByCid[Number(d.b.cid)].delete(d.bookingKey);
+      try { io.emit('bookingCancelled', { slotKey: d.b.slotKey }); } catch {}
+      // Controllers' list has to lose it too, or the place looks taken.
+      try { vatcanPushForSlotKey(d.b.slotKey); } catch {}
+      released++;
+      console.log(`[RESERVED] Released ${d.b.callsign} on ${d.b.slotKey} - unclaimed ${RESERVED_RELEASE_HOURS}h before departure`);
+    } catch (e) {
+      console.error('[RESERVED] Could not release ' + d.b.slotKey + ':', e.message);
+    }
+  }
+  return released;
+}
+
 /* ===== TEAM AUTO-ASSIGNMENT ===== */
 // One booking per participating team per flow-restricted sector, filed under
 // the team owner's mainCid. SLOTTED picks the spare slot whose TOBT is
@@ -3258,7 +3327,7 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
     const affRows = await prisma.affiliate.findMany({
       where: { participatingWf26: true },
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-      select: { id: true, cid: true, callsign: true, name: true }
+      select: { id: true, cid: true, callsign: true, name: true, manualCallsigns: true }
     });
     // Route alternatives: where each aircraft flies on a leg whose affiliates
     // are allocated to one option. Planned once per leg per run, after the
@@ -3287,6 +3356,9 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
       const cidNum = Number(aff.cid);
       const callsign = String(aff.callsign || '').toUpperCase();
       if (!cidNum || !callsign) continue;
+      // Operators who name an aircraft per sector have no real callsign
+      // until they do, so their places are held as [Reserved] placeholders.
+      const holdsReserved = aff.manualCallsigns === true;
 
       // Solo-released sectors (sentinel cid=0) — opted out by main user
       const releasedRows = await prisma.affiliateSectorClaim.findMany({
@@ -3369,7 +3441,8 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
               to: row.to,
               dateUtc: row.date_utc,
               depTimeUtc: row.dep_time_utc,
-              tobtTimeUtc: tobt
+              tobtTimeUtc: tobt,
+              reserved: holdsReserved
             }
           });
         } catch (err) {
@@ -3380,6 +3453,7 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
           slotKey,
           cid: cidNum,
           callsign,
+          reserved: holdsReserved,
           from: row.from,
           to: row.to,
           dateUtc: row.date_utc,
@@ -3693,21 +3767,33 @@ async function assignAffiliatePilotToSector(affiliate, scheduleRow, claimCid, ov
   }).catch(() => []);
   const affCids = [Number(affiliate.cid), ...memberRows.map(m => Number(m.cid))].filter(Number.isFinite);
 
-  // Look for an existing booking by callsign first, then fall back to CID lookup.
-  // Callsign match is preferred because multi-aircraft affiliates can have the
-  // same CID holding bookings under different callsigns on the same sector.
-  const existing = await prisma.tobtBooking.findFirst({
+  // The booking already flying under this exact callsign, if any.
+  let existing = await prisma.tobtBooking.findFirst({
     where: { callsign, slotKey: { startsWith: sectorPrefix } }
-  }) || (!overrideCallsign ? await prisma.tobtBooking.findFirst({
-    where: { cid: { in: affCids }, slotKey: { startsWith: sectorPrefix }, callsign }
-  }) : null);
+  });
+  // Otherwise take over this affiliate’s own reserved placeholder on the
+  // sector - the place auto-assignment held under the base callsign before
+  // any aircraft was named. Restricted to reserved rows on purpose: naming a
+  // second aircraft must never steal a sibling’s confirmed booking.
+  //
+  // The previous fallback filtered on `callsign` as well, so it could only
+  // ever re-find what the first query already had. Nothing was taken over,
+  // the placeholder stayed under the base callsign, and the named aircraft
+  // was left with a claim and no booking.
+  if (!existing) {
+    existing = await prisma.tobtBooking.findFirst({
+      where: { cid: { in: affCids }, slotKey: { startsWith: sectorPrefix }, reserved: true }
+    });
+  }
 
   if (existing) {
-    if (Number(existing.cid) === newCid && String(existing.callsign || '').toUpperCase() === callsign) return; // already correct
+    // Already correct AND already claimed - nothing to do. A reserved row
+    // still needs clearing even when cid and callsign happen to match.
+    if (Number(existing.cid) === newCid && String(existing.callsign || '').toUpperCase() === callsign && !existing.reserved) return;
     const oldCid = Number(existing.cid);
     await prisma.tobtBooking.update({
       where: { id: existing.id },
-      data: { cid: newCid, callsign }
+      data: { cid: newCid, callsign, reserved: false }
     });
 
     // In-memory caches
@@ -3726,6 +3812,8 @@ async function assignAffiliatePilotToSector(affiliate, scheduleRow, claimCid, ov
       // Carry the route across the transfer - the DB row keeps it, so dropping
       // it here would silently show (and count) the pilot as Route A.
       assignedRoute: existing.assignedRoute || memBooking.assignedRoute || 'A',
+      // Claimed now, so it is no longer a placeholder.
+      reserved: false,
       createdAtISO: memBooking.createdAtISO || new Date().toISOString()
     };
     deleteBookingByBookingKey(oldBookingKey);
@@ -4262,6 +4350,10 @@ await (async () => {
     .catch(() => {})
     .then(() => vatcanReconcileOnStartup());
 
+  // Hand back reserved places nobody claimed. Every 15 min is ample for a
+  // 12h window, and it only logs until RESERVED_AUTO_RELEASE is set.
+  setTimeout(() => { releaseUnclaimedReservedBookings().catch(() => {}); }, 60 * 1000);
+  setInterval(() => { releaseUnclaimedReservedBookings().catch(() => {}); }, 15 * 60 * 1000);
   // Fill the WF ATC profile cache in the background: slow enough to stay
   // under VATSIM's quota, and re-checked hourly so the 24h entries roll
   // over and newly added members get picked up.
@@ -22003,6 +22095,14 @@ const HQ_STYLES = `    <style>
         padding: 0;
         font-weight: 600;
       }
+      /* A place held for this operator with no aircraft named on it yet.
+         Amber: it is theirs, but it is not settled. */
+      .aff-flow-reserved {
+        background: color-mix(in srgb, var(--warning, #f59e0b) 14%, transparent);
+        color: var(--warning, #f59e0b);
+        border-color: color-mix(in srgb, var(--warning, #f59e0b) 35%, transparent);
+        font-weight: 700;
+      }
       /* (Status no longer renders an "aff-flow-none" variant — kept for safety) */
       .aff-flow-none {
         background: rgba(148,163,184,0.10);
@@ -22811,12 +22911,18 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   const fleetLimit = affiliate?.fleetLimit || 3;
   // Build bookings lookup for manual callsign claims
   const manualBookingByCs = {};
+  const manualReservedBySector = {};
   if (isManualCallsigns) {
     Object.values(tobtBookingsByKey).forEach(b => {
       if (!b || !b.callsign) return;
       const cs = String(b.callsign).toUpperCase();
       const parts = String(b.slotKey).split('|');
       manualBookingByCs[`${cs}|${parts[0]}|${parts[1]}|${parts[2]}`] = b;
+      // A place auto-assignment is holding for this operator before any
+      // aircraft is named - rendered as [Reserved] on the sector row.
+      if (b.reserved && affiliate && cs === String(affiliate.callsign || '').toUpperCase()) {
+        manualReservedBySector[`${parts[0]}|${parts[1]}|${parts[2]}`] = b;
+      }
     });
   }
 
@@ -22868,7 +22974,12 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
         if (showFlowInfo) {
           mcBody += '<td>' + (first ? '<span class="flowtype-pill flowtype-' + flow.cls + '">' + escapeHtml(flow.label) + '</span>' : '') + '</td>';
           if (!cs) {
-            mcBody += '<td class="aff-status-cell"><span class="ot-muted">\u2014</span></td>';
+            // A place is already held for this sector, it just has no
+            // aircraft on it yet. Say so rather than showing nothing.
+            const resv = manualReservedBySector[sectorKey];
+            mcBody += resv
+              ? '<td class="aff-status-cell"><span class="aff-flow-status aff-flow-reserved">[Reserved]</span></td>'
+              : '<td class="aff-status-cell"><span class="ot-muted">\u2014</span></td>';
           } else if (status && status.kind === 'tobt') {
             mcBody += '<td class="aff-status-cell"><span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">' + escapeHtml(status.label) + '</span><span class="aff-tobt-time">' + escapeHtml(status.time) + '</span></span>' + flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) + '</td>';
           } else {
@@ -39677,7 +39788,7 @@ app.get('/api/wf-atc/hub/:wf', requireWfAtcOrAdmin, async (req, res) => {
       if (!b.slotKey || !b.slotKey.startsWith(prefix)) continue;
       bookings.push({
         cid: b.cid,
-        callsign: b.callsign || '',
+        callsign: bookingCallsign(b),
         slot: (b.tobtTimeUtc && b.tobtTimeUtc !== 'BOOKING_ONLY' && b.tobtTimeUtc !== 'null')
           ? displayTobt(b.tobtTimeUtc) : '',
         route: b.assignedRoute === 'B' ? 'B' : 'A'
@@ -45927,7 +46038,7 @@ app.get('/sector-planning/:wf/slots.json', requirePageEnabled('sector-planning')
     if (!b.slotKey || !b.slotKey.startsWith(sectorPrefix)) continue;
     rows.push({
       cid: b.cid,
-      callsign: b.callsign || '',
+      callsign: bookingCallsign(b),
       route: b.assignedRoute === 'B' ? 'B' : 'A',
       slot: (b.tobtTimeUtc && b.tobtTimeUtc !== 'BOOKING_ONLY' && b.tobtTimeUtc !== 'null')
         ? displayTobt(b.tobtTimeUtc)

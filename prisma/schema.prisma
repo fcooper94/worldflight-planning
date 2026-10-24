@@ -98,6 +98,11 @@ model TobtBooking {
   tobtTimeUtc   String?
   assignedRoute String   @default("A")  // 'A' = primary route, 'B' = secondary route
   manual        Boolean  @default(false)
+  /// Placeholder place held by auto-assignment for a manual-callsign
+  /// affiliate, before the operator has named the aircraft flying it.
+  /// Shown as [Reserved] rather than the base callsign, and released back
+  /// to the public if still unclaimed 12h before departure.
+  reserved      Boolean  @default(false)
   createdAt     DateTime @default(now())
 
   @@unique([cid, slotKey])
