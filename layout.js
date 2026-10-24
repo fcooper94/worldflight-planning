@@ -103,12 +103,16 @@ export default function renderLayout({
       </a>` : ''}
     </div>
 
-    ${pv('who-we-are') ? `<div class="nav-section">
+    ${pv('who-we-are') || pv('wf-atc-team') ? `<div class="nav-section">
       <div class="nav-title">Who are we?</div>
-      <a href="/teams" class="nav-item" data-tooltip="Official Teams / WF Affiliates">
+      ${pv('who-we-are') ? `<a href="/teams" class="nav-item" data-tooltip="Official Teams / WF Affiliates">
         <span class="icon">${icons.users}</span>
         <span class="label">Teams &amp; Affiliates</span>
-      </a>
+      </a>` : ''}
+      ${pv('wf-atc-team') ? `<a href="/wf-atc-team" class="nav-item" data-tooltip="WF ATC Team">
+        <span class="icon">${icons.headphones}</span>
+        <span class="label">WF ATC Team</span>
+      </a>` : ''}
     </div>` : ''}
 
     ${isAdmin || pv('atc') || (pv('airspace') && canSeeStaffing) || (pv('sector-planning') && hasFirAccess) || (pv('request-atc') && hasFirAccess) ? `<div class="nav-section">

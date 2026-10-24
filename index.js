@@ -4,7 +4,7 @@ import fs from 'fs';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import multer from 'multer';
-import { PACK_DIR, PACK_WF_DIR, GROUND_CACHE_DIR, VATIS_DIR, UPLOADS_DIR, ensurePackDirs } from './lib/paths.mjs';
+import { PACK_DIR, PACK_WF_DIR, GROUND_CACHE_DIR, VATIS_DIR, UPLOADS_DIR, VATSIM_CACHE_DIR, ensurePackDirs } from './lib/paths.mjs';
 import { buildVatisProfile, defaultTemplate as vatisDefaultTemplate, APPROACH_TYPES as VATIS_APPROACH_TYPES, TEMPLATE_SERIAL as VATIS_TEMPLATE_SERIAL } from './lib/vatis-profile.mjs';
 import path from 'path';
 import crypto from 'crypto';
@@ -829,7 +829,7 @@ io.use((socket, next) => {
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
 // Every key the Page Visibility admin panel offers must be listed here, or the
 // save is rejected with a 400 and the toggle silently fails.
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'airspace', 'sector-planning', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions', 'atc-route', 'worldflight-challenge', 'vatcan-codes', 'who-we-are', 'request-atc', 'requested-atc', 'wf-atc-hub', 'route-alternatives'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'airspace', 'sector-planning', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions', 'atc-route', 'worldflight-challenge', 'vatcan-codes', 'who-we-are', 'wf-atc-team', 'request-atc', 'requested-atc', 'wf-atc-hub', 'route-alternatives'];
 
 // Per-key default mode used when no DB row exists yet. Most keys default to
 // 'visible'; ATC Route defaults to 'hidden' because routes are typically
@@ -2562,6 +2562,188 @@ async function fetchVatsimName(cid) {
   }
 }
 
+/* ===== VATSIM MEMBER PROFILE (cached) ===== */
+// api.vatsim.net/v2/members/<cid> returns the member's rating, registration
+// date and home region/division. It carries NO name — that comes from our own
+// User row, captured at VATSIM login. Cached for 24h because the endpoint is
+// rate-limited and none of these fields move often.
+const vatsimMemberCache = new Map(); // cid -> { data, ts }
+const VATSIM_MEMBER_TTL_MS = 24 * 60 * 60 * 1000;
+const VATSIM_MEMBER_FAIL_TTL_MS = 60 * 60 * 1000;
+
+// VATSIM ATC rating ids, with the short code and the label VATSIM publishes.
+const VATSIM_RATINGS = {
+  '-1': { short: 'INA', long: 'Inactive' },
+  0:  { short: 'SUS', long: 'Suspended' },
+  1:  { short: 'OBS', long: 'Observer' },
+  2:  { short: 'S1',  long: 'Tower Trainee' },
+  3:  { short: 'S2',  long: 'Tower Controller' },
+  4:  { short: 'S3',  long: 'Senior Student' },
+  5:  { short: 'C1',  long: 'Enroute Controller' },
+  6:  { short: 'C2',  long: 'Controller 2' },
+  7:  { short: 'C3',  long: 'Senior Controller' },
+  8:  { short: 'I1',  long: 'Instructor' },
+  9:  { short: 'I2',  long: 'Instructor 2' },
+  10: { short: 'I3',  long: 'Senior Instructor' },
+  11: { short: 'SUP', long: 'Supervisor' },
+  12: { short: 'ADM', long: 'Administrator' }
+};
+
+// VATSIM allows only ~10 reads of this endpoint per window and then answers
+// 429 with a Retry-After. A 429 means "ask again later", NOT "no such member",
+// so it must never be cached as a miss - doing so silently froze the roster
+// at however many got through before the limit hit.
+let vatsimRateLimitedUntil = 0;
+
+async function fetchVatsimMember(cid, { force = false } = {}) {
+  const id = Number(cid);
+  if (!id) return null;
+  const hit = vatsimMemberCache.get(id);
+  if (!force && hit && Date.now() - hit.ts < VATSIM_MEMBER_TTL_MS) return hit.data;
+  // Inside a rate-limit window every request is refused, so do not spend one.
+  if (Date.now() < vatsimRateLimitedUntil) return hit ? hit.data : null;
+  try {
+    const r = await axios.get('https://api.vatsim.net/v2/members/' + id, { timeout: 5000 });
+    const d = r.data || {};
+    const data = {
+      rating: Number.isFinite(Number(d.rating)) ? Number(d.rating) : null,
+      regDate: d.reg_date || '',
+      region: d.region_id || '',
+      division: d.division_id || '',
+      subdivision: d.subdivision_id || ''
+    };
+    vatsimMemberCache.set(id, { data, ts: Date.now() });
+    saveVatsimMemberCache();
+    return data;
+  } catch (e) {
+    if (e.response && e.response.status === 429) {
+      const ra = Number(e.response.headers && e.response.headers['retry-after']);
+      vatsimRateLimitedUntil = Date.now() + ((Number.isFinite(ra) && ra > 0 ? ra : 160) * 1000);
+      console.warn(`[VATSIM] Rate limited - pausing profile reads for ${Math.ceil((vatsimRateLimitedUntil - Date.now()) / 1000)}s`);
+      return hit ? hit.data : null;   // deliberately not cached as a miss
+    }
+    // A genuine failure (unknown CID, network): cache it so the warmer stops
+    // asking, but only for an hour.
+    vatsimMemberCache.set(id, { data: null, ts: Date.now() - VATSIM_MEMBER_TTL_MS + VATSIM_MEMBER_FAIL_TTL_MS });
+    return null;
+  }
+}
+
+/* The cache lives on disk as well as in memory. Refilling it costs a quarter
+   of an hour of trickling, so losing it to a nodemon restart or a Railway
+   deploy is the difference between a complete page and a sparse one. */
+function vatsimCacheFile() {
+  return path.join(VATSIM_CACHE_DIR, 'members.json');
+}
+
+function loadVatsimMemberCache() {
+  try {
+    const raw = fs.readFileSync(vatsimCacheFile(), 'utf8');
+    const obj = JSON.parse(raw) || {};
+    let n = 0;
+    for (const [cid, entry] of Object.entries(obj)) {
+      if (!entry || typeof entry.ts !== 'number') continue;
+      vatsimMemberCache.set(Number(cid), { data: entry.data || null, ts: entry.ts });
+      if (entry.data) n++;
+    }
+    if (n) console.log(`[VATSIM] Loaded ${n} cached member profile(s) from disk`);
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[VATSIM] Could not read profile cache:', e.message);
+  }
+}
+
+// Called after each successful read. Sixty small entries, so a whole-file
+// rewrite is cheaper than tracking dirty keys.
+function saveVatsimMemberCache() {
+  try {
+    const obj = {};
+    for (const [cid, entry] of vatsimMemberCache.entries()) {
+      if (entry && entry.data) obj[cid] = entry;   // misses are not worth keeping
+    }
+    fs.mkdirSync(VATSIM_CACHE_DIR, { recursive: true });
+    fs.writeFileSync(vatsimCacheFile(), JSON.stringify(obj));
+  } catch (e) {
+    console.warn('[VATSIM] Could not write profile cache:', e.message);
+  }
+}
+
+// Several profiles without tripping the quota: this never fires a request of
+// its own. It returns what is already cached and leaves the gaps to the
+// background warmer, so a page can render immediately and completely.
+function getCachedVatsimMembers(cids) {
+  const out = new Map();
+  for (const cid of cids) {
+    const hit = vatsimMemberCache.get(Number(cid));
+    out.set(Number(cid), hit && Date.now() - hit.ts < VATSIM_MEMBER_TTL_MS ? hit.data : null);
+  }
+  return out;
+}
+
+/* The member endpoint is quota'd hard — 60 lookups back to back earns a 429
+   with a ~150s Retry-After, and every profile comes back empty. So nothing
+   fetches on the request path. This trickles through the CIDs we care about
+   one at a time, well under the limit, and the pages read the cache. Cold
+   after a restart, a full roster takes a few minutes to fill in; the cards
+   simply omit the facts that are not there yet. */
+// ~10 reads per window in practice, so about one every 16s keeps us under
+// it without ever tripping a 429. A full 60-member roster takes ~16 min,
+// which only matters on a cold cache - normally the disk copy is current.
+const VATSIM_WARM_GAP_MS = 16000;
+let vatsimWarmRunning = false;
+
+async function warmVatsimMemberCache({ force = false } = {}) {
+  if (vatsimWarmRunning) return;
+  vatsimWarmRunning = true;
+  try {
+    const rows = await prisma.userAdditionalRole.findMany({
+      where: { role: 'WF_ATC' },
+      select: { cid: true }
+    }).catch(() => []);
+    const cids = [...new Set(rows.map(r => Number(r.cid)).filter(Boolean))];
+    let fetched = 0;
+    for (const cid of cids) {
+      const hit = vatsimMemberCache.get(cid);
+      // force re-reads everything; otherwise only gaps and stale entries.
+      if (!force && hit && Date.now() - hit.ts < VATSIM_MEMBER_TTL_MS) continue;
+      // Two attempts. The member whose request actually trips the 429 would
+      // otherwise be the one we lose - the window is only noticed after the
+      // refusal, so moving straight on skips them until the next sweep.
+      // Instead wait the window out and ask again for the same member.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (Date.now() < vatsimRateLimitedUntil) {
+          await new Promise(r => setTimeout(r, vatsimRateLimitedUntil - Date.now() + 1000));
+        }
+        await fetchVatsimMember(cid, { force });
+        const now = vatsimMemberCache.get(cid);
+        // Cached either way: a profile, or a genuine miss on its own backoff.
+        if (now && Date.now() - now.ts < VATSIM_MEMBER_TTL_MS) break;
+        if (Date.now() >= vatsimRateLimitedUntil) break;   // not the quota - give up
+      }
+      fetched++;
+      await new Promise(r => setTimeout(r, VATSIM_WARM_GAP_MS));
+    }
+    if (fetched) {
+      const { loaded, total } = vatsimMemberCacheStats(cids);
+      console.log(`[VATSIM] Profile warm finished - ${loaded}/${total} cached`);
+    }
+  } catch (e) {
+    console.error('[VATSIM] Profile warm failed:', e.message);
+  } finally {
+    vatsimWarmRunning = false;
+  }
+}
+
+// How many of these CIDs have a usable profile cached - shown to admins so
+// they can see the warm filling in rather than guessing.
+function vatsimMemberCacheStats(cids) {
+  let loaded = 0;
+  for (const cid of cids) {
+    const hit = vatsimMemberCache.get(Number(cid));
+    if (hit && hit.data && Date.now() - hit.ts < VATSIM_MEMBER_TTL_MS) loaded++;
+  }
+  return { loaded, total: cids.length, running: vatsimWarmRunning };
+}
+
 /* ===== TEAM AUTO-ASSIGNMENT ===== */
 // One booking per participating team per flow-restricted sector, filed under
 // the team owner's mainCid. SLOTTED picks the spare slot whose TOBT is
@@ -4079,6 +4261,13 @@ await (async () => {
   autoAssignTeamThenAffiliate({ reason: 'startup' })
     .catch(() => {})
     .then(() => vatcanReconcileOnStartup());
+
+  // Fill the WF ATC profile cache in the background: slow enough to stay
+  // under VATSIM's quota, and re-checked hourly so the 24h entries roll
+  // over and newly added members get picked up.
+  loadVatsimMemberCache();
+  setTimeout(() => { warmVatsimMemberCache().catch(() => {}); }, 15000);
+  setInterval(() => { warmVatsimMemberCache().catch(() => {}); }, 60 * 60 * 1000);
 
   // Fetch winds aloft then pre-warm FIR analysis cache (wind data baked in)
   refreshWindAdjustments()
@@ -30113,6 +30302,228 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
   res.send(renderLayout({ title: 'Official Teams / WF Affiliates', user, isAdmin, content, layoutClass: 'dashboard-full' }));
 });
 
+/* Public roster of the WF ATC team. Every WF_ATC role holder is listed. The
+   name is our own User row (captured at VATSIM login); rating, join date and
+   home region/division come from VATSIM's public member endpoint, cached 24h.
+   A member VATSIM will not answer for still gets a card — the facts we could
+   not read are simply left off it. */
+app.get('/wf-atc-team', requirePageEnabled('wf-atc-team'), async (req, res) => {
+  const user = req.session?.user?.data || null;
+  const isAdmin = user ? isAdminUser(user.cid) : false;
+
+  const roleRows = await prisma.userAdditionalRole.findMany({
+    where: { role: 'WF_ATC' },
+    select: { cid: true }
+  }).catch(() => []);
+  const cids = [...new Set(roleRows.map(r => Number(r.cid)).filter(Boolean))];
+
+  const userRows = cids.length
+    ? await prisma.user.findMany({ where: { cid: { in: cids } }, select: { cid: true, name: true } }).catch(() => [])
+    : [];
+  const nameByCid = new Map(userRows.map(u => [Number(u.cid), String(u.name || '').trim()]));
+
+  // Cache only - see warmVatsimMemberCache(). A profile not warmed yet just
+  // leaves those facts off the card rather than stalling the page.
+  // Admin-only ?refresh=1 forces a re-read of every profile. It runs in the
+  // background at the usual trickle - the quota does not allow anything
+  // faster - so the page renders now and fills in over the next few minutes.
+  const forcing = isAdmin && req.query.refresh === '1';
+  if (forcing) warmVatsimMemberCache({ force: true }).catch(() => {});
+
+  const profiles = getCachedVatsimMembers(cids);
+  const cacheStats = vatsimMemberCacheStats(cids);
+
+  // "2014-10-02T11:24:07Z" -> "2 Oct 2014". Anything unparseable drops the row.
+  const joinDate = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return d.getUTCDate() + ' ' + months[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+  };
+  const initialsOf = (name, cid) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return String(cid).slice(0, 2);
+    return parts.slice(0, 2).map(w => w[0]).join('').toUpperCase();
+  };
+
+  const members = cids.map(cid => {
+    const p = profiles.get(cid) || null;
+    const rating = p && p.rating != null ? (VATSIM_RATINGS[p.rating] || null) : null;
+    return {
+      cid,
+      name: nameByCid.get(cid) || '',
+      rating,
+      joined: p ? joinDate(p.regDate) : '',
+      region: p ? p.region : '',
+      division: p ? p.division : ''
+    };
+  }).sort((a, b) => {
+    // Named members first, alphabetically; anyone we have no name for last.
+    if (!!a.name !== !!b.name) return a.name ? -1 : 1;
+    return a.name ? a.name.localeCompare(b.name) : a.cid - b.cid;
+  });
+
+  const cardFor = (m) => {
+    const facts = [
+      ['Rating', m.rating ? m.rating.long : ''],
+      ['On VATSIM Since', m.joined],
+      ['Region', m.region],
+      ['Division', m.division]
+    ].filter(f => f[1]);
+    return `
+        <article class="atcteam-card">
+          <div class="atcteam-head">
+            <span class="atcteam-avatar" aria-hidden="true">${escapeHtml(initialsOf(m.name, m.cid))}</span>
+            <div class="atcteam-id">
+              <div class="atcteam-name">${escapeHtml(m.name || 'CID ' + m.cid)}</div>
+              <div class="atcteam-cid">${m.cid}</div>
+            </div>
+            ${m.rating ? `<span class="atcteam-rating" title="${escapeHtml(m.rating.long)}">${escapeHtml(m.rating.short)}</span>` : ''}
+          </div>
+          ${facts.length ? `<div class="atcteam-facts">
+            ${facts.map(f => `<div class="atcteam-fact">
+              <span class="atcteam-fact-label">${escapeHtml(f[0])}</span>
+              <span class="atcteam-fact-value">${escapeHtml(String(f[1]))}</span>
+            </div>`).join('')}
+          </div>` : '<p class="atcteam-nodata">Details unavailable right now.</p>'}
+        </article>`;
+  };
+
+  const content = `
+  <section class="card card-full">
+    <h2>WF ATC Team</h2>
+    <p class="atcteam-intro">
+      The controllers who staff WorldFlight. ${members.length} member${members.length === 1 ? '' : 's'}.
+      Ratings and VATSIM details come straight from VATSIM and refresh daily.
+    </p>
+    ${isAdmin ? `<p class="atcteam-admin">
+      <span><strong>${cacheStats.loaded}</strong> of ${cacheStats.total} VATSIM profiles loaded${cacheStats.running ? ' &middot; refreshing now&hellip;' : ''}</span>
+      <a href="/wf-atc-team?refresh=1" class="atcteam-refresh">Refresh from VATSIM</a>
+      ${forcing ? '<span class="atcteam-admin-note">Refresh started &mdash; profiles are re-read one at a time to stay inside VATSIM&rsquo;s rate limit, so give it a few minutes and reload.</span>' : ''}
+    </p>` : ''}
+    ${members.length ? `<div class="atcteam-grid">${members.map(cardFor).join('')}</div>`
+      : '<p class="atcteam-nodata">No WF ATC team members yet.</p>'}
+  </section>
+
+  <style>
+    .atcteam-intro {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.65;
+      margin: 0 0 18px;
+    }
+    .atcteam-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 16px;
+    }
+    .atcteam-card {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      transition: border-color .15s ease;
+    }
+    .atcteam-card:hover { border-color: var(--accent); }
+    .atcteam-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .atcteam-avatar {
+      flex: 0 0 auto;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .atcteam-id { min-width: 0; flex: 1; }
+    .atcteam-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .atcteam-cid {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .atcteam-rating {
+      flex: 0 0 auto;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 5px;
+      background: color-mix(in srgb, var(--accent) 16%, transparent);
+      color: var(--accent);
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      cursor: help;
+    }
+    .atcteam-facts { display: flex; flex-direction: column; gap: 7px; }
+    .atcteam-fact {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .atcteam-fact-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .atcteam-fact-value {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      text-align: right;
+    }
+    .atcteam-nodata { color: var(--muted); font-size: 13px; margin: 0; }
+    /* Admin-only: warm progress and a manual trigger. */
+    .atcteam-admin {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      margin: 0 0 16px;
+      padding: 8px 12px;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .atcteam-admin strong { color: var(--text); }
+    .atcteam-refresh {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .atcteam-refresh:hover { text-decoration: underline; }
+    .atcteam-admin-note { flex: 1 1 100%; color: var(--warning, #f59e0b); }
+  </style>`;
+
+  res.send(renderLayout({ title: 'WF ATC Team', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
 const WF_SITE_URL = 'https://planning.worldflight.center';
 
 /* Shared shell for the three affiliate application emails (received,
@@ -36309,6 +36720,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         { key: 'atc',             label: 'WF Flow Control',     icon: '🎧', desc: 'Controller departure management view' },
         { key: 'suggest-airport', label: 'Suggest Airport',     icon: '💡', desc: 'Community airport suggestions' },
         { key: 'who-we-are',      label: 'Teams & Affiliates',  icon: '👥', desc: 'Public "Who are we?" page listing Official Teams and WF Affiliates with photos, descriptions and websites (/teams).' },
+        { key: 'wf-atc-team',     label: 'WF ATC Team',         icon: '🎧', desc: 'Public roster of the WF ATC team (/wf-atc-team). One card per WF_ATC role holder with their CID, rating, VATSIM join date and home region/division, read live from VATSIM. Members come from the WF ATC role list, which the Discord sync also feeds.' },
         { key: 'airspace',        label: 'Staffing Overview', icon: '🌐', desc: 'FIR staffing requirements and timelines' },
         { key: 'sector-planning', label: 'Sector Planning',   icon: '📋', desc: 'Per-user sector list. Shows WF sectors the user is participating in (Dep/Arr/Enroute) based on their FIR Events Access grants.' },
         { key: 'vatcan-codes',    label: 'VATCAN Codes',      icon: '🎧', desc: 'Per-sector VATCAN booking-plugin event IDs (under sidebar "WF ATC" category). Controllers paste these into the VATCAN plugin to see live slot data.' },
