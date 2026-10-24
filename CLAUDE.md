@@ -40,6 +40,7 @@ The **WorldFlight Planning Portal** is the operations site for the annual *World
 | ~22110 | Admin Teams / Affiliates / Applications (`/official-teams`) |
 | ~23390 | Public affiliate application form (`/affiliate-apply`) |
 | ~23630 | Public Teams & Affiliates page (`/teams`) |
+| ~30430 | Public WF ATC Team page (`/wf-atc-team`) |
 | ~21870 | Schedule table editing UI |
 | ~24050 | Route resolve API (`/api/resolve-route`) |
 | ~24400 | Schedule row update/add APIs |
@@ -222,6 +223,101 @@ Controller-facing slot bookings are pushed live to the VATCAN bookings plugin vi
 
 **Shape of the payload** matches the existing public endpoint `/api/slots/<wf>.json` exactly — `[{cid, slot:"HHMM"}, ...]`. The slot string is the TOBT minute without colon. VATCAN replaces the full list on every push (no diffing), so always send all bookings for the sector.
 
+## The booking model at a glance
+
+Each sector (`FROM-TO`) has a `DepFlow` row holding a **rate** and a **flow
+type**, loaded into `sharedDepFlows` / `sharedFlowTypes` at boot:
+
+| Type | Pilot-facing label | Meaning |
+|---|---|---|
+| `NONE` | No Restrictions | Nothing to book. Auto-assign skips these entirely. |
+| `SLOTTED` | Booking Required | A grid of timed connect slots (TCTs). Rate = slots/hour. |
+| `BOOKING_ONLY` | Booking Required | No times. Rate is a **headcount cap**. |
+
+Both restricted types show the *same* label to pilots — they differ only in
+whether you get a time. For WF2026 only **WF2601 (YSSY-WAAA)** is `SLOTTED`;
+about a dozen sectors are `BOOKING_ONLY` and the rest `NONE`.
+
+- `generateTobtSlots()` returns `null` unless the type is `SLOTTED`. Without
+  that gate every Booking Required sector pollutes `allTobtSlots` with phantom
+  TCTs and any reader that is not flow-type-aware treats it as slotted.
+- Slotted capacity is `rate × 2h`, spread over a 120 min window running
+  **dep−75 → dep+45**, centred on the **dep−15** anchor
+  (`SLOT_ANCHOR_OFFSET_MIN`). A TCT can therefore fall *before* the published
+  departure window (dep ±60) opens — that is deliberate setup time.
+- **slotKey** is `FROM-TO|date|depTime|TOBT` or `…|BOOKING_ONLY`.
+  **bookingKey** is `${cid}:${slotKey}` and is the canonical identity;
+  `TobtBooking` is unique on `(cid, slotKey)`. BOOKING_ONLY puts many pilots on
+  one slotKey, so keying bookings by slotKey alone loses data — use
+  `bookingsBySlotKey` / `isSlotTaken()` instead of truthy map lookups.
+- Everything that moves or creates bookings in bulk goes through
+  `queueBookingMaintenance()` one at a time. Interleaving these created
+  duplicate bookings once; do not add a bulk job outside the queue.
+
+**Two unrelated things are both called "A/B". Keep them apart:**
+
+- **Route split** — one sector, two *routings to the same airport*.
+  `TobtBooking.assignedRoute`, filled by `resolveAssignedRoute()` against
+  `depSplitPct`. Shown to pilots as **Primary / Secondary Route**.
+- **Route alternatives** — one leg, two *different destination airports*,
+  below.
+
+## Route alternatives (an undecided leg)
+
+A leg whose destination is not settled is carried as **two schedule rows**:
+the primary keeps its plain number (`WF2631`) and an alternative carries
+`variantOf` pointing at it (`WF2631.B`). The primary is only labelled `.A` at
+render time, and only once an alternative exists, so nothing keyed on the WF
+number has to move.
+
+- Visibility is the `route-alternatives` page key via
+  `canSeeRouteAlternatives(cid)` — `admin-only` there also grants anyone with
+  FIR access, not just admins. `visibleScheduleRows()` filters alternatives out
+  for everyone else, and `scheduleRowLabel()` drops the `.A` for them too.
+- **An alternative shares its primary's `sortOrder`** (same slot in the running
+  order). Any `wfScheduleRow` query ordering by `sortOrder` therefore needs
+  `{ number: 'asc' }` as a tie-break or the pair comes back in whatever order
+  the query plan picks — a prefix always sorts before the longer string, so A
+  precedes B in both Postgres and SQLite.
+- Who flies which option is stored **on the primary row**: `autoBookVariant`
+  (teams), `affiliateBookVariant` (affiliates, falls back to the team choice,
+  `'BOTH'` for no restriction) and `affiliateOverspill` (how many aircraft from
+  the bottom of the Display Order take the other option). `NULL` means no
+  choice was recorded and both options keep taking bookings.
+- `autoBookOptionAllows()` is the gate in both auto-assign loops. Without it an
+  operator is booked onto **both** options, because the two look like unrelated
+  sectors to a `from-to|date|dep` key.
+- Consecutive legs whose options connect form a **chain**
+  (`routeAltChainFor()`); an allocation is applied across the whole chain or an
+  aircraft lands at one airport and departs from another.
+- `resolve-variant` settles a leg onto one routing, writes it to the primary,
+  deletes the alternatives and clears `autoBookVariant`.
+
+## Reserved places (manual-callsign affiliates)
+
+An affiliate with `manualCallsigns` names an aircraft per sector rather than
+flying under one callsign, so the place auto-assignment holds for them is a
+**placeholder, not an aircraft**. `TobtBooking.reserved` marks it and
+`bookingCallsign()` renders it as `[Reserved]` everywhere a booking callsign is
+shown — the ATC hub and sector feeds included — so controllers never read a
+placeholder as a confirmed aircraft.
+
+- Naming an aircraft (`/api/affiliates/hq/manual-claim`) calls
+  `assignAffiliatePilotToSector()`, which **takes over** the affiliate's own
+  reserved placeholder on that sector and clears the flag. The lookup is
+  restricted to `reserved: true` rows on purpose: naming a second aircraft must
+  never steal a sibling's confirmed booking.
+- `releaseUnclaimedReservedBookings()` hands back places still unclaimed
+  **12h before departure**, every 15 min. **LOG-ONLY** until
+  `RESERVED_AUTO_RELEASE=true` — it reports what it would drop so the timing
+  can be watched before it deletes live bookings.
+  Put it in `.env`, `.env.prod.bak` (and Railway) so it survives a mode
+  switch, like the VATCAN keys.
+- **An existing claim does not adopt a placeholder created later.** Auto-assign
+  books under the base callsign; the take-over only runs when the operator
+  presses Save. A claim made before the place existed stays bookingless until
+  they re-save that row.
+
 ## Teams, Affiliates and their HQs
 
 Two near-identical surfaces, deliberately kept in sync. Both use `HQ_STYLES`
@@ -319,6 +415,7 @@ everything moves onto persistent storage:
 | `PACK_WF_DIR` | `<vol>/Euroscope_Files/WorldFlight` | `Euroscope_Files/WorldFlight/` |
 | `GROUND_CACHE_DIR` | `<vol>/ground` | `data/ground/` |
 | `PACK_OSM_CACHE_DIR` | `<vol>/pack-osm-cache` | `data/pack-osm-cache/` |
+| `VATSIM_CACHE_DIR` | `<vol>/vatsim` | `data/vatsim/` |
 
 Never hard-code these paths again — `index.js` and every `scripts/generate-*`
 imports them, and the spawned generators inherit the env from the parent.
@@ -341,6 +438,38 @@ vanish on every deploy. Uploads are now mirrored into `NavdataFile` and restored
 to disk at bootstrap. For the four `earth_*.dat` files the **newer AIRAC cycle
 wins**, so committing a newer cycle to the repo is not shadowed by an old
 upload; `fir-boundaries.geojson` has no cycle, so the DB copy always wins.
+
+## WF ATC Team page and the VATSIM member API
+
+`/wf-atc-team` (page key `wf-atc-team`, under "Who are we?") is a public card
+per `WF_ATC` role holder: name, CID, rating, VATSIM join date, home
+region/division. There is no bio and nothing is stored for it.
+
+**`api.vatsim.net/v2/members/<cid>` returns no name.** It gives `rating`,
+`reg_date`, `region_id`, `division_id`, `subdivision_id` and nothing else — so
+the existing `fetchVatsimName()`, which reads `name_first`/`name_last`, returns
+`''` for every CID. Names come from our own `User` row, captured at login.
+
+**The endpoint is quota'd hard: about ten reads per window, then HTTP 429 with
+`Retry-After` ≈ 150s.** Fetching a 60-member roster while rendering a page
+returns almost nothing, so:
+
+- Nothing fetches on the request path. The page reads the cache via
+  `getCachedVatsimMembers()` and simply leaves unknown facts off a card.
+- `warmVatsimMemberCache()` trickles through the roster one CID every 16s in
+  the background, started 15s after boot and re-checked hourly.
+- **A 429 is never cached as a miss.** It means "ask again later", not "no such
+  member"; caching it as a failure froze the roster at however many got through
+  and left the rest on an hour-long backoff they had not earned. The warmer
+  waits the window out and re-asks for the *same* member — the one whose
+  request trips the limit is only discovered to be refused afterwards, so
+  moving on silently drops one person per window.
+- The cache is persisted to `VATSIM_CACHE_DIR/members.json`, because refilling
+  it costs a quarter of an hour of trickling and a restart would otherwise
+  start from nothing.
+- Admins get a progress line and `?refresh=1` to force a re-read. Force
+  re-reads **in place** — clearing first meant a refresh that hit the rate
+  limit left less than it started with.
 
 ## Common gotchas
 
@@ -365,6 +494,14 @@ upload; `fir-boundaries.geojson` has no cycle, so the DB copy always wins.
 - **`.tobt-tooltip` is `position: fixed`** — it needs the JS positioner to be visible at all. Copying the markup to a new page without the handler yields a tooltip that never appears.
 - **PowerShell here-strings mangle commit messages** containing quotes or apostrophes. Write the message to a file and use `git commit -F <file>`.
 - **Editing `index.js` with Python**: read and write with `newline=''` and `encoding='utf-8'`, and never `Set-Content` a Prisma schema (it adds a BOM that Prisma rejects). Anchor replacements on a unique surrounding block — several template snippets are near-identical between the affiliate and team pages.
+- **Alternatives share their primary's `sortOrder`.** Every `wfScheduleRow` query ordered by `sortOrder` needs `{ number: 'asc' }` as a tie-break, or `WF2631.B` renders above `WF2631.A`. See Route alternatives above.
+- **Affiliate HQ has two notions of "solo".** `isSolo` is strict (`!hasMembers`); `soloSchedule` also covers an affiliate flagged for multiple users that has nobody added yet, and it is what decides whether the release × is drawn. Anything reflecting what that × does — `releasedSectorSet`, status cells — must key on `soloSchedule`, or the button saves correctly and the row redraws unchanged.
+- **`MM_STYLES` is shared by `/affiliates/my-members` and `/team/manage-members`.** `.mm-add-btn` is a flush segment of the CID input group on the affiliate page and a standalone button in the team card header, so base styles belong on the class and the flush treatment on `.mm-add-row .mm-add-btn`.
+- **`/teams` filters BOTH teams and affiliates on `participatingWf26`.** A group's `primary` row is kept even when inactive, because the profile photo is keyed on `primary.id` — regrouping from the filtered list silently drops the photo for a fleet whose first row is inactive. Guard the affiliate grid on "any active" rather than `affiliates.length` so an all-inactive list shows the empty state.
+- **The auto-assign booking create swallows every error.** `catch (err) { continue; // unique-constraint race }` also hides a Prisma validation error, so a schema field the client does not know about makes affiliate auto-assignment silently create nothing. After adding a column to `TobtBooking`, regenerate the client and push the column *before* letting the server run that code.
+- **`fetchVatsimName()` is broken** — the v2 member endpoint no longer returns a name, so it returns `''` for every CID. Use the `User` row.
+- **Bookings live in memory; a direct DB write is invisible until a restart.** `tobtBookingsByKey` is loaded once by `loadTobtBookingsFromDb()` at boot and maintained by the app thereafter. Editing `TobtBooking` straight in Postgres (a cleanup script, a backfill) leaves the running instance serving its stale copy — the page keeps showing deleted bookings and old callsigns. There is no safe "reload bookings" endpoint: the only two callers are `resolve-variant` and event `activate`, both destructive. So direct DB surgery is always two steps: write, then restart the app (on Railway, redeploy or restart the service).
+- **`.env` on the dev PC points at PROD.** There is no `.env.dev` on this machine, so `npm run dev`, every `pg` script and every `prisma` command here act on the live database unless a URL is passed explicitly. Treat any write as a production change and confirm it as one.
 
 ## Tools the user values
 
