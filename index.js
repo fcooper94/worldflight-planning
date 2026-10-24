@@ -3430,6 +3430,25 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
       }).catch(() => []);
       const releasedSet = new Set(releasedRows.map(r => r.sectorNumber));
 
+      // Every callsign that counts as THIS operator on a sector: the base
+      // callsign plus any aircraft they have named for it. Once a named
+      // aircraft takes over a sector the base callsign no longer holds a
+      // booking there, so a base-callsign-only test reads the operator as
+      // unbooked and hands them a second place under the placeholder.
+      const claimedBySector = new Map();
+      {
+        const named = await prisma.affiliateSectorClaim.findMany({
+          where: { affiliateId: aff.id, NOT: { callsign: null } },
+          select: { sectorNumber: true, callsign: true }
+        }).catch(() => []);
+        for (const n of named) {
+          const cs2 = String(n.callsign || '').toUpperCase();
+          if (!cs2) continue;
+          if (!claimedBySector.has(n.sectorNumber)) claimedBySector.set(n.sectorNumber, new Set());
+          claimedBySector.get(n.sectorNumber).add(cs2);
+        }
+      }
+
       for (const row of adminSheetCache) {
         if (releasedSet.has(row.number)) continue;
 
@@ -3455,13 +3474,15 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
 
         const sectorPrefix = `${row.from}-${row.to}|${row.date_utc}|${row.dep_time_utc}`;
 
-        // Skip if the affiliate's callsign is already booked on this sector,
-        // regardless of which cid owns the row. Mirrors the team-side fix —
-        // a booking reassigned away from the affiliate's main cid must still
-        // count as "this affiliate is booked here".
+        // Skip if any callsign belonging to this affiliate is booked on the
+        // sector, regardless of which cid owns the row - a booking reassigned
+        // away from the main cid, or taken over by a named aircraft, must
+        // still count as "this affiliate is booked here".
+        const mine = new Set([callsign]);
+        for (const cs2 of (claimedBySector.get(row.number) || [])) mine.add(cs2);
         const alreadyBooked = Object.values(tobtBookingsByKey).some(b =>
           b && typeof b.slotKey === 'string' && b.slotKey.startsWith(sectorPrefix)
-            && String(b.callsign || '').toUpperCase() === callsign
+            && mine.has(String(b.callsign || '').toUpperCase())
         );
         if (alreadyBooked) continue;
 
