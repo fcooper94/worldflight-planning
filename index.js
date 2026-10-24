@@ -22514,9 +22514,19 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
     claims.forEach(cl => { claimByNumber[cl.sectorNumber] = Number(cl.cid); });
   }
 
-  // Solo "released" sectors — persisted as a claim with cid=0 sentinel
+  // A "multiple users" affiliate with no other active members yet behaves like
+  // a solo one on the schedule: the main is auto-assigned to every sector with
+  // the release × instead of a one-entry dropdown of Unclaimed rows.
+  const soloSchedule = !!(affiliate && (!affiliate.hasMembers || !memberOptions.some(m => !m.isMain)));
+
+  // Solo "released" sectors — persisted as a claim with cid=0 sentinel.
+  // Keyed on soloSchedule, NOT on hasMembers: an affiliate flagged for
+  // multiple users but with nobody added yet still gets the solo UI and its
+  // release ×, and the endpoint still honours it. Reading this set more
+  // narrowly meant the release was saved and the booking dropped, but the
+  // row came back looking untouched - the × appeared to do nothing.
   const releasedSectorSet = new Set();
-  if (affiliate && !affiliate.hasMembers) {
+  if (soloSchedule) {
     Object.entries(claimByNumber).forEach(([n, c]) => { if (c === 0) releasedSectorSet.add(n); });
   }
 
@@ -22593,10 +22603,6 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
 
   const sinceYear = affiliate?.sinceYear || null;
   const isSolo = !!(affiliate && !affiliate.hasMembers);
-  // A "multiple users" affiliate with no other active members yet behaves like
-  // a solo one on the schedule: the main is auto-assigned to every sector with
-  // the release × instead of a one-entry dropdown of Unclaimed rows.
-  const soloSchedule = !!(affiliate && (!affiliate.hasMembers || !memberOptions.some(m => !m.isMain)));
   // Main CID holders manage members on /affiliates/my-members, so their HQ
   // shows the public-profile editor instead of the Our Members table.
   const isMainHolder = !!(affiliate && !readOnly && Number(affiliate.cid) === cid);
