@@ -29631,6 +29631,9 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
     if (!g.active || !g.active.participatingWf26) g.active = activeRows[0];
   }
 
+  // Same tick governs affiliates, so the grid is shown only when at least
+  // one is active for this event.
+  const anyActiveAffiliate = affiliates.some(a => a.participatingWf26);
   const globeSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></svg>`;
 
   const card = (type, id, name, facts, description, website, badge) => {
@@ -29721,7 +29724,7 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
         Apply to become a WF Affiliate
       </a>
     </div>
-    ${affiliates.length ? `<div class="wwa-grid">
+    ${anyActiveAffiliate ? `<div class="wwa-grid">
       ${(() => {
         // Multi-aircraft affiliates sharing a name are one operator: roll their
         // fleet into a single card, exactly like multi-slot teams.
@@ -29737,6 +29740,16 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
           } else {
             groups.push({ rows: [a], primary: a, multi: false });
           }
+        }
+        // Only affiliates participating in the active event are shown. The
+        // admin "Active" tick is participatingWf26 on each aircraft row, so
+        // an operator with no active row is dropped and a multi-aircraft
+        // fleet rolls up only its active aircraft. The primary row is kept
+        // as-is because the profile photo is keyed on its id.
+        for (let i = groups.length - 1; i >= 0; i--) {
+          const activeRows = groups[i].rows.filter(r => r.participatingWf26);
+          if (!activeRows.length) { groups.splice(i, 1); continue; }
+          groups[i].rows = activeRows;
         }
         return groups.map(g => {
           const rows = g.rows;
