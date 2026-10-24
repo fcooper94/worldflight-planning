@@ -53323,7 +53323,7 @@ document.addEventListener('DOMContentLoaded', () => {
   );
 });
 
-app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) => {
+app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), async (req, res) => {
   if (!req.session.user || !req.session.user.data) {
     return res.redirect('/auth/login');
   }
@@ -53333,8 +53333,20 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
   const isAdmin = isAdminUser(cid);
   const showAtcRoute = isAdmin || isPageEnabled('atc-route');
 
+  // Team and affiliate places belong on the operator’s HQ, not here. Their
+  // bookings are filed under the main CID, so without this the operator’s
+  // whole schedule shows up as that person’s own bookings - and a booking
+  // reassigned to a member would appear under theirs too.
+  const operatorCallsigns = new Set([
+    ...(await prisma.officialTeam.findMany({ select: { callsign: true } }).catch(() => [])),
+    ...(await prisma.affiliate.findMany({ select: { callsign: true } }).catch(() => []))
+  ].map(r => String(r.callsign || '').toUpperCase()).filter(Boolean));
+
   // 🔑 bookingKeys, not slotKeys (MODEL 2)
-  const myBookingKeys = Array.from(tobtBookingsByCid[cid] || []);
+  const myBookingKeys = Array.from(tobtBookingsByCid[cid] || []).filter(k => {
+    const b = tobtBookingsByKey[k];
+    return b && !operatorCallsigns.has(String(b.callsign || '').toUpperCase());
+  });
 
   const rows = myBookingKeys
     .map(bookingKey => {
@@ -53354,13 +53366,16 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
 
       const [from, to] = sectorPart.split('-');
 
-      const wfRow = adminSheetCache.find(
+      // Index, not just the row: adminSheetCache is in running order, so it
+      // is what puts the table in schedule order below.
+      const wfIdx = adminSheetCache.findIndex(
         r =>
           r.from === from &&
           r.to === to &&
           r.date_utc === dateUtc &&
           r.dep_time_utc === depTimeUtc
       );
+      const wfRow = wfIdx >= 0 ? adminSheetCache[wfIdx] : null;
 
       const wfSector = wfRow?.number || '-';
       const atcRoute = showAtcRoute ? (wfRow?.atc_route || '-') : '-';
@@ -53444,10 +53459,14 @@ app.get('/my-slots', requireLogin, requirePageEnabled('my-slots'), (req, res) =>
         simbriefUrl,
         dateUtc,
         dateDisplay,
-        depWindow
+        depWindow,
+        order: wfIdx < 0 ? Number.MAX_SAFE_INTEGER : wfIdx
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    // Running order. The source is a Set, so unsorted it comes out in
+    // whatever order the bookings happened to be cached.
+    .sort((a, b) => a.order - b.order);
 
   const content = `
  <section class="card my-slots-card">
