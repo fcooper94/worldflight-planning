@@ -22136,19 +22136,30 @@ const MM_STYLES = `
       .mm-cid-input::-webkit-outer-spin-button,
       .mm-cid-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
       .mm-cid-input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+      /* Standalone - the team Manage Members header, where it opens a modal
+         rather than sitting on a CID field - so it needs its own shape. */
       .mm-add-btn {
         display: inline-flex;
         align-items: center;
-        border: 0;
-        border-left: 1px solid var(--border);
-        border-radius: 0;
-        padding: 0 16px;
+        justify-content: center;
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+        border-radius: 6px;
+        padding: 6px 14px;
         font-size: 13px;
         font-weight: 600;
         white-space: nowrap;
         background: color-mix(in srgb, var(--accent) 18%, transparent);
         color: var(--accent);
-        transition: background .15s, color .15s;
+        transition: background .15s, color .15s, border-color .15s;
+      }
+      /* Joined onto the CID input on the affiliate page, where it is the last
+         segment of the group: no corners or outer border of its own, just a
+         divider against the input. */
+      .mm-add-row .mm-add-btn {
+        border: 0;
+        border-left: 1px solid var(--border);
+        border-radius: 0;
+        padding: 0 16px;
       }
       .mm-add-btn:hover:not(:disabled) {
         background: color-mix(in srgb, var(--accent) 30%, transparent);
