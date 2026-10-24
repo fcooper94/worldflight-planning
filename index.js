@@ -37865,7 +37865,13 @@ app.get('/wf-atc/hub', requirePageEnabled('wf-atc-hub'), requireWfAtcOrAdmin, as
       .hub-map-card { flex:0 0 340px; display:flex; }
       .hub-col.hub-no-book .hub-map-card { flex:1 1 auto; }
       #hubBookSection { display:flex; flex-direction:column; min-height:0; }
-      #hubBookScroll { overflow-y:auto; overflow-x:auto; flex:1 1 auto; min-height:120px; max-height:460px; }
+      /* .hub-top stretches both columns to the taller one, so this card is
+         usually taller than 460px. Capping the scroller there left the rest
+         of the card as dead space under the table. height:0 makes it
+         contribute nothing to the column’s intrinsic height, so flex-grow
+         hands it every pixel the card actually has; min-height keeps a
+         sensible table when the right column is the shorter one. */
+      #hubBookScroll { overflow-y:auto; overflow-x:auto; flex:1 1 auto; height:0; min-height:320px; }
       #hubBookScroll thead th { position:sticky; top:0; background:var(--panel); z-index:1; }
       /* Clicking or hovering an FIR polygon otherwise leaves a browser focus
          rectangle around the whole shape. */
