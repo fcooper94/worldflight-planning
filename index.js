@@ -2813,6 +2813,69 @@ async function releaseUnclaimedReservedBookings() {
   return released;
 }
 
+/* Move an operator's bookings onto a new callsign.
+
+   A rename that leaves the bookings behind is not just a stale label:
+   auto-assign's "already booked" test matches by callsign, so the operator
+   looks unbooked and is allocated a SECOND place. On a Booking Required
+   sector the (cid, slotKey) unique index hides that - every booking there
+   shares one slotKey - but on a slotted sector each TCT is its own slotKey,
+   so the duplicate goes straight through. That is how five operators came to
+   hold two or three TCTs each on WF2601.
+
+   The operator-facing fleet editor already did this; the admin editors did
+   not. Returns { renamed, dropped }. */
+async function renameBookingsForCallsign(oldCs, newCs) {
+  const from = String(oldCs || '').trim().toUpperCase();
+  const to = String(newCs || '').trim().toUpperCase();
+  if (!from || !to || from === to) return { renamed: 0, dropped: 0 };
+
+  const rows = await prisma.tobtBooking.findMany({ where: { callsign: from } }).catch(() => []);
+  let renamed = 0;
+  for (const bk of rows) {
+    await prisma.tobtBooking.update({ where: { id: bk.id }, data: { callsign: to } }).catch(() => null);
+    const memBk = tobtBookingsByKey[`${bk.cid}:${bk.slotKey}`];
+    if (memBk) memBk.callsign = to;
+    vatcanPushForSlotKey(bk.slotKey);
+    renamed++;
+  }
+  // The rename can reveal a duplicate the old callsign was masking.
+  const dropped = await dropDuplicateSectorBookings(to);
+  return { renamed, dropped };
+}
+
+/* One operator may hold only one place per sector. Where a callsign holds
+   several, the EARLIEST is kept - that is the one they had before whatever
+   split them, and on a slotted sector it is the better slot. */
+async function dropDuplicateSectorBookings(callsign) {
+  const cs = String(callsign || '').trim().toUpperCase();
+  if (!cs) return 0;
+  const rows = await prisma.tobtBooking.findMany({ where: { callsign: cs } }).catch(() => []);
+  const bySector = new Map();
+  for (const bk of rows) {
+    const parts = String(bk.slotKey || '').split('|');
+    const key = `${bk.cid}|${parts[0]}|${parts[1]}|${parts[2]}`;
+    if (!bySector.has(key)) bySector.set(key, []);
+    bySector.get(key).push(bk);
+  }
+  let dropped = 0;
+  for (const group of bySector.values()) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => String(a.tobtTimeUtc || '').localeCompare(String(b.tobtTimeUtc || '')));
+    for (const bk of group.slice(1)) {
+      await prisma.tobtBooking.delete({ where: { id: bk.id } }).catch(() => null);
+      const bookingKey = `${Number(bk.cid)}:${bk.slotKey}`;
+      deleteBookingByBookingKey(bookingKey);
+      if (tobtBookingsByCid[Number(bk.cid)]) tobtBookingsByCid[Number(bk.cid)].delete(bookingKey);
+      try { io.emit('bookingCancelled', { slotKey: bk.slotKey }); } catch {}
+      vatcanPushForSlotKey(bk.slotKey);
+      dropped++;
+      console.log(`[BOOKING] Dropped duplicate ${cs} on ${bk.slotKey} (kept the earlier slot)`);
+    }
+  }
+  return dropped;
+}
+
 /* ===== TEAM AUTO-ASSIGNMENT ===== */
 // One booking per participating team per flow-restricted sector, filed under
 // the team owner's mainCid. SLOTTED picks the spare slot whose TOBT is
@@ -31401,10 +31464,20 @@ app.patch('/api/admin/official-teams/:id', requireAdmin, profilePhotoUpload.sing
   if (body.participatingWf26 !== undefined) data.participatingWf26 = asBool(body.participatingWf26);
   if (!Object.keys(data).length && !req.file) return res.status(400).json({ error: 'No fields to update' });
 
-  const oldRow = data.mainCid ? await prisma.officialTeam.findUnique({ where: { id }, select: { mainCid: true, teamName: true } }).catch(() => null) : null;
+  // Read the current callsign too: a rename has to take the bookings with it.
+  const beforeRow = await prisma.officialTeam.findUnique({ where: { id }, select: { mainCid: true, teamName: true, callsign: true } }).catch(() => null);
+  const oldRow = data.mainCid ? beforeRow : null;
 
   if (Object.keys(data).length) await prisma.officialTeam.update({ where: { id }, data });
   await saveProfilePhoto('team', id, req.file);
+
+  // Carry the bookings over, or auto-assign sees an unbooked team and
+  // allocates them a second slot while the first sits under the old name.
+  if (data.callsign && beforeRow && data.callsign !== String(beforeRow.callsign || '').toUpperCase()) {
+    const moved = await renameBookingsForCallsign(beforeRow.callsign, data.callsign);
+    console.log('[TEAM-ADMIN] ' + beforeRow.callsign + ' -> ' + data.callsign
+      + ': ' + moved.renamed + ' booking(s) moved' + (moved.dropped ? ', ' + moved.dropped + ' duplicate(s) dropped' : ''));
+  }
 
   // When mainCid changes via admin, ensure the new CID has a WF_TEAM role row
   // and refresh in-memory sets so the sidebar picks up the change immediately.
@@ -31498,6 +31571,8 @@ async function reassignAffiliateToNewMainCid(affiliateRow, oldCid, newCid) {
 app.patch('/api/admin/affiliates/:id', requireAdmin, profilePhotoUpload.single('photo'), async (req, res) => {
   const id = Number(req.params.id);
   if (!id) return res.status(400).json({ error: 'Invalid id' });
+  // Current callsign, so a rename can take its bookings with it.
+  const beforeAff = await prisma.affiliate.findUnique({ where: { id }, select: { callsign: true } }).catch(() => null);
   const body = req.body || {};
   const data = {};
   if (body.callsign !== undefined) data.callsign = String(body.callsign).trim().toUpperCase();
@@ -31533,6 +31608,14 @@ app.patch('/api/admin/affiliates/:id', requireAdmin, profilePhotoUpload.single('
 
   if (Object.keys(data).length) await prisma.affiliate.update({ where: { id }, data });
   await saveProfilePhoto('affiliate', id, req.file);
+
+  // Same as the team editor: a rename takes its bookings with it, or the
+  // operator is allocated a second place under the new name.
+  if (data.callsign && beforeAff && data.callsign !== String(beforeAff.callsign || '').toUpperCase()) {
+    const moved = await renameBookingsForCallsign(beforeAff.callsign, data.callsign);
+    console.log('[AFF-ADMIN] ' + beforeAff.callsign + ' -> ' + data.callsign
+      + ': ' + moved.renamed + ' booking(s) moved' + (moved.dropped ? ', ' + moved.dropped + ' duplicate(s) dropped' : ''));
+  }
 
   // Carry existing bookings and sector claims over to the new main CID. Uses
   // the post-update callsign so a simultaneous callsign change is respected.

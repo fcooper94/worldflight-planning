@@ -297,7 +297,9 @@
       "Bash(VATCAN_BOOKINGS_API_URL=https://bookings.vatcan.ca node seed-vatcan-events.mjs)",
       "Bash(VATCAN_BOOKINGS_API_URL=https://bookings.vatcan.ca node seed-vatcan-events.mjs --push)",
       "Bash(ls c:/dev/WorldFlight-Planning/data/fir*)",
-      "Bash(node --env-file=.env -e ':*)"
+      "Bash(node --env-file=.env -e ':*)",
+      "Bash(node scripts/fix-duplicate-bookings.js)",
+      "Bash(node scripts/fix-duplicate-bookings.js --push)"
     ]
   }
 }
