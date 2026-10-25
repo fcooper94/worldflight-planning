@@ -6641,6 +6641,20 @@ html[data-map-theme="light"] .ac-label {
   white-space: nowrap;
   display: inline-block;
 }
+/* "No Bookings Left!" opens an explanation modal. .col-book .flowtype-pill
+   switches pointer events off for the static pills, so turn them back on. */
+.col-book button.flowtype-pill.sched-full-pill {
+  font-family: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.col-book button.flowtype-pill.sched-full-pill:hover { border-color: rgba(148,163,184,0.6); color: #cbd5e1; }
+/* "Opens 31st Oct 2100z" is the longest text the 140px pill carries. */
+/* The rotating box sizes to line 1, and line 2 is laid over it, so stretch
+   it to the pill or the longer "Opens ..." line is clipped. */
+.book-pill.sched-notopen-pill { font-family: inherit; padding-left: 3px; padding-right: 3px; }
+.book-pill.sched-notopen-pill .pill-rotate { display: block; width: 100%; }
+.book-pill.sched-notopen-pill .pill-line-2 { font-size: 11px; white-space: nowrap; }
 /* A full option of a route-alternative leg whose booking for this viewer
    overflowed to the other option. --opt is that option's colour. */
 .flowtype-pill.flowtype-overflow {

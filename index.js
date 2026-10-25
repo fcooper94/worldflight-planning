@@ -4408,6 +4408,7 @@ async function bootstrap() {
 
   setBootstrapStatus(4, 'Loading event schedule');
   await refreshAdminSheet();   // 🔑 sets activeEventId + loads schedule rows
+  await loadBookingsOpenFromDb();
 
   setBootstrapStatus(5, 'Loading departure flows');
   await loadDepFlowsFromDb();  // needs activeEventId
@@ -8007,6 +8008,13 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
   );
   if (!row) return;
 
+  // Bookings not open yet for pilots (teams keep their priority places).
+  const notOpenUntil = !teamBooking && !isAdminUser(sessionCid) ? bookingsNotOpenUntil(row) : null;
+  if (notOpenUntil) {
+    socket.emit('bookingError', { error: `Bookings for ${row.number} open at ${formatBookingsOpen(notOpenUntil)}.` });
+    return;
+  }
+
   const slotKey =
     `${from}-${to}|${row.date_utc}|${row.dep_time_utc}|BOOKING_ONLY`;
 
@@ -9569,6 +9577,59 @@ function buildTimeWindow(hhmm) {
 function utcWindow(hhmm) {
   const w = buildTimeWindow(hhmm);
   return w ? w.replace(/:/g, '').replace(/[–—]/g, '-') + 'z' : '';
+}
+
+/* ===== BOOKINGS OPEN TIME =====
+   A flow-restricted sector can hold pilot bookings back until a set time:
+   24 or 48 hours before its departure window opens, or a fixed instant
+   (SectorPlan.bookingsOpenMode / bookingsOpenAt). Cached in memory by WF
+   number because the schedule asks for every row. Teams and affiliates are
+   auto-assigned regardless, and admins may always book. */
+const bookingsOpenByWf = new Map();   // wf -> { mode, at }
+
+async function loadBookingsOpenFromDb() {
+  if (!activeEventId) return;
+  const plans = await prisma.sectorPlan.findMany({
+    where: { eventId: activeEventId, bookingsOpenMode: { not: null } },
+    select: { wf: true, bookingsOpenMode: true, bookingsOpenAt: true }
+  }).catch(() => []);
+  bookingsOpenByWf.clear();
+  plans.forEach(p => bookingsOpenByWf.set(p.wf, { mode: p.bookingsOpenMode, at: p.bookingsOpenAt }));
+}
+
+// When pilots may first book `row`, as epoch ms - null when they always may.
+function bookingsOpenAtMs(row) {
+  const cfg = row && bookingsOpenByWf.get(row.number);
+  if (!cfg || !cfg.mode) return null;
+  if (cfg.mode === 'AT') return cfg.at ? new Date(cfg.at).getTime() : null;
+  const hours = cfg.mode === 'H24' ? 24 : (cfg.mode === 'H48' ? 48 : 0);
+  if (!hours) return null;
+  const windowOpen = utcInstantMs(row.date_utc, row.dep_time_utc, -60);
+  return windowOpen == null ? null : windowOpen - hours * 3600000;
+}
+
+// Still closed to pilot bookings: the instant it opens; otherwise null.
+// Only a flow-restricted sector takes bookings at all.
+function bookingsNotOpenUntil(row, now = Date.now()) {
+  if (!row || (sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE') === 'NONE') return null;
+  const t = bookingsOpenAtMs(row);
+  return t != null && now < t ? t : null;
+}
+
+// "31st Oct 2000z" - the short form on the schedule's rotating pill.
+function formatBookingsOpenShort(ms) {
+  const d = new Date(ms);
+  const day = d.getUTCDate();
+  const sfx = (day % 100 >= 11 && day % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[day % 10] || 'th');
+  const mon = d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
+  return `${day}${sfx} ${mon} ${d.toISOString().slice(11, 16).replace(':', '')}z`;
+}
+
+// "Fri 30 Oct 2026, 20:00z"
+function formatBookingsOpen(ms) {
+  const d = new Date(ms);
+  const day = d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  return `${day.replace(/,/g, '')}, ${d.toISOString().slice(11, 16)}z`;
 }
 
 // The date a sector's departure window opens. The window is dep -60, so a leg
@@ -12104,6 +12165,10 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
     }
   }
   const bookingsFull = bookingCap && bookingCap.total > 0 && bookingCap.remaining <= 0;
+  // Pilot bookings held back until a set time (Sector Planning).
+  const sectorOpensAt = leg ? bookingsNotOpenUntil(leg) : null;
+  const sectorOpensLabel = sectorOpensAt ? formatBookingsOpen(sectorOpensAt) : '';
+  const sectorAlertOn = sectorOpensAt && cid ? (await bookingAlertSectorsFor(cid)).has(wfNum) : false;
 
   // Count slots for slotted mode
   let slotTotal = 0, slotsLeft = 0;
@@ -12117,7 +12182,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
     }
   }
 
-  const remainingText = bookingsFull ? '' :
+  const remainingText = sectorOpensAt ? 'Not yet available to book' : bookingsFull ? '' :
     flowType === 'SLOTTED' && slotTotal > 0 ? slotsLeft + ' Booking' + (slotsLeft !== 1 ? 's' : '') + ' Left' :
     flowType === 'BOOKING_ONLY' && bookingCap && bookingCap.total > 0 ? bookingCap.remaining + ' Booking' + (bookingCap.remaining !== 1 ? 's' : '') + ' Left' : '';
 
@@ -12266,7 +12331,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:8px;">
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
-            <div class="sector-banner-text" style="align-items:center;"><span class="sector-banner-label">Flow Restrictions</span><span class="sector-banner-icao">${flowLabel}</span>${remainingText ? '<span style="font-size:12px;color:inherit;opacity:0.7;margin-top:2px;">' + remainingText + '</span>' : ''}</div>
+            <div class="sector-banner-text" style="align-items:center;"><span class="sector-banner-label">Flow Restrictions</span><span class="sector-banner-icao">${flowLabel}</span>${flowType !== 'NONE' && depFlow ? '<span style="font-size:13px;font-weight:600;color:inherit;margin-top:2px;">Flow rate: ' + depFlow + ' planes/hr</span>' : ''}${remainingText ? '<span style="font-size:12px;color:inherit;opacity:0.7;margin-top:2px;">' + remainingText + '</span>' : ''}</div>
           </div>
           <div style="font-size:12px;text-align:center;font-style:italic;">
             ${flowType !== 'NONE' && flowReasonText ? '<span style="color:var(--muted);">Reason:</span> <span style="color:inherit;opacity:0.8;">' + flowReasonText + '</span>' : ''}
@@ -12303,6 +12368,23 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
                 + '<button id="cancelBookingBtn" data-slotkey="' + (userBooking ? userBooking.slotKey : '').replace(/"/g, '&quot;') + '" style="flex:1;text-align:center;padding:8px 14px;background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.35);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">Cancel Booking</button>'
                 + '</div>'
                 + '</div></div>';
+            } else if (sectorOpensAt) {
+              return '<div class="sector-notopen" style="text-align:center;padding:10px 12px;margin:0 -17px -17px;border-top:1px solid var(--border);border-radius:0 0 11px 11px;width:calc(100% + 34px);box-sizing:border-box;background:rgba(245,158,11,0.08);">'
+                + '<div style="font-size:13px;font-weight:600;color:#fbbf24;">Not yet available to book</div>'
+                + '<div style="font-size:12px;color:var(--text);margin-top:3px;">Bookings for this sector will open at <strong>' + escapeHtml(sectorOpensLabel) + '</strong>.</div>'
+                + (user
+                  ? '<button type="button" id="sectorAlertBtn" data-wf="' + escapeHtml(wfNum) + '" data-subscribed="' + (sectorAlertOn ? '1' : '') + '" style="margin-top:8px;padding:6px 12px;background:rgba(245,158,11,0.14);color:#fbbf24;border:1px solid rgba(245,158,11,0.4);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">'
+                    + (sectorAlertOn ? 'Cancel email alert' : 'Email me when bookings open') + '</button>'
+                    + '<div id="sectorAlertMsg" style="font-size:11px;margin-top:5px;color:#4ade80;">' + (sectorAlertOn ? 'We will email you when bookings open.' : '') + '</div>'
+                  : '<a href="/auth/login?next=' + encodeURIComponent('/sector/' + wfNum + '/' + fromIcao + '/' + toIcao) + '" style="display:inline-block;margin-top:8px;font-size:12px;font-weight:600;color:var(--warning);text-decoration:none;">Log in to be emailed when bookings open \u2192</a>')
+                + '</div>'
+                + '<script>(function(){var b=document.getElementById("sectorAlertBtn");if(!b)return;var m=document.getElementById("sectorAlertMsg");'
+                + 'b.addEventListener("click",async function(){var on=!!b.dataset.subscribed;b.disabled=true;try{'
+                + 'var r=await fetch("/api/booking-alerts/"+encodeURIComponent(b.dataset.wf),{method:on?"DELETE":"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"}});'
+                + 'var d=await r.json().catch(function(){return {};});if(!r.ok)throw new Error(d.error||"Something went wrong");'
+                + 'b.dataset.subscribed=d.subscribed?"1":"";b.textContent=d.subscribed?"Cancel email alert":"Email me when bookings open";'
+                + 'm.style.color="#4ade80";m.textContent=d.subscribed?"We will email you when bookings open.":"Email alert cancelled.";'
+                + '}catch(e){m.style.color="#f87171";m.textContent=e.message;}finally{b.disabled=false;}});})();</' + 'script>';
             } else if (!user) {
               return '<a href="/auth/login?next=' + encodeURIComponent('/sector/' + wfNum + '/' + fromIcao + '/' + toIcao) + '" style="display:block;text-align:center;padding:10px;margin:0 -17px -17px;border-top:1px solid var(--border);border-radius:0 0 11px 11px;width:calc(100% + 34px);font-size:13px;font-weight:600;text-decoration:none;background:var(--panel2);color:var(--warning);">'
                 + (flowType === 'SLOTTED' ? 'Login to book \u2192' : 'Login to make a Booking \u2192') + '</a>';
@@ -12795,6 +12877,8 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   const isAdmin = isAdminUser(cid);
   const isLoggedIn = !!cid;
   const myBookings = cid ? tobtBookingsByCid[cid] : null;
+  // Sectors the viewer asked to be emailed about when bookings open.
+  const myAlertSectors = await bookingAlertSectorsFor(cid);
   // Callsigns the viewer flies for as an affiliate (main CID or active
   // member) - affiliate bookings sit under the main CID, so a member's own
   // bookings alone would miss them.
@@ -13140,6 +13224,23 @@ ${TZ_SELECT_HTML}
                   }
                 }
 
+                /* Bookings not open yet — when they open; click for the
+                   details and the "email me" option. */
+                const opensAt = bookingsNotOpenUntil(r);
+                if (opensAt) {
+                  const opensLabel = formatBookingsOpen(opensAt);
+                  const notOpenClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
+                  return '<td class="col-book"><button type="button" class="book-pill sched-notopen-pill ' + notOpenClass + '"'
+                    + ' data-wf="' + escapeHtml(r.number) + '" data-opens="' + escapeHtml(opensLabel) + '"'
+                    + ' data-subscribed="' + (myAlertSectors.has(r.number) ? '1' : '') + '" data-logged-in="' + (isLoggedIn ? '1' : '') + '">'
+                    + '<span class="book-pill-label pill-rotate">'
+                    + '<span class="pill-line pill-line-1">Booking Required</span>'
+                    + '<span class="pill-line pill-line-2">Opens ' + escapeHtml(formatBookingsOpenShort(opensAt)) + '</span>'
+                    + '</span>'
+                    + '<span class="book-pill-hover">More Info</span>'
+                    + '</button></td>';
+                }
+
                 /* Bookable — hover pill */
                 const pillClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
                 const label = 'Booking Required';
@@ -13156,7 +13257,7 @@ ${TZ_SELECT_HTML}
                 if (flowtype === 'BOOKING_ONLY') {
                   const cap = getBookingOnlyCapacity(r.from, r.to);
                   if (cap.total > 0 && cap.remaining <= 0) {
-                    return overflowPill(r) || '<td class="col-book"><span class="flowtype-pill flowtype-full">No Bookings Left!</span></td>';
+                    return overflowPill(r) || '<td class="col-book"><button type="button" class="flowtype-pill flowtype-full sched-full-pill" data-wf="' + escapeHtml(r.number) + '" data-window="' + escapeHtml(buildTimeWindow(r.dep_time_utc)) + '">No Bookings Left!</button></td>';
                   }
                   const remainLabel = cap.total > 0 ? cap.remaining + ' Booking' + (cap.remaining !== 1 ? 's' : '') + ' Left' : '';
                   return '<td class="col-book">'
@@ -13181,7 +13282,7 @@ ${TZ_SELECT_HTML}
                 const slotRemainLabel = slotTotal > 0 ? slotsLeft + ' Booking' + (slotsLeft !== 1 ? 's' : '') + ' Left' : '';
 
                 if (slotTotal > 0 && slotsLeft <= 0) {
-                  return overflowPill(r) || '<td class="col-book"><span class="flowtype-pill flowtype-full">No Bookings Left!</span></td>';
+                  return overflowPill(r) || '<td class="col-book"><button type="button" class="flowtype-pill flowtype-full sched-full-pill" data-wf="' + escapeHtml(r.number) + '" data-window="' + escapeHtml(buildTimeWindow(r.dep_time_utc)) + '">No Bookings Left!</button></td>';
                 }
 
                 return '<td class="col-book">'
@@ -13640,6 +13741,93 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(function() { copyBtn.textContent = prev; }, 1200);
     } catch (e) {}
   });
+})();
+</script>
+
+<div id="schedInfoModal" class="route-modal" hidden>
+  <div class="route-modal-backdrop"></div>
+  <div class="route-modal-card" role="dialog" aria-modal="true" aria-labelledby="schedInfoTitle">
+    <div class="route-modal-header">
+      <div id="schedInfoTitle" style="font-weight:700;font-size:14px;"></div>
+      <button type="button" class="route-modal-close sched-info-close" aria-label="Close">&times;</button>
+    </div>
+    <div id="schedInfoBody" class="route-modal-body" style="font-family:inherit;font-size:13px;line-height:1.6;white-space:normal;"></div>
+    <div class="route-modal-actions">
+      <button type="button" class="route-modal-copy route-modal-secondary sched-info-close">Close</button>
+      <button type="button" id="schedInfoAlert" class="route-modal-copy" style="display:none;"></button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var modal = document.getElementById('schedInfoModal');
+  if (!modal) return;
+  var title = document.getElementById('schedInfoTitle');
+  var body = document.getElementById('schedInfoBody');
+  var alertBtn = document.getElementById('schedInfoAlert');
+  var current = null;
+  function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  function close() { modal.hidden = true; current = null; }
+  function setAlertBtn(subscribed) {
+    alertBtn.textContent = subscribed ? 'Cancel email alert' : 'Email me when bookings open';
+  }
+
+  document.addEventListener('click', function(e) {
+    var full = e.target.closest('.sched-full-pill');
+    if (full) {
+      // "20:00–22:00" (en dash) from the server.
+      var w = String(full.dataset.window || '').split(/[–—-]/);
+      title.textContent = full.dataset.wf + ' — No bookings left';
+      body.innerHTML = '<p style="margin:0 0 10px;">There are no bookings left for this sector to depart within the departure window of <strong>'
+        + esc((w[0] || '').trim()) + 'z</strong> to <strong>' + esc((w[1] || '').trim()) + 'z</strong>.</p>'
+        + '<p style="margin:0;">You can still choose to fly, but will need to depart outside this window.</p>';
+      alertBtn.style.display = 'none';
+      current = null;
+      modal.hidden = false;
+      return;
+    }
+    var notOpen = e.target.closest('.sched-notopen-pill');
+    if (notOpen) {
+      current = notOpen;
+      title.textContent = notOpen.dataset.wf + ' — Not yet available to book';
+      body.innerHTML = '<p style="margin:0 0 10px;">This sector is flow restricted, but it is not yet available to book.</p>'
+        + '<p style="margin:0;">Bookings for this sector will open at <strong>' + esc(notOpen.dataset.opens) + '</strong>.</p>'
+        + (notOpen.dataset.loggedIn ? '' : '<p style="margin:10px 0 0;color:var(--muted);">Log in to be emailed when bookings open.</p>');
+      alertBtn.style.display = notOpen.dataset.loggedIn ? '' : 'none';
+      setAlertBtn(!!notOpen.dataset.subscribed);
+      modal.hidden = false;
+    }
+  });
+
+  alertBtn.addEventListener('click', async function() {
+    if (!current) return;
+    var subscribed = !!current.dataset.subscribed;
+    alertBtn.disabled = true;
+    try {
+      var r = await fetch('/api/booking-alerts/' + encodeURIComponent(current.dataset.wf), {
+        method: subscribed ? 'DELETE' : 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      var d = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(d.error || 'Something went wrong');
+      current.dataset.subscribed = d.subscribed ? '1' : '';
+      setAlertBtn(d.subscribed);
+      var note = body.querySelector('.sched-alert-note') || body.appendChild(document.createElement('p'));
+      note.className = 'sched-alert-note';
+      note.style.cssText = 'margin:10px 0 0;color:#4ade80;';
+      note.textContent = d.subscribed ? 'We will email you when bookings open for this sector.' : 'Email alert cancelled.';
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      alertBtn.disabled = false;
+    }
+  });
+
+  modal.querySelectorAll('.sched-info-close').forEach(function(b) { b.addEventListener('click', close); });
+  modal.querySelector('.route-modal-backdrop').addEventListener('click', close);
+  document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
 })();
 </script>
 
@@ -20650,6 +20838,18 @@ app.post('/api/tobt/book', requireLogin, async (req, res) => {
       }
     } else if (!manual && String(enteredCid).trim() !== String(cid)) {
       return res.status(403).json({ error: 'CID does not match your logged-in account.' });
+    }
+
+    // Bookings not open yet for pilots. Teams keep their priority places,
+    // and manual (controller) and admin bookings are not held back.
+    if (!teamBooking && !manual && !isAdminUser(cid)) {
+      const [legKey, dUtc, depUtc] = String(slotKey).split('|');
+      const [f, t] = String(legKey || '').split('-');
+      const sectorRow = (adminSheetCache || []).find(r => r.from === f && r.to === t && r.date_utc === dUtc && r.dep_time_utc === depUtc);
+      const notOpenUntil = bookingsNotOpenUntil(sectorRow);
+      if (notOpenUntil) {
+        return res.status(403).json({ error: `Bookings for ${sectorRow.number} open at ${formatBookingsOpen(notOpenUntil)}.` });
+      }
     }
 
     // 3️⃣ Parse slotKey: FROM-TO|Date|DepTime|TOBT
@@ -47627,6 +47827,31 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
             <div id="spFlowRateMsg" style="font-size:10px;color:var(--muted);margin-top:4px;"></div>
             <div id="spFlowRateWarn" style="display:none;font-size:11px;color:#f87171;margin-top:6px;line-height:1.5;">Please consider carefully the adverse effects on the WF schedule if the flow rate is less than 30 planes/hr.</div>
             <div id="spFlowRateTotal" style="font-size:12px;color:var(--text);margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);"></div>
+            ${(() => {
+              // When pilots may start booking. Teams and affiliates are
+              // auto-assigned regardless.
+              const mode = plan.bookingsOpenMode || '';
+              const winOpen = utcInstantMs(sched.date_utc, sched.dep_time_utc, -60);
+              const atVal = plan.bookingsOpenAt ? new Date(plan.bookingsOpenAt).toISOString().slice(0, 16) : '';
+              const opt = (v, label) => `<option value="${v}"${mode === v ? ' selected' : ''}>${label}</option>`;
+              return `
+            <div id="spBookOpenWrap" data-window-open="${winOpen != null ? winOpen : ''}" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">Bookings open</span>
+                <select id="spBookOpenMode" ${canEditDep ? '' : 'disabled'} style="padding:3px 6px;background:var(--panel2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;">
+                  ${opt('', 'Immediately')}
+                  ${opt('H24', '24 hours before the departure window')}
+                  ${opt('H48', '48 hours before the departure window')}
+                  ${opt('AT', 'At a specific date &amp; time')}
+                </select>
+                <input type="datetime-local" id="spBookOpenAt" value="${atVal}" ${canEditDep ? '' : 'disabled'} style="display:${mode === 'AT' ? 'inline-block' : 'none'};padding:3px 6px;background:var(--panel2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;color-scheme:dark;" />
+                <span id="spBookOpenAtUtc" style="display:${mode === 'AT' ? 'inline' : 'none'};font-size:11px;color:var(--muted);">UTC</span>
+                ${canEditDep ? '<button type="button" id="spBookOpenSave" class="action-btn primary" style="font-size:11px;padding:3px 10px;">Save</button>' : ''}
+              </div>
+              <div id="spBookOpenWhen" style="font-size:11px;color:var(--text);margin-top:4px;"></div>
+              <div style="font-size:10px;color:var(--muted);margin-top:2px;">Pilots can book from this time. WF Teams and Affiliates are allocated their places regardless.</div>
+            </div>`;
+            })()}
           </div>
           </div>
 
@@ -48381,6 +48606,48 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
         rateInput.addEventListener('input', checkRateWarn);
         checkRateWarn();
       }
+
+      // ----- Bookings open time -----
+      (function() {
+        var wrap = document.getElementById('spBookOpenWrap');
+        if (!wrap) return;
+        var modeSel = document.getElementById('spBookOpenMode');
+        var atInput = document.getElementById('spBookOpenAt');
+        var atUtc = document.getElementById('spBookOpenAtUtc');
+        var when = document.getElementById('spBookOpenWhen');
+        var winOpen = Number(wrap.dataset.windowOpen) || null;
+        function fmt(ms) {
+          var d = new Date(ms);
+          return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace(/,/g, '')
+            + ', ' + d.toISOString().slice(11, 16) + 'z';
+        }
+        function render() {
+          var m = modeSel.value;
+          atInput.style.display = atUtc.style.display = m === 'AT' ? 'inline-block' : 'none';
+          var ms = null;
+          if ((m === 'H24' || m === 'H48') && winOpen) ms = winOpen - (m === 'H24' ? 24 : 48) * 3600000;
+          if (m === 'AT' && atInput.value) ms = new Date(atInput.value + ':00Z').getTime();
+          when.textContent = m === '' ? 'Pilots can book now.'
+            : (ms ? 'Pilots can book from ' + fmt(ms) + (ms <= Date.now() ? ' (already open)' : '') : '');
+        }
+        modeSel.addEventListener('change', render);
+        atInput.addEventListener('input', render);
+        render();
+        var save = document.getElementById('spBookOpenSave');
+        if (save) save.addEventListener('click', async function() {
+          var m = modeSel.value;
+          if (m === 'AT' && !atInput.value) { when.textContent = 'Pick a date and time.'; when.style.color = '#f87171'; return; }
+          save.disabled = true;
+          var res = await spPostJson('/api/sector-plan/' + encodeURIComponent(window.SP.wf) + '/bookings-open',
+            { mode: m, at: m === 'AT' ? atInput.value + ':00Z' : null });
+          save.disabled = false;
+          when.style.color = res.ok ? '#4ade80' : '#f87171';
+          if (!res.ok) { when.textContent = (res.data && res.data.error) || 'Failed to save'; return; }
+          render();
+          when.textContent = 'Saved. ' + when.textContent;
+          setTimeout(function() { when.style.color = ''; render(); }, 3000);
+        });
+      })();
 
       var rateSave = document.getElementById('spFlowRateSave');
       if (rateSave) rateSave.addEventListener('click', async function() {
@@ -49244,6 +49511,137 @@ app.post('/api/sector-plan/:wf/flow-rate', requireLogin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// When pilots may start booking a flow-restricted sector: { mode: '' (now) |
+// 'H24' | 'H48' | 'AT', at: ISO instant, required for AT }.
+app.post('/api/sector-plan/:wf/bookings-open', requireLogin, async (req, res) => {
+  try {
+    const cid = Number(req.session?.user?.data?.cid);
+    const wf = String(req.params.wf || '').toUpperCase();
+    const mode = String(req.body?.mode || '').toUpperCase();
+    if (!['', 'H24', 'H48', 'AT'].includes(mode)) return res.status(400).json({ error: 'Invalid option' });
+    let at = null;
+    if (mode === 'AT') {
+      at = new Date(String(req.body?.at || ''));
+      if (isNaN(at.getTime())) return res.status(400).json({ error: 'Pick a date and time' });
+    }
+    const sched = (adminSheetCache || []).find(r => r?.number === wf);
+    if (!sched) return res.status(404).json({ error: 'WF not found' });
+    if (!(await canEditPlanSide(cid, 'DEP', sched.from, sched.to))) return res.status(403).json({ error: 'No edit access' });
+    const plan = await getOrCreateSectorPlan(wf, sched.from, sched.to);
+    await prisma.sectorPlan.update({
+      where: { id: plan.id },
+      data: { bookingsOpenMode: mode || null, bookingsOpenAt: at, depUpdatedBy: cid, depUpdatedAt: new Date() }
+    });
+    if (mode) bookingsOpenByWf.set(wf, { mode, at });
+    else bookingsOpenByWf.delete(wf);
+    const opensAt = bookingsOpenAtMs(sched);
+    res.json({ success: true, opensAt: opensAt != null ? new Date(opensAt).toISOString() : null, label: opensAt != null ? formatBookingsOpen(opensAt) : '' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* "Email me when bookings open" - one alert per pilot per sector, sent by
+   sendBookingOpenAlerts() once the sector opens. POST subscribes, DELETE
+   cancels. The address is the one VATSIM shares at login. */
+app.post('/api/booking-alerts/:wf', requireLogin, async (req, res) => {
+  try {
+    const cid = Number(req.session?.user?.data?.cid);
+    // The session's VATSIM email, else the one stored at an earlier login
+    // (the auth callback saves it on User) - a dev login carries none.
+    let email = String(req.session?.user?.data?.personal?.email || '').trim();
+    if (!email && cid) {
+      const u = await prisma.user.findUnique({ where: { cid }, select: { email: true } }).catch(() => null);
+      email = String(u?.email || '').trim();
+    }
+    const wf = String(req.params.wf || '').toUpperCase();
+    const row = (adminSheetCache || []).find(r => r?.number === wf);
+    if (!row || !activeEventId) return res.status(404).json({ error: 'Sector not found' });
+    if (!bookingsNotOpenUntil(row)) return res.status(400).json({ error: 'Bookings for this sector are already open.' });
+    if (!email) return res.status(400).json({ error: 'Your VATSIM account has not shared an email address with us, so we cannot email you.' });
+    if (!prisma.bookingOpenAlert) return res.status(503).json({ error: 'Not available yet - please try again shortly.' });
+    await prisma.bookingOpenAlert.upsert({
+      where: { eventId_sectorNumber_cid: { eventId: activeEventId, sectorNumber: wf, cid } },
+      update: { email, sentAt: null },
+      create: { eventId: activeEventId, sectorNumber: wf, cid, email }
+    });
+    res.json({ ok: true, subscribed: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/booking-alerts/:wf', requireLogin, async (req, res) => {
+  try {
+    const cid = Number(req.session?.user?.data?.cid);
+    const wf = String(req.params.wf || '').toUpperCase();
+    await prisma.bookingOpenAlert?.deleteMany({ where: { eventId: activeEventId || 0, sectorNumber: wf, cid } });
+    res.json({ ok: true, subscribed: false });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Sectors the viewer asked to be told about (still unsent), for the pages
+// that show the button.
+async function bookingAlertSectorsFor(cid) {
+  if (!cid || !activeEventId || !prisma.bookingOpenAlert) return new Set();
+  const rows = await prisma.bookingOpenAlert.findMany({
+    where: { eventId: activeEventId, cid: Number(cid), sentAt: null }, select: { sectorNumber: true }
+  }).catch(() => []);
+  return new Set(rows.map(r => r.sectorNumber));
+}
+
+// Every minute: email everyone waiting on a sector that has now opened.
+let bookingAlertsRunning = false;
+async function sendBookingOpenAlerts() {
+  if (bookingAlertsRunning || !activeEventId || !prisma.bookingOpenAlert) return;
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return;
+  bookingAlertsRunning = true;
+  try {
+    const pending = await prisma.bookingOpenAlert.findMany({ where: { eventId: activeEventId, sentAt: null } });
+    if (!pending.length) return;
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: false,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+    const base = process.env.PUBLIC_BASE_URL || 'https://planning.worldflight.center';
+    let sent = 0;
+    for (const a of pending) {
+      const row = (adminSheetCache || []).find(r => r?.number === a.sectorNumber);
+      if (!row || bookingsNotOpenUntil(row)) continue;   // gone, or not open yet
+      const leg = `${row.number}: ${row.from} → ${row.to}`;
+      const html = '<div style="font-family:sans-serif;max-width:600px;color:#1f2937;">'
+        + '<h2 style="color:#0369a1;margin:0 0 12px;font-size:20px;">Bookings are open for ' + escapeHtml(row.number) + '</h2>'
+        + '<p style="font-size:14px;line-height:1.6;margin:0 0 12px;">You asked us to let you know when bookings open for <strong>' + escapeHtml(leg) + '</strong>'
+        + ' (departure window ' + escapeHtml(utcWindow(row.dep_time_utc)) + ', ' + escapeHtml(windowOpenDate(row.date_utc, row.dep_time_utc)) + ').</p>'
+        + '<p style="font-size:14px;line-height:1.6;margin:0 0 18px;">This sector is flow restricted, so places are limited - book soon to secure yours.</p>'
+        + '<a href="' + base + '/schedule" style="display:inline-block;background:#0369a1;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-weight:600;">Book on the WorldFlight Planning Portal</a>'
+        + '</div>';
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || '"WorldFlight" <noreply@worldflight.center>',
+          to: a.email,
+          subject: `Bookings are open: ${leg}`,
+          html
+        });
+        await prisma.bookingOpenAlert.update({ where: { id: a.id }, data: { sentAt: new Date() } });
+        sent++;
+      } catch (e) {
+        console.error(`[BOOKING ALERT] ${a.sectorNumber} -> CID ${a.cid} failed:`, e.message);
+      }
+    }
+    if (sent) console.log(`[BOOKING ALERT] Sent ${sent} "bookings open" email(s)`);
+  } catch (e) {
+    console.error('[BOOKING ALERT] sweep failed:', e.message);
+  } finally {
+    bookingAlertsRunning = false;
+  }
+}
+setInterval(() => { sendBookingOpenAlerts(); }, 60 * 1000);
 
 app.post('/api/sector-plan/:wf/flow-reason', requireLogin, async (req, res) => {
   try {
@@ -52992,6 +53390,12 @@ app.get('/book', async (req, res) => {
         teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid), callsigns: teamCallsigns };
       }
     }
+  }
+
+  // Not open to pilot bookings yet: the sector page says when, and offers
+  // the "email me" alert. Admins and team bookers are not held back.
+  if (bookLeg && !isAdmin && !teamBookingContext && bookingsNotOpenUntil(bookLeg)) {
+    return res.redirect(sectorUrl);
   }
 
   const content = `

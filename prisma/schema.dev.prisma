@@ -260,6 +260,12 @@ model SectorPlan {
   depFlowType        String?
   depFlowReason      String?
   depFlowRate        Int?
+  // When pilots may start booking this sector. NULL = straight away;
+  // "H24" / "H48" = that many hours before the departure window opens;
+  // "AT" = at bookingsOpenAt. Teams and affiliates are auto-assigned
+  // regardless - only ordinary pilots wait.
+  bookingsOpenMode   String?
+  bookingsOpenAt     DateTime?
   arrFlowRequest     String?
   arrFlowReason      String?
   arrFlowRequestedBy Int?
@@ -452,6 +458,21 @@ model PageVisibility {
   key     String  @id
   enabled Boolean @default(true)
   mode    String  @default("visible")
+}
+
+// "Email me when bookings open" for a sector that is not bookable yet. One
+// per pilot per sector; sentAt is set once the email has gone.
+model BookingOpenAlert {
+  id           Int       @id @default(autoincrement())
+  eventId      Int
+  sectorNumber String
+  cid          Int
+  email        String
+  createdAt    DateTime  @default(now())
+  sentAt       DateTime?
+
+  @@unique([eventId, sectorNumber, cid])
+  @@index([sentAt])
 }
 
 model MailingListSubscriber {
