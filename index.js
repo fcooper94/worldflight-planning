@@ -3390,7 +3390,7 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
     const affRows = await prisma.affiliate.findMany({
       where: { participatingWf26: true },
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-      select: { id: true, cid: true, callsign: true, name: true, manualCallsigns: true }
+      select: { id: true, cid: true, callsign: true, name: true, manualCallsigns: true, multiAircraft: true }
     });
     // Route alternatives: where each aircraft flies on a leg whose affiliates
     // are allocated to one option. Planned once per leg per run, after the
@@ -3405,6 +3405,10 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
     };
     const placeable = affRows.filter(a => Number(a.cid) && a.callsign);
     const affCallsigns = new Set(placeable.map(a => String(a.callsign).toUpperCase()));
+    // A fleet aircraft's assigned pilot for a sector (Affiliate HQ, fleets
+    // with members) - the booking is made under them, not the main CID.
+    const assignedPilot = new Map(allClaims.filter(r => Number(r.cid) > 0)
+      .map(r => [`${r.affiliateId}|${r.sectorNumber}`, Number(r.cid)]));
     const placementByLeg = new Map();
     const placementFor = row => {
       const key = row.variant_of || row.number;
@@ -3515,11 +3519,12 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
         }
         if (!slotKey) continue;
 
+        const bookCid = (aff.multiAircraft && assignedPilot.get(`${aff.id}|${row.number}`)) || cidNum;
         try {
           await prisma.tobtBooking.create({
             data: {
               slotKey,
-              cid: cidNum,
+              cid: bookCid,
               callsign,
               from: row.from,
               to: row.to,
@@ -3535,7 +3540,7 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
 
         const bookingData = {
           slotKey,
-          cid: cidNum,
+          cid: bookCid,
           callsign,
           reserved: holdsReserved,
           from: row.from,
@@ -3545,10 +3550,10 @@ async function autoAssignAffiliateBookings({ reason = '' } = {}) {
           tobtTimeUtc: tobt,
           createdAtISO: new Date().toISOString()
         };
-        const bookingKey = `${cidNum}:${slotKey}`;
+        const bookingKey = `${bookCid}:${slotKey}`;
         setBooking(bookingData);
-        if (!tobtBookingsByCid[cidNum]) tobtBookingsByCid[cidNum] = new Set();
-        tobtBookingsByCid[cidNum].add(bookingKey);
+        if (!tobtBookingsByCid[bookCid]) tobtBookingsByCid[bookCid] = new Set();
+        tobtBookingsByCid[bookCid].add(bookingKey);
         created++;
         vatcanPushForSlotKey(slotKey);
       }
@@ -22736,6 +22741,9 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
     ? String(affiliate.name || affiliate.callsign || '').trim().toUpperCase()
     : '';
   const isMultiAircraft = !!(affiliate && affiliate.multiAircraft);
+  // A fleet that also has members picks who flies each aircraft per sector
+  // ("Assigned Pilot") instead of showing a read-only VATSIM account.
+  const fleetPilotPick = isMultiAircraft && !!affiliate.hasMembers && memberOptions.length > 0;
   let affFleet = affiliate ? [affiliate] : [];
   if (isMultiAircraft && affKey) {
     const all = await prisma.affiliate.findMany({ orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] }).catch(() => []);
@@ -22932,7 +22940,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                   <th>Sector</th>
                   <th class="ot-th-center">Flying</th>
                   <th>Callsign</th>
-                  <th>VATSIM Account <span class="roster-tip-host" style="cursor:help;font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;position:relative;vertical-align:middle;margin-left:4px;">i<span class="roster-tip">This is the VATSIM account that will be connected on VATSIM for this sector.</span></span></th>
+                  <th>${fleetPilotPick ? 'Assigned Pilot' : 'VATSIM Account'} <span class="roster-tip-host" style="cursor:help;font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;position:relative;vertical-align:middle;margin-left:4px;">i<span class="roster-tip">${fleetPilotPick ? 'The member flying this aircraft on this sector. Their VATSIM account is the one connected for the booking.' : 'This is the VATSIM account that will be connected on VATSIM for this sector.'}</span></span></th>
                   ${showFlowInfo ? '<th>Flow</th><th>Status</th>' : ''}
                   ${showAtcRoute ? '<th>ATC Route</th>' : ''}
                   <th>From</th><th>To</th><th>Date</th><th>Dep Window</th><th>Arr Window</th><th>Plan</th>
@@ -22978,7 +22986,11 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                         <input type="checkbox" class="wf-check aff-flying" data-aff-id="${a.id}" data-sector="${escapeHtml(r.number)}" ${flying ? 'checked' : ''} ${readOnly ? 'disabled' : ''} title="${flying ? 'Flying this sector' : 'Not flying this sector'}" />
                       </td>
                       <td><span class="ot-cell-actype">${escapeHtml(cs)}</span></td>
-                      <td><span class="${b ? '' : 'ot-muted'}">${escapeHtml(acctLabel)}</span></td>
+                      <td>${fleetPilotPick ? `
+                        <select class="claim-select aff-fleet-pilot" data-aff-id="${a.id}" data-sector="${escapeHtml(r.number)}" data-prev="${acctCid}"${readOnly || !flying ? ' disabled' : ''}${!flying ? ' title="Not flying this sector"' : ''}>
+                          ${(memberOptions.some(m => m.cid === acctCid) ? memberOptions : [{ cid: acctCid, label: acctLabel }, ...memberOptions])
+                            .map(m => `<option value="${m.cid}" ${m.cid === acctCid ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+                        </select>` : `<span class="${b ? '' : 'ot-muted'}">${escapeHtml(acctLabel)}</span>`}</td>
                       ${showFlowInfo ? `
                       <td>${first ? `<span class="flowtype-pill flowtype-${flow.cls}">${escapeHtml(flow.label)}</span>` : ''}</td>
                       <td class="aff-status-cell">${!flying
@@ -23741,6 +23753,32 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
           });
         }
 
+        // Assigned pilot per aircraft per sector (fleets with members)
+        document.addEventListener('change', async function(e) {
+          var sel = e.target.closest('.aff-fleet-pilot');
+          if (!sel) return;
+          var prev = sel.dataset.prev;
+          sel.classList.add('claim-saving');
+          sel.disabled = true;
+          try {
+            var r = await fetch('/api/affiliates/fleet/' + sel.dataset.affId + '/pilot', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ sectorNumber: sel.dataset.sector, cid: Number(sel.value) })
+            });
+            var d = await r.json().catch(function() { return {}; });
+            if (!r.ok) throw new Error(d.error || 'Failed to assign pilot');
+            sel.dataset.prev = sel.value;
+          } catch (err) {
+            sel.value = prev;
+            alert(err.message || 'Failed to assign pilot');
+          } finally {
+            sel.classList.remove('claim-saving');
+            sel.disabled = false;
+          }
+        });
+
         // Flying / not flying per aircraft per sector
         document.addEventListener('change', async function(e) {
           var cb = e.target.closest('.aff-flying');
@@ -24193,6 +24231,56 @@ async function setAffiliateSectorClaim(affiliateId, sectorNumber, cid) {
   await prisma.affiliateSectorClaim.create({ data: { affiliateId, sectorNumber, cid } });
 }
 
+// Assigned pilot for one aircraft on one sector, for fleets that have members.
+// Stored as the aircraft's sector claim; a booking already held by the
+// aircraft moves to the new pilot, and auto-assign books under the claim
+// when the slot is created later.
+app.post('/api/affiliates/fleet/:id/pilot', requireLogin, requireAffiliate, async (req, res) => {
+  const cid = Number(req.session.user.data.cid);
+  const id = Number(req.params.id);
+  const sectorNumber = String(req.body?.sectorNumber || '').trim();
+  const pilotCid = Number(req.body?.cid);
+  if (!sectorNumber) return res.status(400).json({ error: 'sectorNumber required' });
+  if (!Number.isInteger(pilotCid) || pilotCid <= 0) return res.status(400).json({ error: 'Pick a pilot' });
+
+  try {
+    const fleet = await resolveAffiliateFleet(cid);
+    if (!fleet) return res.status(403).json({ error: 'Your affiliate is not set up for multiple aircraft.' });
+    const row = fleet.rows.find(a => a.id === id);
+    if (!row) return res.status(403).json({ error: 'That aircraft belongs to another affiliate.' });
+
+    const sched = (adminSheetCache || []).find(r => r.number === sectorNumber);
+    if (!sched) return res.status(400).json({ error: 'Unknown sector' });
+
+    // The pilot must be one of the operator's: a main CID of the fleet or an
+    // active member of it.
+    const fleetIds = fleet.rows.map(a => a.id);
+    const isMain = fleet.rows.some(a => Number(a.cid) === pilotCid);
+    const member = isMain ? null : await prisma.affiliateMember.findFirst({
+      where: { affiliateId: { in: fleetIds }, cid: pilotCid, active: true }, select: { id: true }
+    });
+    if (!isMain && !member) return res.status(400).json({ error: 'That pilot is not an active member of this affiliate.' });
+
+    const current = await prisma.affiliateSectorClaim.findFirst({ where: { affiliateId: id, sectorNumber, callsign: null } });
+    if (current && Number(current.cid) === 0) return res.status(400).json({ error: 'This aircraft is not flying that sector - tick Flying first.' });
+    await setAffiliateSectorClaim(id, sectorNumber, pilotCid);
+
+    const cs = String(row.callsign || '').toUpperCase();
+    const booked = Object.values(tobtBookingsByKey).some(b =>
+      b && String(b.slotKey || '').startsWith(optionPrefix(sched) + '|') && String(b.callsign || '').toUpperCase() === cs);
+    if (booked) {
+      // Move the aircraft's own booking to the new pilot.
+      await assignAffiliatePilotToSector(row, sched, pilotCid, cs);
+      const bk = Object.values(tobtBookingsByKey).find(b =>
+        b && String(b.slotKey || '').startsWith(optionPrefix(sched) + '|') && String(b.callsign || '').toUpperCase() === cs);
+      if (bk) vatcanPushForSlotKey(bk.slotKey);
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Flying / not flying for one aircraft on one sector (cid 0 = released).
 app.post('/api/affiliates/fleet/:id/flying', requireLogin, requireAffiliate, async (req, res) => {
   const cid = Number(req.session.user.data.cid);
@@ -24553,6 +24641,7 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
       cid: m.cid,
       name: nameByCid[m.cid] || '',
       active: m.active !== false,
+      manager: !!m.manager,
       addedAt: m.addedAt,
       isMain: false
     });
@@ -24600,6 +24689,7 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
                       <th>Name</th>
                       <th>Added</th>
                       <th class="ot-th-center">Active</th>
+                      <th class="ot-th-center">Can manage members</th>
                       <th class="ot-th-actions"></th>
                     </tr>
                   </thead>
@@ -24621,6 +24711,20 @@ app.get('/affiliates/my-members', requireLogin, requireAffiliateOwner, async (re
                               data-aff-id="${a.id}"
                               data-cid="${m.cid}"
                               ${m.active ? 'checked' : ''}
+                            />
+                          `}
+                        </td>
+                        <td class="ot-cell-active">
+                          ${m.isMain ? `
+                            <span class="mm-active-static" title="The Main CID always manages members">✓</span>
+                          ` : `
+                            <input
+                              type="checkbox"
+                              class="mm-manager-toggle wf-check"
+                              data-aff-id="${a.id}"
+                              data-cid="${m.cid}"
+                              ${m.manager ? 'checked' : ''}
+                              ${Number(m.cid) === cid ? 'disabled title="You cannot change your own access"' : 'title="Can add, remove and manage members, and acts for the affiliate on its HQ"'}
                             />
                           `}
                         </td>
@@ -24761,6 +24865,30 @@ ${MM_STYLES}
             cb.disabled = false;
           }
         });
+
+        document.addEventListener('change', async function(e) {
+          var cb = e.target.closest('.mm-manager-toggle');
+          if (!cb) return;
+          var card = cb.closest('.mm-card');
+          var newManager = !!cb.checked;
+          cb.disabled = true;
+          try {
+            var r = await fetch('/api/affiliates/my/' + cb.dataset.affId + '/members/' + cb.dataset.cid, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ manager: newManager })
+            });
+            var d = await r.json().catch(function() { return {}; });
+            if (!r.ok) throw new Error(d.error || 'Failed to update');
+            showMsg(card, newManager ? 'Member can now manage members.' : 'Member can no longer manage members.', 'ok');
+          } catch (err) {
+            cb.checked = !newManager;
+            showMsg(card, err.message || 'Failed to update', 'err');
+          } finally {
+            cb.disabled = false;
+          }
+        });
       })();
     </script>
   `;
@@ -24852,12 +24980,20 @@ app.patch('/api/affiliates/my/:affiliateId/members/:cid', requireLogin, async (r
 
   const data = {};
   if (req.body?.active !== undefined) data.active = Boolean(req.body.active);
+  if (typeof req.body?.manager === 'boolean') {
+    // Managers act for the affiliate as its main CID would, so nobody
+    // changes their own standing - only another manager or the main CID.
+    if (memberCid === ownerCid) return res.status(400).json({ error: 'You cannot change your own access.' });
+    data.manager = req.body.manager;
+  }
   if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
   await prisma.affiliateMember.updateMany({
     where: { affiliateId, cid: memberCid },
     data
   });
+  // affiliateOwnerCids gates Manage Members and includes active managers.
+  if ('manager' in data || 'active' in data) await loadAffiliateOwners();
   res.json({ ok: true });
 });
 
