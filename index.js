@@ -27696,7 +27696,7 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
     { key: 'access-management', title: 'Access Management', desc: 'Manage user permissions, document upload requests, and staff access requests.', icon: adminIcons.key, href: '/admin/access-management', badge: (docAccessCount + staffAccessCount) > 0 ? (docAccessCount + staffAccessCount) : null },
     { key: 'visited-airports', title: 'Visited Airports', desc: 'Manage which airports have been visited by year and ICAO code.', icon: adminIcons.globe, href: '/admin/visited-airports', badge: null },
     { key: 'suggestions', title: 'Suggestions', desc: 'View and manage community airport suggestions.', icon: adminIcons.bulb, href: '/admin/suggestions', badge: null },
-    { key: 'mailing-list', title: 'Mailing List', desc: 'Send route announcement emails to subscribers.', icon: adminIcons.mail, href: '/admin/mailing-list', badge: null },
+    { key: 'mailing-list', title: 'Mailing List', desc: 'Route announcements, and briefing emails for each sector.', icon: adminIcons.mail, href: '/admin/mailing-list', badge: null },
     { key: 'settings', title: 'Page Visibility', desc: 'Control page visibility for pilots and controllers.', icon: adminIcons.settings, href: '/admin/settings', badge: null },
     { key: 'airac', title: 'AIRAC Data', desc: 'Upload and manage navigation data (waypoints, airways) for route planning.', icon: adminIcons.compass, href: '/admin/airac', badge: airacAlert ? '!' : null },
     { key: 'test-pilots', title: 'Test Pilot Data', desc: 'Generate fake pilot departures at WF airports for testing.', icon: adminIcons.flask, href: '/admin/test-pilots', badge: null },
@@ -40953,9 +40953,26 @@ app.get('/admin/mailing-list', requireAdmin, async (req, res) => {
     </tr>
   `).join('');
 
+  // Two views: the route announcement (as before) and per-sector emails.
+  const tab = req.query.tab === 'sector' ? 'sector' : 'route';
+  const sectorTab = await renderSectorEmailsTab().catch(e => {
+    console.error('[SECTOR EMAIL] tab failed:', e.message);
+    return '<p style="color:#f87171;">Could not load sector emails.</p>';
+  });
+
   const content = `
     <section class="card card-full">
       <h2>Mailing List</h2>
+      <div class="ml-tabs" role="tablist">
+        <button type="button" class="ml-tab-btn${tab === 'route' ? ' active' : ''}" data-tab="route">Route Announcement</button>
+        <button type="button" class="ml-tab-btn${tab === 'sector' ? ' active' : ''}" data-tab="sector">Sector Emails</button>
+      </div>
+
+      <div class="ml-tab-panel" data-panel="sector"${tab === 'sector' ? '' : ' hidden'}>
+        ${sectorTab}
+      </div>
+
+      <div class="ml-tab-panel" data-panel="route"${tab === 'route' ? '' : ' hidden'}>
       <p style="color:var(--muted);font-size:13px;margin-bottom:8px;">
         ${subscribers.length} subscriber${subscribers.length !== 1 ? 's' : ''} opted in to route announcements.
       </p>
@@ -40988,9 +41005,15 @@ app.get('/admin/mailing-list', requireAdmin, async (req, res) => {
           </tbody>
         </table>
       </div>
+      </div>
     </section>
 
     <style>
+      .ml-tabs { display:flex; gap:8px; margin:6px 0 4px; flex-wrap:wrap; }
+      .ml-tab-btn { padding:8px 16px; border-radius:8px; border:1px solid var(--border); background:var(--panel2); color:var(--muted); font-size:13px; font-weight:600; cursor:pointer; font-family:inherit; }
+      .ml-tab-btn:hover { color:var(--text); }
+      .ml-tab-btn.active { background:rgba(56,189,248,0.12); border-color:rgba(56,189,248,0.45); color:var(--accent); }
+      .ml-tab-panel[hidden] { display:none; }
       .ml-send-section {
         background: var(--panel2);
         border: 1px solid var(--border);
@@ -41054,6 +41077,17 @@ app.get('/admin/mailing-list', requireAdmin, async (req, res) => {
 
     <script>
     (function() {
+      // Route Announcement / Sector Emails tabs (kept in the URL so a reload
+      // or a redirect after sending lands on the same one).
+      document.querySelectorAll('.ml-tab-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var t = btn.dataset.tab;
+          document.querySelectorAll('.ml-tab-btn').forEach(function(b) { b.classList.toggle('active', b === btn); });
+          document.querySelectorAll('.ml-tab-panel').forEach(function(p) { p.hidden = p.dataset.panel !== t; });
+          history.replaceState(null, '', t === 'sector' ? '?tab=sector' : location.pathname);
+        });
+      });
+
       // Remove subscriber
       document.querySelectorAll('.ml-remove-btn').forEach(function(btn) {
         btn.addEventListener('click', async function() {
@@ -41204,6 +41238,973 @@ app.post('/admin/api/mailing-list/send', requireAdmin, async (req, res) => {
   }
 
   res.json({ success: true, sent });
+});
+
+/* ===== SECTOR EMAILS =====
+   Briefing emails to the pilots booked on one sector (Admin > Mailing List >
+   Sector Emails). Subject and body carry {TAGS} filled per recipient when the
+   email goes, so a scheduled email always carries the current route and
+   restrictions. Audience BOOKED is everyone holding a booking on the sector
+   (teams and affiliates included; only offered on flow-restricted sectors),
+   ALL is every member with an email on file. Addresses come from VATSIM at
+   login (User.email) - a booked pilot with none is skipped and counted - and
+   anyone who unsubscribed for this event (SectorEmailOptOut) is left out. */
+const SECTOR_EMAIL_MODES = { NOW: 0, H6: 6, H12: 12, H24: 24, H48: 48, AT: null };
+const SECTOR_EMAIL_REASONS = {
+  DEP_STAFFING: 'Departure staffing', DEP_SINGLE_RUNWAY: 'Single runway at departure',
+  DEP_BACKTRACK: 'Backtrack delay at departure', DEP_RAMP_CONGESTION: 'Ramp congestion at departure',
+  DEP_RUNWAY_CROSSING: 'Runway crossing at departure', DEP_AIRPORT_CAPACITY: 'Departure airport capacity',
+  ARR_STAFFING: 'Destination staffing', ARR_SINGLE_RUNWAY: 'Single runway at destination',
+  ARR_BACKTRACK: 'Backtrack delay at destination', ARR_RAMP_CONGESTION: 'Ramp congestion at destination',
+  ARR_RUNWAY_CROSSING: 'Runway crossing at destination', ARR_AIRPORT_CAPACITY: 'Destination airport capacity',
+  ENROUTE_STAFFING: 'Enroute sector staffing', OTHER: 'Other'
+};
+const SECTOR_EMAIL_BASE = () => process.env.PUBLIC_BASE_URL || 'https://planning.worldflight.center';
+
+// When a sector email is due, as epoch ms. Relative modes follow the
+// schedule's current departure time; AT is the stored instant.
+function sectorEmailDueMs(email, row) {
+  if (email.mode === 'AT') return email.sendAt ? new Date(email.sendAt).getTime() : null;
+  if (email.mode === 'NOW') return email.createdAt ? new Date(email.createdAt).getTime() : Date.now();
+  const hours = SECTOR_EMAIL_MODES[email.mode];
+  if (!hours || !row) return null;
+  const dep = utcInstantMs(row.date_utc, row.dep_time_utc, 0);
+  return dep == null ? null : dep - hours * 3600000;
+}
+
+function sectorIsRestricted(row) {
+  return !!row && (sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE') !== 'NONE';
+}
+
+// Who an email goes to, one entry per person: their booking on the sector
+// (if any) and the email on file. Opted-out addresses are dropped; booked
+// pilots with no address are kept (email '') so they can be counted.
+async function sectorEmailRecipients(row, audience = 'BOOKED') {
+  const prefix = optionPrefix(row) + '|';
+  const bookingByCid = new Map();
+  for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+    if (!b || key === b.slotKey || !String(b.slotKey || '').startsWith(prefix)) continue;
+    const cid = Number(b.cid);
+    if (cid && !bookingByCid.has(cid)) bookingByCid.set(cid, b);
+  }
+  const usersQuery = audience === 'ALL'
+    ? prisma.user.findMany({ where: { email: { not: null } }, select: { cid: true, name: true, email: true } }).catch(() => [])
+    : (bookingByCid.size
+        ? prisma.user.findMany({ where: { cid: { in: [...bookingByCid.keys()] } }, select: { cid: true, name: true, email: true } }).catch(() => [])
+        : Promise.resolve([]));
+  const optOutQuery = prisma.sectorEmailOptOut
+    ? prisma.sectorEmailOptOut.findMany({ where: { eventId: activeEventId || 0 }, select: { email: true } }).catch(() => [])
+    : Promise.resolve([]);
+  const [users, optOuts] = await Promise.all([usersQuery, optOutQuery]);
+  const optedOut = new Set(optOuts.map(o => String(o.email).toLowerCase()));
+  const userByCid = new Map(users.map(u => [Number(u.cid), u]));
+  const cids = audience === 'ALL' ? users.map(u => Number(u.cid)) : [...bookingByCid.keys()];
+  const seen = new Set();
+  const out = [];
+  for (const cid of cids) {
+    const email = String(userByCid.get(cid)?.email || '').trim();
+    const key = email.toLowerCase();
+    if (email && (optedOut.has(key) || seen.has(key))) continue;
+    if (email) seen.add(key);
+    out.push({ cid, booking: bookingByCid.get(cid) || null, name: userByCid.get(cid)?.name || '', email });
+  }
+  return out;
+}
+
+// Unsubscribe links carry the address and event, signed so nobody can opt
+// someone else out by editing the URL.
+function sectorEmailUnsubToken(eventId, email) {
+  return crypto.createHmac('sha256', String(process.env.SESSION_SECRET || 'wf-sector-email'))
+    .update(`${eventId}|${String(email).toLowerCase()}`).digest('hex').slice(0, 32);
+}
+function sectorEmailUnsubUrl(eventId, email) {
+  const e = Buffer.from(String(email).toLowerCase()).toString('base64url');
+  return `${SECTOR_EMAIL_BASE()}/email/unsubscribe?ev=${eventId}&e=${e}&t=${sectorEmailUnsubToken(eventId, email)}`;
+}
+
+// The sector-wide values every recipient shares.
+async function sectorEmailContext(row) {
+  const flow = sharedFlowTypes[`${row.from}-${row.to}`] || 'NONE';
+  const rate = sharedDepFlows[`${row.from}-${row.to}`] || 0;
+  const plan = await prisma.sectorPlan.findFirst({
+    where: { wf: row.number, eventId: activeEventId || undefined },
+    select: { depFlowReason: true }
+  }).catch(() => null);
+  let restriction = 'No flow restrictions - you may depart freely within the departure window.';
+  if (flow !== 'NONE') {
+    restriction = (flow === 'SLOTTED' ? 'Booking required, with connect times' : 'Booking required')
+      + (rate ? ` - ${rate} departures per hour` : '')
+      + (plan?.depFlowReason ? ` (${SECTOR_EMAIL_REASONS[plan.depFlowReason] || plan.depFlowReason})` : '')
+      + '. Please connect and depart within your booking.';
+  }
+  const base = SECTOR_EMAIL_BASE();
+  return {
+    WF: row.number,
+    FROM: row.from,
+    TO: row.to,
+    DATE: windowOpenDate(row.date_utc, row.dep_time_utc),
+    DEP_TIME: (row.dep_time_utc || '').replace(':', '') + 'z',
+    DEP_WINDOW: utcWindow(row.dep_time_utc),
+    ARR_WINDOW: row.arr_time_utc ? utcWindow(row.arr_time_utc) : 'TBC',
+    FLOW_RESTRICTION: restriction,
+    PORTAL_DEP: `${base}/icao/${row.from}`,
+    PORTAL_ARR: `${base}/icao/${row.to}`,
+    SECTOR_LINK: `${base}/sector/${row.number}/${row.from}/${row.to}`,
+    _route: row.atc_route && row.atc_route !== '-' ? row.atc_route : '',
+    _route2: row.atc_route2 && row.atc_route2 !== '-' ? row.atc_route2 : ''
+  };
+}
+
+// Fill {TAGS} for one recipient. Subject gets plain text; the body gets
+// HTML-escaped values (links are attribute-safe already).
+function fillSectorEmailTags(text, ctx, recipient, { html }) {
+  const b = recipient?.booking;
+  const route = b?.assignedRoute === 'B' && ctx._route2 ? ctx._route2 : ctx._route;
+  const tct = b?.tobtTimeUtc && /^\d{1,2}:\d{2}/.test(String(b.tobtTimeUtc))
+    ? displayTobt(String(b.tobtTimeUtc)).replace(':', '') + 'z' : '';
+  const values = {
+    ...ctx,
+    NAME: (recipient?.name || '').split(' ')[0] || 'Pilot',
+    FULL_NAME: recipient?.name || 'Pilot',
+    CID: recipient?.cid ? String(recipient.cid) : '',
+    ATC_ROUTE: route || 'Not yet published - check the sector page closer to the event.',
+    TCT: tct || 'Not applicable'
+  };
+  return String(text || '').replace(/\{([A-Z_]+)\}/g, (m, k) => {
+    if (!(k in values) || k.startsWith('_')) return m;
+    return html ? escapeHtml(values[k]) : String(values[k]);
+  });
+}
+
+// Sign-off block under every sector email: logo, team name, the event and the
+// places to find us. Table layout and inline styles only, for mail clients.
+function sectorEmailSignature() {
+  const eventName = wfEvents.find(e => e.id === activeEventId)?.name || 'WorldFlight';
+  const link = (href, text) => `<a href="${href}" style="color:#38bdf8;text-decoration:none;font-weight:600;">${text}</a>`;
+  return `
+              <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:28px;border-collapse:collapse;">
+                <tr>
+                  <td valign="middle" style="padding-right:16px;">
+                    <img src="https://planning.worldflight.center/logo.png" width="60" height="60" alt="WorldFlight" style="display:block;border-radius:50%;border:2px solid #1e293b;" />
+                  </td>
+                  <td valign="middle" style="border-left:2px solid #38bdf8;padding-left:16px;">
+                    <div style="color:#f1f5f9;font-size:16px;font-weight:700;line-height:1.3;">The WorldFlight Team</div>
+                    <div style="color:#94a3b8;font-size:12.5px;line-height:1.5;margin-top:2px;">${escapeHtml(eventName)} &middot; Round the world on VATSIM</div>
+                    <div style="font-size:12.5px;line-height:1.5;margin-top:6px;">
+                      ${link(SECTOR_EMAIL_BASE(), 'Planning Portal')}
+                      <span style="color:#475569;">&nbsp;&middot;&nbsp;</span>
+                      ${link('https://worldflight.center', 'worldflight.center')}
+                      <span style="color:#475569;">&nbsp;&middot;&nbsp;</span>
+                      ${link(WF_DISCORD_INVITE, 'Discord')}
+                    </div>
+                  </td>
+                </tr>
+              </table>`;
+}
+
+function sectorEmailHtml(bodyHtml, wf, { audience = 'BOOKED', unsubUrl = '' } = {}) {
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8" /></head>
+<body style="margin:0;padding:0;background:#020617;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#020617;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#0b1220;border:1px solid #1e293b;border-radius:16px;overflow:hidden;">
+          <tr>
+            <td style="background:linear-gradient(135deg,#0f172a,#1e293b);padding:28px;text-align:center;">
+              <img src="https://planning.worldflight.center/logo.png" width="56" height="56" style="border-radius:50%;" alt="WorldFlight" />
+              <h1 style="color:#38bdf8;font-size:21px;margin:14px 0 0;">WorldFlight</h1>
+              <p style="color:#94a3b8;font-size:13px;margin:4px 0 0;">Sector Briefing &middot; ${escapeHtml(wf)}</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px 32px;">
+              <div style="color:#e5e7eb;font-size:15px;line-height:1.7;">
+                ${bodyHtml}
+              </div>
+              ${sectorEmailSignature()}
+              <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;" />
+              <p style="color:#94a3b8;font-size:12px;margin:0;text-align:center;">
+                ${audience === 'ALL'
+                  ? 'You received this because you are a member of the WorldFlight Planning Portal.'
+                  : `You received this because you hold a booking on ${escapeHtml(wf)} for WorldFlight.`}
+              </p>
+              ${unsubUrl ? `<p style="color:#64748b;font-size:12px;margin:8px 0 0;text-align:center;">
+                <a href="${unsubUrl}" style="color:#64748b;text-decoration:underline;">Unsubscribe from sector emails for this event</a>
+              </p>` : ''}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+// One pooled SMTP connection, shared by sector emails and booking-open
+// alerts. Without a pool nodemailer logs in again for every message, and a
+// burst of logins gets the Gmail account locked out ("454 4.7.0 Too many
+// login attempts"). The pool keeps one authenticated connection open and
+// paces sending.
+let sharedMailTransport = null;
+function sectorEmailTransport() {
+  if (!sharedMailTransport) {
+    sharedMailTransport = nodemailer.createTransport({
+      pool: true,
+      maxConnections: 1,
+      maxMessages: Infinity,
+      rateDelta: 1000,
+      rateLimit: 5,
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: false,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+  }
+  return sharedMailTransport;
+}
+
+// Send one SectorEmail row now, to everyone currently booked on its sector.
+async function deliverSectorEmail(email) {
+  const row = (adminSheetCache || []).find(r => r?.number === email.sectorNumber);
+  if (!row) {
+    await prisma.sectorEmail.update({ where: { id: email.id }, data: { status: 'FAILED', error: 'Sector no longer in the schedule' } });
+    return { sent: 0, skipped: 0 };
+  }
+  await prisma.sectorEmail.update({ where: { id: email.id }, data: { status: 'SENDING' } });
+  const audience = email.audience === 'ALL' ? 'ALL' : 'BOOKED';
+  const [ctx, recipients] = await Promise.all([sectorEmailContext(row), sectorEmailRecipients(row, audience)]);
+  const transporter = sectorEmailTransport();
+  const from = process.env.SMTP_FROM || '"WorldFlight" <noreply@worldflight.center>';
+  let sent = 0, skipped = 0, failed = 0, lastErr = '';
+  for (const r of recipients) {
+    if (!r.email) { skipped++; continue; }
+    try {
+      await transporter.sendMail({
+        from, to: r.email,
+        subject: fillSectorEmailTags(email.subject, ctx, r, { html: false }),
+        html: sectorEmailHtml(fillSectorEmailTags(email.body, ctx, r, { html: true }), row.number,
+          { audience, unsubUrl: sectorEmailUnsubUrl(email.eventId, r.email) })
+      });
+      sent++;
+    } catch (e) {
+      failed++; lastErr = e.message;
+      console.error(`[SECTOR EMAIL] ${email.sectorNumber} -> CID ${r.cid} failed:`, e.message);
+    }
+  }
+  const status = failed && !sent ? 'FAILED' : 'SENT';
+  await prisma.sectorEmail.update({
+    where: { id: email.id },
+    data: {
+      status, sentAt: new Date(), sentCount: sent, skipped,
+      error: failed ? `${failed} failed: ${lastErr}`.slice(0, 500) : (recipients.length ? null : 'Nobody booked on this sector')
+    }
+  });
+  console.log(`[SECTOR EMAIL] #${email.id} ${email.sectorNumber}: sent ${sent}, no email on file ${skipped}, failed ${failed}`);
+  return { sent, skipped, failed };
+}
+
+// Every minute: send whatever has come due.
+let sectorEmailsRunning = false;
+async function sendDueSectorEmails() {
+  if (sectorEmailsRunning || !activeEventId || !prisma.sectorEmail) return;
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return;
+  sectorEmailsRunning = true;
+  try {
+    const due = await prisma.sectorEmail.findMany({ where: { eventId: activeEventId, status: 'SCHEDULED' } });
+    const now = Date.now();
+    for (const e of due) {
+      const row = (adminSheetCache || []).find(r => r?.number === e.sectorNumber);
+      const at = sectorEmailDueMs(e, row);
+      if (at != null && at <= now) await deliverSectorEmail(e);
+    }
+  } catch (e) {
+    console.error('[SECTOR EMAIL] sweep failed:', e.message);
+  } finally {
+    sectorEmailsRunning = false;
+  }
+}
+setInterval(() => { sendDueSectorEmails(); }, 60 * 1000);
+
+function readSectorEmailInput(body) {
+  const sectorNumber = String(body?.sectorNumber || '').trim().toUpperCase();
+  const subject = String(body?.subject || '').trim().slice(0, 200);
+  const html = String(body?.body || '').trim();
+  const mode = String(body?.mode || 'NOW').toUpperCase();
+  const audience = String(body?.audience || 'BOOKED').toUpperCase() === 'ALL' ? 'ALL' : 'BOOKED';
+  const row = (adminSheetCache || []).find(r => r?.number === sectorNumber);
+  if (!row) return { error: 'Pick a sector.' };
+  // Only a flow-restricted sector has bookings to send to.
+  if (audience === 'BOOKED' && !sectorIsRestricted(row)) return { error: 'This sector has no bookings - send to All members instead.' };
+  if (!subject || !html) return { error: 'A subject and a message are required.' };
+  if (!(mode in SECTOR_EMAIL_MODES)) return { error: 'Pick when to send.' };
+  let sendAt = null;
+  if (mode === 'AT') {
+    sendAt = new Date(String(body?.at || ''));
+    if (isNaN(sendAt.getTime())) return { error: 'Pick a date and time to send.' };
+  }
+  return { sectorNumber, subject, html, mode, sendAt, row, audience };
+}
+
+// Fill the tags for the preview - as the first booked pilot sees it, or a
+// sample pilot when nobody is booked yet.
+app.post('/admin/api/sector-emails/preview', requireAdmin, async (req, res) => {
+  try {
+    const sectorNumber = String(req.body?.sectorNumber || '').trim().toUpperCase();
+    const row = (adminSheetCache || []).find(r => r?.number === sectorNumber);
+    if (!row) return res.status(400).json({ error: 'Pick a sector.' });
+    const audience = String(req.body?.audience || '').toUpperCase() === 'ALL' ? 'ALL' : 'BOOKED';
+    const [ctx, recipients] = await Promise.all([sectorEmailContext(row), sectorEmailRecipients(row, audience)]);
+    // Prefer a booked pilot as the sample, so the route and connect time show.
+    const sample = recipients.find(r => r.booking) || recipients[0] || { cid: 0, name: 'Sample Pilot', booking: null };
+    const mode = String(req.body?.mode || '').toUpperCase();
+    const due = mode && mode !== 'NOW'
+      ? sectorEmailDueMs({ mode, sendAt: req.body?.at ? new Date(req.body.at) : null }, row)
+      : null;
+    res.json({
+      subject: fillSectorEmailTags(req.body?.subject || '', ctx, sample, { html: false }),
+      html: fillSectorEmailTags(req.body?.body || '', ctx, sample, { html: true }),
+      sampleName: sample.name || '',
+      recipients: recipients.length,
+      withEmail: recipients.filter(r => r.email).length,
+      dueAt: due != null ? new Date(due).toISOString() : null,
+      dueLabel: due != null ? formatBookingsOpen(due) : '',
+      duePassed: due != null && due <= Date.now()
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Test send, as the first booked pilot would see it, to the address typed
+// into the test popup (that test only) - else the admin's own.
+app.post('/admin/api/sector-emails/test', requireAdmin, async (req, res) => {
+  try {
+    const input = readSectorEmailInput(req.body);
+    if (input.error) return res.status(400).json({ error: input.error });
+    const cid = Number(req.session?.user?.data?.cid);
+    const typed = String(req.body?.to || '').trim();
+    if (typed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(typed)) return res.status(400).json({ error: 'That is not a valid email address.' });
+    let to = typed || String(req.session?.user?.data?.personal?.email || '').trim();
+    if (!to) {
+      const u = await prisma.user.findUnique({ where: { cid }, select: { email: true } }).catch(() => null);
+      to = String(u?.email || '').trim();
+    }
+    if (!to) return res.status(400).json({ error: 'No email on your account to send a test to.' });
+    const [ctx, recipients] = await Promise.all([sectorEmailContext(input.row), sectorEmailRecipients(input.row, input.audience)]);
+    const sample = recipients.find(r => r.booking) || { cid, name: req.session?.user?.data?.personal?.name_full || 'Pilot', booking: null };
+    await sectorEmailTransport().sendMail({
+      from: process.env.SMTP_FROM || '"WorldFlight" <noreply@worldflight.center>',
+      to,
+      subject: '[TEST] ' + fillSectorEmailTags(input.subject, ctx, sample, { html: false }),
+      html: sectorEmailHtml(fillSectorEmailTags(input.html, ctx, sample, { html: true }), input.row.number,
+        { audience: input.audience, unsubUrl: sectorEmailUnsubUrl(activeEventId, to) })
+    });
+    res.json({ ok: true, to });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to send: ' + e.message });
+  }
+});
+
+// Create: send now, or schedule.
+app.post('/admin/api/sector-emails', requireAdmin, async (req, res) => {
+  try {
+    if (!prisma.sectorEmail) return res.status(503).json({ error: 'Not available yet - restart the server after the schema update.' });
+    const input = readSectorEmailInput(req.body);
+    if (input.error) return res.status(400).json({ error: input.error });
+    if (input.mode !== 'NOW') {
+      const due = sectorEmailDueMs({ mode: input.mode, sendAt: input.sendAt }, input.row);
+      if (due == null) return res.status(400).json({ error: 'Could not work out when to send this.' });
+      if (due <= Date.now()) return res.status(400).json({ error: 'That time has already passed - use Send Now instead.' });
+    }
+    const email = await prisma.sectorEmail.create({
+      data: {
+        eventId: activeEventId, sectorNumber: input.sectorNumber, subject: input.subject, body: input.html,
+        mode: input.mode, sendAt: input.sendAt, audience: input.audience,
+        createdBy: Number(req.session?.user?.data?.cid) || 0
+      }
+    });
+    if (input.mode === 'NOW') {
+      const result = await deliverSectorEmail(email);
+      return res.json({ ok: true, id: email.id, ...result });
+    }
+    res.json({ ok: true, id: email.id, scheduled: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/admin/api/sector-emails/:id/cancel', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const r = await prisma.sectorEmail.updateMany({ where: { id, status: 'SCHEDULED' }, data: { status: 'CANCELLED' } }).catch(() => ({ count: 0 }));
+  if (!r.count) return res.status(400).json({ error: 'Only a scheduled email can be cancelled.' });
+  res.json({ ok: true });
+});
+
+app.post('/admin/api/sector-emails/:id/send-now', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const email = await prisma.sectorEmail.findFirst({ where: { id, status: 'SCHEDULED' } }).catch(() => null);
+  if (!email) return res.status(400).json({ error: 'Only a scheduled email can be sent now.' });
+  const result = await deliverSectorEmail(email);
+  res.json({ ok: true, ...result });
+});
+
+/* Admin > Mailing List > Sector Emails: every sector with its timings, the
+   sector emails sent and scheduled, and the New Email modal (sector,
+   audience, timing, subject, body, live preview; templates and tags on the
+   right). Client script below is plain ES5 inside this template - no
+   backticks or ${} in it. */
+async function renderSectorEmailsTab() {
+  const rows = (adminSheetCache || []).filter(r => r && r.number && r.from && r.to);
+  // Booked pilots per sector (unique CIDs).
+  const bookedByPrefix = new Map();
+  for (const [key, b] of Object.entries(tobtBookingsByKey)) {
+    if (!b || key === b.slotKey || !b.slotKey) continue;
+    const prefix = String(b.slotKey).split('|').slice(0, 3).join('|');
+    if (!bookedByPrefix.has(prefix)) bookedByPrefix.set(prefix, new Set());
+    bookedByPrefix.get(prefix).add(Number(b.cid));
+  }
+  const emails = prisma.sectorEmail
+    ? await prisma.sectorEmail.findMany({ where: { eventId: activeEventId || 0 }, orderBy: { createdAt: 'desc' } }).catch(() => [])
+    : [];
+  const emailCount = {};
+  emails.forEach(e => { if (e.status !== 'CANCELLED') emailCount[e.sectorNumber] = (emailCount[e.sectorNumber] || 0) + 1; });
+
+  const sectors = rows.map(r => {
+    const flow = sharedFlowTypes[`${r.from}-${r.to}`] || 'NONE';
+    return {
+      wf: r.number, from: r.from, to: r.to,
+      date: windowOpenDate(r.date_utc, r.dep_time_utc),
+      dep: r.dep_time_utc ? r.dep_time_utc.replace(':', '') + 'z' : '',
+      depWindow: utcWindow(r.dep_time_utc),
+      arrWindow: r.arr_time_utc ? utcWindow(r.arr_time_utc) : 'TBC',
+      flow: flow === 'SLOTTED' ? 'Booking + TCT' : (flow === 'BOOKING_ONLY' ? 'Booking Required' : 'None'),
+      restricted: flow !== 'NONE',
+      booked: (bookedByPrefix.get(optionPrefix(r)) || new Set()).size,
+      emails: emailCount[r.number] || 0
+    };
+  });
+
+  const MODE_LABEL = { NOW: 'Sent immediately', H6: '6h before departure', H12: '12h before departure', H24: '24h before departure', H48: '48h before departure', AT: 'Specific time' };
+  const STATUS_CLS = { SCHEDULED: 'sched', SENDING: 'sched', SENT: 'sent', FAILED: 'failed', CANCELLED: 'cancelled' };
+  const emailRows = emails.map(e => {
+    const row = rows.find(r => r.number === e.sectorNumber);
+    const due = e.status === 'SCHEDULED' ? sectorEmailDueMs(e, row) : null;
+    const when = e.sentAt ? formatBookingsOpen(new Date(e.sentAt).getTime()) : (due != null ? formatBookingsOpen(due) : '—');
+    const result = e.status === 'SENT' || e.status === 'FAILED'
+      ? `${e.sentCount || 0} sent${e.skipped ? ` · ${e.skipped} no email` : ''}` : '';
+    return `<tr>
+      <td><span class="se-wf">${escapeHtml(e.sectorNumber)}</span></td>
+      <td class="se-subj">${escapeHtml(e.subject)}</td>
+      <td>${e.audience === 'ALL' ? 'All members' : 'Booked'}</td>
+      <td><div>${escapeHtml(when)}</div><div class="se-sub">${escapeHtml(MODE_LABEL[e.mode] || e.mode)}</div></td>
+      <td><span class="se-status se-status-${STATUS_CLS[e.status] || 'sched'}">${escapeHtml(e.status)}</span>${result ? `<div class="se-sub">${escapeHtml(result)}</div>` : ''}${e.error ? `<div class="se-sub se-err">${escapeHtml(e.error)}</div>` : ''}</td>
+      <td class="se-actions">${e.status === 'SCHEDULED'
+        ? `<button type="button" class="se-btn se-send-now" data-id="${e.id}">Send now</button><button type="button" class="se-btn se-btn-danger se-cancel" data-id="${e.id}">Cancel</button>`
+        : ''}</td>
+    </tr>`;
+  }).join('');
+
+  const json = JSON.stringify(sectors).replace(/</g, '\\u003c');
+
+  return `
+    <div class="se-head">
+      <div>
+        <h3 style="margin:0;">Sector Emails</h3>
+        <p class="se-note">Briefing emails for one sector: ATC route, restrictions and links to the airport portals. Tags are filled for each pilot when the email goes.</p>
+      </div>
+      <button type="button" class="modal-btn modal-btn-submit" id="seNewBtn">New Email</button>
+    </div>
+
+    <div class="se-table-wrap">
+      <table class="ml-table se-table">
+        <thead><tr><th>Sector</th><th>Route</th><th>Date</th><th>Departure</th><th>Arrival</th><th>Flow</th><th class="se-c">Booked</th><th class="se-c">Emails</th><th></th></tr></thead>
+        <tbody>
+          ${sectors.map(s => `<tr>
+            <td><span class="se-wf">${escapeHtml(s.wf)}</span></td>
+            <td class="se-mono">${escapeHtml(s.from)} → ${escapeHtml(s.to)}</td>
+            <td>${escapeHtml(s.date)}</td>
+            <td class="se-mono">${escapeHtml(s.depWindow)}</td>
+            <td class="se-mono">${escapeHtml(s.arrWindow)}</td>
+            <td><span class="se-flow${s.restricted ? ' se-flow-on' : ''}">${escapeHtml(s.flow)}</span></td>
+            <td class="se-c">${s.restricted ? s.booked : '<span class="se-muted">—</span>'}</td>
+            <td class="se-c">${s.emails || '<span class="se-muted">0</span>'}</td>
+            <td><button type="button" class="se-btn se-new-for" data-wf="${escapeHtml(s.wf)}">New email</button></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="margin-top:28px;">Scheduled &amp; sent</h3>
+    <div class="se-table-wrap">
+      <table class="ml-table se-table">
+        <thead><tr><th>Sector</th><th>Subject</th><th>Audience</th><th>Send time</th><th>Status</th><th></th></tr></thead>
+        <tbody>${emailRows || '<tr><td colspan="6" class="empty">No sector emails yet</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div id="seModal" class="se-modal" hidden>
+      <div class="se-backdrop"></div>
+      <div class="se-card" role="dialog" aria-modal="true" aria-labelledby="seTitle">
+        <div class="se-card-head">
+          <h3 id="seTitle" style="margin:0;">New Sector Email</h3>
+          <button type="button" class="se-x" id="seClose" aria-label="Close">&times;</button>
+        </div>
+        <div class="se-grid">
+          <div class="se-main">
+            <div class="se-row">
+              <label class="se-label">Sector
+                <select id="seSector"></select>
+              </label>
+            </div>
+            <div class="se-info" id="seInfo"></div>
+
+            <div class="se-label">Audience</div>
+            <div class="se-chips" id="seAudience">
+              <label class="se-chip" id="seAudBookedWrap"><input type="radio" name="seAud" value="BOOKED"> Booked members</label>
+              <label class="se-chip"><input type="radio" name="seAud" value="ALL"> All members</label>
+              <span class="se-count" id="seCount"></span>
+            </div>
+
+            <div class="se-label">When</div>
+            <div class="se-chips" id="seWhen">
+              <label class="se-chip"><input type="radio" name="seMode" value="NOW" checked> Send now</label>
+              <label class="se-chip"><input type="radio" name="seMode" value="H6"> 6h before</label>
+              <label class="se-chip"><input type="radio" name="seMode" value="H12"> 12h before</label>
+              <label class="se-chip"><input type="radio" name="seMode" value="H24"> 24h before</label>
+              <label class="se-chip"><input type="radio" name="seMode" value="H48"> 48h before</label>
+              <label class="se-chip"><input type="radio" name="seMode" value="AT"> Date &amp; time</label>
+              <input type="datetime-local" id="seAt" style="display:none;" /> <span id="seAtUtc" class="se-muted" style="display:none;">UTC</span>
+            </div>
+            <div class="se-due" id="seDue"></div>
+
+            <label class="se-label">Subject
+              <input type="text" id="seSubject" list="seSubjects" placeholder="Pick a suggestion or write your own" maxlength="200" />
+              <datalist id="seSubjects">
+                <option value="{WF} briefing: {FROM} → {TO}"></option>
+                <option value="Reminder: {WF} departs {DEP_WINDOW} on {DATE}"></option>
+                <option value="{WF}: your ATC route and restrictions"></option>
+                <option value="Final call: {WF} {FROM} → {TO} departs in 6 hours"></option>
+                <option value="Your connect time for {WF}: {TCT}"></option>
+              </datalist>
+            </label>
+            <label class="se-label">Message (HTML)
+              <textarea id="seBody" rows="12" placeholder="Pick a template on the right, or write your own. Tags like {ATC_ROUTE} are filled in for each pilot."></textarea>
+            </label>
+
+            <div class="se-label">Preview <span class="se-muted" id="sePreviewWho"></span></div>
+            <div class="se-preview"><div class="se-preview-subj" id="sePreviewSubj"></div><div id="sePreview" class="se-preview-body"></div></div>
+          </div>
+
+          <aside class="se-side">
+            <div class="se-label" style="margin-top:0;">Templates</div>
+            <div id="seTemplates"></div>
+            <div class="se-label">Tags <span class="se-muted">click to insert</span></div>
+            <div id="seTags" class="se-tags"></div>
+          </aside>
+        </div>
+        <div class="se-testpop" id="seConfirmPop" hidden>
+          <div class="se-testpop-card" style="width:min(460px, 92%);">
+            <div style="font-weight:700;font-size:15px;margin-bottom:12px;" id="seConfirmTitle">Send this email?</div>
+            <div class="se-confirm-grid" id="seConfirmBody"></div>
+            <div id="seConfirmWarn" class="se-confirm-warn"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+              <button type="button" class="se-btn" id="seConfirmCancel">Cancel</button>
+              <button type="button" class="modal-btn modal-btn-submit" id="seConfirmGo">Yes, send now</button>
+            </div>
+          </div>
+        </div>
+        <div class="se-testpop" id="seTestPop" hidden>
+          <div class="se-testpop-card">
+            <div style="font-weight:700;font-size:14px;margin-bottom:4px;">Send test email</div>
+            <div class="se-muted" style="margin-bottom:10px;">Sends this one email, filled in as a booked pilot would see it, with [TEST] in the subject. Nobody else receives it.</div>
+            <input type="email" id="seTestTo" placeholder="name@example.com" />
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+              <button type="button" class="se-btn" id="seTestCancel">Cancel</button>
+              <button type="button" class="modal-btn modal-btn-submit" id="seTestSend">Send test</button>
+            </div>
+          </div>
+        </div>
+        <div class="se-foot">
+          <span id="seMsg" class="se-msg"></span>
+          <button type="button" class="se-btn" id="seTest">Send test email</button>
+          <button type="button" class="modal-btn modal-btn-submit" id="seGo">Send now</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="application/json" id="seSectors">${json}</script>
+
+    <style>
+      .se-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin:18px 0 10px; flex-wrap:wrap; }
+      .se-note { color:var(--muted); font-size:12.5px; margin:4px 0 0; max-width:640px; }
+      .se-table-wrap { overflow-x:auto; }
+      .se-table td { vertical-align:middle; }
+      .se-c { text-align:center !important; }
+      .se-mono { font-family:monospace; font-size:12px; white-space:nowrap; }
+      .se-wf { font-weight:700; color:var(--accent); white-space:nowrap; }
+      .se-muted { color:var(--muted); font-weight:400; font-size:12px; }
+      .se-sub { color:var(--muted); font-size:11.5px; margin-top:2px; }
+      .se-err { color:#f87171; }
+      .se-subj { max-width:320px; }
+      .se-flow { font-size:11px; font-weight:600; color:var(--muted); white-space:nowrap; }
+      .se-flow-on { color:#fbbf24; }
+      .se-btn { background:transparent; border:1px solid var(--border); color:var(--text); padding:4px 10px; border-radius:6px; font-size:12px; cursor:pointer; white-space:nowrap; font-family:inherit; }
+      .se-btn:hover { border-color:var(--accent); color:var(--accent); }
+      .se-btn-danger { color:#f87171; border-color:rgba(248,113,113,0.4); margin-left:6px; }
+      .se-btn-danger:hover { background:#ef4444; color:#fff; border-color:#ef4444; }
+      .se-actions { white-space:nowrap; }
+      .se-status { font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; }
+      .se-status-sched { background:rgba(56,189,248,0.12); color:#38bdf8; }
+      .se-status-sent { background:rgba(74,222,128,0.12); color:#4ade80; }
+      .se-status-failed { background:rgba(248,113,113,0.12); color:#f87171; }
+      .se-status-cancelled { background:rgba(148,163,184,0.12); color:#94a3b8; }
+
+      .se-modal { position:fixed; inset:0; z-index:2000; display:flex; align-items:center; justify-content:center; padding:20px; }
+      .se-modal[hidden] { display:none; }
+      .se-backdrop { position:absolute; inset:0; background:rgba(0,0,0,0.7); backdrop-filter:blur(2px); }
+      .se-card { position:relative; width:min(1180px, 100%); max-height:calc(100vh - 40px); display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--border); border-radius:14px; box-shadow:0 24px 70px rgba(0,0,0,0.55); }
+      .se-card-head { display:flex; justify-content:space-between; align-items:center; padding:16px 22px; border-bottom:1px solid var(--border); }
+      .se-x { background:none; border:none; color:var(--muted); font-size:24px; cursor:pointer; line-height:1; }
+      .se-grid { display:grid; grid-template-columns:minmax(0, 1fr) 320px; gap:0; overflow:hidden; flex:1; min-height:0; }
+      .se-main { padding:16px 22px; overflow-y:auto; }
+      .se-side { padding:16px 18px; border-left:1px solid var(--border); background:var(--panel2); overflow-y:auto; }
+      @media (max-width: 860px) { .se-grid { grid-template-columns:1fr; overflow-y:auto; } .se-side { border-left:none; border-top:1px solid var(--border); } }
+      .se-label { display:block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin:14px 0 6px; }
+      .se-label input[type=text], .se-label select, .se-label textarea { display:block; width:100%; margin-top:6px; padding:8px 10px; background:var(--panel2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:inherit; font-size:13px; text-transform:none; letter-spacing:0; font-weight:400; box-sizing:border-box; }
+      .se-label textarea { font-family:monospace; font-size:12px; resize:vertical; }
+      .se-info { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:8px; margin-top:10px; padding:10px 12px; background:var(--panel2); border:1px solid var(--border); border-radius:8px; }
+      .se-info div span { display:block; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); }
+      .se-info div strong { font-size:13px; font-family:monospace; }
+      .se-chips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+      .se-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border:1px solid var(--border); border-radius:999px; font-size:12px; cursor:pointer; background:var(--panel2); }
+      .se-chip:has(input:checked) { border-color:var(--accent); background:rgba(56,189,248,0.12); color:var(--accent); }
+      .se-chip input { margin:0; }
+      .se-count { font-size:12px; color:var(--muted); margin-left:4px; }
+      #seAt { padding:4px 6px; background:var(--panel2); border:1px solid var(--border); border-radius:6px; color:var(--text); color-scheme:dark; }
+      .se-due { font-size:12px; margin-top:6px; min-height:16px; }
+      .se-preview { border:1px solid var(--border); border-radius:10px; background:#0b1220; overflow:hidden; }
+      .se-preview-subj { padding:10px 14px; border-bottom:1px solid #1e293b; font-weight:700; font-size:13px; color:#e5e7eb; }
+      .se-preview-body { padding:14px 18px; color:#e5e7eb; font-size:14px; line-height:1.7; max-height:340px; overflow-y:auto; }
+      .se-preview-body a { color:#38bdf8; }
+      .se-tpl { display:block; width:100%; text-align:left; margin-bottom:8px; padding:10px 12px; background:var(--panel); border:1px solid var(--border); border-radius:8px; color:var(--text); cursor:pointer; font-family:inherit; }
+      .se-tpl:hover { border-color:var(--accent); }
+      .se-tpl strong { display:block; font-size:13px; }
+      .se-tpl span { display:block; font-size:11.5px; color:var(--muted); margin-top:2px; }
+      .se-tags { display:flex; flex-wrap:wrap; gap:5px; }
+      .se-tag { font-family:monospace; font-size:11px; padding:3px 7px; border-radius:4px; background:rgba(56,189,248,0.1); color:var(--accent); border:1px solid rgba(56,189,248,0.25); cursor:pointer; }
+      .se-tag:hover { background:rgba(56,189,248,0.2); }
+      .se-foot { display:flex; justify-content:flex-end; align-items:center; gap:10px; padding:14px 22px; border-top:1px solid var(--border); flex-wrap:wrap; }
+      .se-msg { margin-right:auto; font-size:12.5px; }
+      .se-testpop { position:absolute; inset:0; z-index:5; display:flex; align-items:center; justify-content:center; background:rgba(2,6,23,0.6); border-radius:14px; }
+      .se-testpop[hidden] { display:none; }
+      .se-testpop-card { width:min(380px, 92%); background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px; box-shadow:0 16px 40px rgba(0,0,0,0.5); }
+      .se-confirm-grid { display:grid; grid-template-columns:auto 1fr; gap:7px 16px; font-size:13px; align-items:baseline; }
+      .se-confirm-grid > span { color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; }
+      .se-confirm-grid > strong { font-weight:600; word-break:break-word; }
+      .se-confirm-big { font-size:18px; color:var(--accent); }
+      .se-confirm-warn { font-size:12px; color:#fbbf24; margin-top:10px; line-height:1.5; }
+      .se-confirm-warn:empty { display:none; }
+      .se-testpop-card input { width:100%; box-sizing:border-box; padding:8px 10px; background:var(--panel2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:13px; font-family:inherit; }
+    </style>
+
+    <script>
+    (function() {
+      var sectors = JSON.parse(document.getElementById('seSectors').textContent || '[]');
+      var modal = document.getElementById('seModal');
+      var sel = document.getElementById('seSector');
+      var subj = document.getElementById('seSubject');
+      var bodyEl = document.getElementById('seBody');
+      var atEl = document.getElementById('seAt');
+      var msg = document.getElementById('seMsg');
+      var goBtn = document.getElementById('seGo');
+      var lastField = bodyEl;
+      var last = { recipients: 0, withEmail: 0 };
+
+      function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+      function findSector(wf) { for (var i = 0; i < sectors.length; i++) if (sectors[i].wf === wf) return sectors[i]; return null; }
+      function val(name) { var el = document.querySelector('input[name="' + name + '"]:checked'); return el ? el.value : ''; }
+      function setMsg(text, ok) { msg.textContent = text || ''; msg.style.color = ok ? '#4ade80' : (ok === false ? '#f87171' : 'var(--muted)'); }
+
+      sel.innerHTML = sectors.map(function(s) {
+        return '<option value="' + esc(s.wf) + '">' + esc(s.wf + '  ' + s.from + ' → ' + s.to + '  ·  ' + s.date + '  ·  dep ' + s.depWindow) + '</option>';
+      }).join('');
+
+      var H3 = 'style="color:#38bdf8;font-size:16px;margin:20px 0 6px;"';
+      var ROUTE_BOX = 'style="font-family:monospace;font-size:13px;background:#020617;border:1px solid #1e293b;border-radius:8px;padding:10px 12px;word-break:break-word;"';
+      var PORTALS = '<p>Charts, pilot briefs and scenery are on the airport portals: <a href="{PORTAL_DEP}">{FROM}</a> and <a href="{PORTAL_ARR}">{TO}</a>. Everything about the sector is on <a href="{SECTOR_LINK}">the {WF} sector page</a>.</p>';
+      // The signature block (logo, team, links) is added under every email.
+      var SIGN = '<p>See you on the network!</p>';
+      var templates = [
+        { name: 'Full sector briefing', desc: 'Times, ATC route, restrictions and portal links.',
+          subject: '{WF} briefing: {FROM} → {TO}',
+          body: '<p>Hi {NAME},</p>\\n<p>Here is your briefing for <strong>{WF}: {FROM} → {TO}</strong> on <strong>{DATE}</strong>.</p>\\n<p><strong>Departure window:</strong> {DEP_WINDOW}<br><strong>Arrival window:</strong> {ARR_WINDOW}</p>\\n<h3 ' + H3 + '>ATC route</h3>\\n<p ' + ROUTE_BOX + '>{ATC_ROUTE}</p>\\n<h3 ' + H3 + '>Restrictions</h3>\\n<p>{FLOW_RESTRICTION}</p>\\n<h3 ' + H3 + '>Pilot briefing</h3>\\n' + PORTALS + '\\n' + SIGN },
+        { name: 'Booking reminder', desc: 'For booked pilots - includes their connect time.',
+          subject: 'Your connect time for {WF}: {TCT}',
+          body: '<p>Hi {NAME},</p>\\n<p>You are booked on <strong>{WF}: {FROM} → {TO}</strong> on <strong>{DATE}</strong>.</p>\\n<p><strong>Connect time (TCT):</strong> {TCT}<br><strong>Departure window:</strong> {DEP_WINDOW}</p>\\n<p>{FLOW_RESTRICTION}</p>\\n<h3 ' + H3 + '>ATC route</h3>\\n<p ' + ROUTE_BOX + '>{ATC_ROUTE}</p>\\n' + PORTALS + '\\n<p>If you can no longer fly, please cancel your booking on the sector page so someone else can take it.</p>\\n' + SIGN },
+        { name: 'ATC route', desc: 'Just the route to file.',
+          subject: '{WF}: your ATC route',
+          body: '<p>Hi {NAME},</p>\\n<p>The ATC route for <strong>{WF}: {FROM} → {TO}</strong> is:</p>\\n<p ' + ROUTE_BOX + '>{ATC_ROUTE}</p>\\n<p>Please file exactly this route. Departure window {DEP_WINDOW} on {DATE}.</p>\\n' + PORTALS + '\\n' + SIGN },
+        { name: 'Final call', desc: 'Short reminder close to departure.',
+          subject: 'Final call: {WF} {FROM} → {TO} departs in 6 hours',
+          body: '<p>Hi {NAME},</p>\\n<p><strong>{WF}: {FROM} → {TO}</strong> opens its departure window at <strong>{DEP_WINDOW}</strong> today.</p>\\n<p><strong>Route:</strong> <span style="font-family:monospace;">{ATC_ROUTE}</span></p>\\n<p>{FLOW_RESTRICTION}</p>\\n' + PORTALS + '\\n' + SIGN }
+      ];
+      var tags = [
+        ['NAME', 'First name'], ['FULL_NAME', 'Full name'], ['CID', 'VATSIM CID'], ['WF', 'Sector number'],
+        ['FROM', 'Departure ICAO'], ['TO', 'Arrival ICAO'], ['DATE', 'Window date'], ['DEP_TIME', 'Scheduled departure'],
+        ['DEP_WINDOW', 'Departure window'], ['ARR_WINDOW', 'Arrival window'], ['ATC_ROUTE', 'Their ATC route'],
+        ['FLOW_RESTRICTION', 'Restriction, rate, reason'], ['TCT', 'Their connect time'], ['PORTAL_DEP', 'Departure portal link'],
+        ['PORTAL_ARR', 'Arrival portal link'], ['SECTOR_LINK', 'Sector page link']
+      ];
+      document.getElementById('seTemplates').innerHTML = templates.map(function(t, i) {
+        return '<button type="button" class="se-tpl" data-i="' + i + '"><strong>' + esc(t.name) + '</strong><span>' + esc(t.desc) + '</span></button>';
+      }).join('');
+      document.getElementById('seTags').innerHTML = tags.map(function(t) {
+        return '<span class="se-tag" data-tag="{' + t[0] + '}" title="' + esc(t[1]) + '">{' + t[0] + '}</span>';
+      }).join('');
+
+      document.getElementById('seTemplates').addEventListener('click', function(e) {
+        var b = e.target.closest('.se-tpl'); if (!b) return;
+        var t = templates[Number(b.dataset.i)];
+        if (bodyEl.value.trim() && !confirm('Replace the current subject and message with the "' + t.name + '" template?')) return;
+        subj.value = t.subject; bodyEl.value = t.body; refresh();
+      });
+      subj.addEventListener('focus', function() { lastField = subj; });
+      bodyEl.addEventListener('focus', function() { lastField = bodyEl; });
+      document.getElementById('seTags').addEventListener('click', function(e) {
+        var t = e.target.closest('.se-tag'); if (!t) return;
+        var f = lastField, s = f.selectionStart || f.value.length, en = f.selectionEnd || s;
+        f.value = f.value.slice(0, s) + t.dataset.tag + f.value.slice(en);
+        f.focus(); f.selectionStart = f.selectionEnd = s + t.dataset.tag.length; refresh();
+      });
+
+      function renderSector() {
+        var s = findSector(sel.value); if (!s) return;
+        document.getElementById('seInfo').innerHTML =
+          '<div><span>Route</span><strong>' + esc(s.from + ' → ' + s.to) + '</strong></div>' +
+          '<div><span>Date</span><strong>' + esc(s.date) + '</strong></div>' +
+          '<div><span>Departure</span><strong>' + esc(s.dep) + '</strong></div>' +
+          '<div><span>Dep window</span><strong>' + esc(s.depWindow) + '</strong></div>' +
+          '<div><span>Arr window</span><strong>' + esc(s.arrWindow) + '</strong></div>' +
+          '<div><span>Flow</span><strong>' + esc(s.flow) + '</strong></div>';
+        // Booked members only exists where bookings do.
+        var bookedWrap = document.getElementById('seAudBookedWrap');
+        bookedWrap.style.display = s.restricted ? '' : 'none';
+        var booked = bookedWrap.querySelector('input');
+        if (!s.restricted && booked.checked) booked.checked = false;
+        if (!val('seAud')) document.querySelector('input[name="seAud"][value="' + (s.restricted ? 'BOOKED' : 'ALL') + '"]').checked = true;
+      }
+
+      function renderWhen() {
+        var m = val('seMode');
+        atEl.style.display = document.getElementById('seAtUtc').style.display = m === 'AT' ? 'inline-block' : 'none';
+        goBtn.textContent = m === 'NOW' ? 'Send now' : 'Schedule';
+      }
+
+      var timer = null;
+      function refresh() {
+        clearTimeout(timer);
+        timer = setTimeout(async function() {
+          var m = val('seMode');
+          try {
+            var r = await fetch('/admin/api/sector-emails/preview', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+              body: JSON.stringify({ sectorNumber: sel.value, audience: val('seAud'), subject: subj.value, body: bodyEl.value, mode: m, at: m === 'AT' && atEl.value ? atEl.value + ':00Z' : null })
+            });
+            var d = await r.json();
+            if (!r.ok) throw new Error(d.error || 'Preview failed');
+            last = d;
+            document.getElementById('sePreviewSubj').textContent = d.subject || '(no subject)';
+            document.getElementById('sePreview').innerHTML = d.html || '<span style="color:#64748b;">Pick a template or write a message.</span>';
+            document.getElementById('sePreviewWho').textContent = d.sampleName ? '— as ' + d.sampleName + ' sees it' : '';
+            document.getElementById('seCount').textContent = d.recipients + ' recipient' + (d.recipients === 1 ? '' : 's')
+              + (d.recipients !== d.withEmail ? ' (' + (d.recipients - d.withEmail) + ' with no email on file)' : '');
+            var due = document.getElementById('seDue');
+            if (m === 'NOW') { due.textContent = 'Sends as soon as you press Send now.'; due.style.color = 'var(--muted)'; }
+            else if (d.dueLabel) { due.textContent = (d.duePassed ? 'That time has passed: ' : 'Will send at ') + d.dueLabel; due.style.color = d.duePassed ? '#f87171' : '#4ade80'; }
+            else { due.textContent = m === 'AT' ? 'Pick a date and time (UTC).' : ''; due.style.color = 'var(--muted)'; }
+          } catch (err) { setMsg(err.message, false); }
+        }, 300);
+      }
+
+      function open(wf) {
+        if (wf) sel.value = wf;
+        document.querySelectorAll('input[name="seAud"]').forEach(function(i) { i.checked = false; });
+        renderSector(); renderWhen(); setMsg(''); modal.hidden = false; refresh();
+      }
+      function close() { modal.hidden = true; }
+      document.getElementById('seNewBtn').addEventListener('click', function() { open(); });
+      document.addEventListener('click', function(e) {
+        var b = e.target.closest('.se-new-for'); if (b) open(b.dataset.wf);
+      });
+      document.getElementById('seClose').addEventListener('click', close);
+      modal.querySelector('.se-backdrop').addEventListener('click', close);
+      document.addEventListener('keydown', function(e) {
+        if (modal.hidden || e.key !== 'Escape') return;
+        if (!testPop.hidden) { testPop.hidden = true; return; }
+        if (!confirmPop.hidden) { confirmPop.hidden = true; pending = null; return; }
+        close();
+      });
+      sel.addEventListener('change', function() { renderSector(); refresh(); });
+      document.getElementById('seAudience').addEventListener('change', refresh);
+      document.getElementById('seWhen').addEventListener('change', function() { renderWhen(); refresh(); });
+      subj.addEventListener('input', refresh);
+      bodyEl.addEventListener('input', refresh);
+
+      function payload() {
+        var m = val('seMode');
+        return { sectorNumber: sel.value, audience: val('seAud'), subject: subj.value, body: bodyEl.value, mode: m, at: m === 'AT' && atEl.value ? atEl.value + ':00Z' : null };
+      }
+      async function post(url, body) {
+        var r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify(body || {}) });
+        var d = await r.json().catch(function() { return {}; });
+        if (!r.ok) throw new Error(d.error || 'Request failed');
+        return d;
+      }
+
+      // Test email: ask for the address each time; it is used for this one test only.
+      var testPop = document.getElementById('seTestPop');
+      var testTo = document.getElementById('seTestTo');
+      document.getElementById('seTest').addEventListener('click', function() {
+        testPop.hidden = false; testTo.focus(); testTo.select();
+      });
+      document.getElementById('seTestCancel').addEventListener('click', function() { testPop.hidden = true; });
+      async function sendTest() {
+        var to = testTo.value.trim();
+        if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(to)) { testTo.focus(); testTo.style.borderColor = '#f87171'; return; }
+        testTo.style.borderColor = '';
+        var b = document.getElementById('seTestSend'); b.disabled = true; setMsg('Sending test...');
+        try {
+          var p = payload(); p.to = to;
+          var d = await post('/admin/api/sector-emails/test', p);
+          testPop.hidden = true; setMsg('Test sent to ' + d.to, true);
+        } catch (err) { setMsg(err.message, false); }
+        b.disabled = false;
+      }
+      document.getElementById('seTestSend').addEventListener('click', sendTest);
+      testTo.addEventListener('keydown', function(e) { if (e.key === 'Enter') sendTest(); if (e.key === 'Escape') { e.stopPropagation(); testPop.hidden = true; } });
+      // Send now / Schedule: a summary to confirm first - audience, how many
+      // it reaches and when - built from a fresh preview so the numbers are
+      // current at the moment of pressing.
+      var confirmPop = document.getElementById('seConfirmPop');
+      var confirmGo = document.getElementById('seConfirmGo');
+      var pending = null;
+      var MODE_TEXT = { H6: '6 hours before departure', H12: '12 hours before departure', H24: '24 hours before departure', H48: '48 hours before departure', AT: 'At a set date and time' };
+      goBtn.addEventListener('click', async function() {
+        var p = payload();
+        if (!p.subject.trim() || !p.body.trim()) { setMsg('A subject and a message are required.', false); return; }
+        if (p.mode === 'AT' && !p.at) { setMsg('Pick a date and time (UTC).', false); return; }
+        goBtn.disabled = true; setMsg('Checking recipients...');
+        var d;
+        try { d = await post('/admin/api/sector-emails/preview', p); }
+        catch (err) { setMsg(err.message, false); goBtn.disabled = false; return; }
+        goBtn.disabled = false; setMsg('');
+        if (p.mode !== 'NOW' && d.duePassed) { setMsg('That time has already passed - use Send now instead.', false); return; }
+        var s = findSector(p.sectorNumber) || {};
+        var now = p.mode === 'NOW';
+        var when = now ? 'Immediately, when you confirm' : (d.dueLabel + ' (' + MODE_TEXT[p.mode] + ')');
+        document.getElementById('seConfirmTitle').textContent = now ? 'Send this email now?' : 'Schedule this email?';
+        document.getElementById('seConfirmBody').innerHTML =
+          '<span>Sector</span><strong>' + esc(s.wf + ' · ' + s.from + ' → ' + s.to + ' · ' + s.date) + '</strong>' +
+          '<span>Subject</span><strong>' + esc(d.subject) + '</strong>' +
+          '<span>Audience</span><strong>' + (p.audience === 'ALL' ? 'All members' : 'Booked members on ' + esc(s.wf)) + '</strong>' +
+          '<span>Recipients</span><strong class="se-confirm-big">' + d.withEmail + '</strong>' +
+          '<span>When</span><strong>' + esc(when) + '</strong>';
+        var warn = [];
+        if (d.recipients > d.withEmail) warn.push((d.recipients - d.withEmail) + ' ' + (p.audience === 'ALL' ? 'member' : 'booked pilot') + (d.recipients - d.withEmail === 1 ? ' has' : 's have') + ' no email on file and will be skipped.');
+        if (!now) warn.push('The count is who would get it right now - it is worked out again when the email sends, so bookings made or cancelled before then are included.');
+        if (!d.withEmail && now) warn.push('Nobody would receive this email.');
+        document.getElementById('seConfirmWarn').textContent = warn.join(' ');
+        confirmGo.textContent = now ? 'Yes, send to ' + d.withEmail : 'Yes, schedule';
+        confirmGo.disabled = now && !d.withEmail;
+        pending = p;
+        confirmPop.hidden = false;
+        confirmGo.focus();
+      });
+      document.getElementById('seConfirmCancel').addEventListener('click', function() { confirmPop.hidden = true; pending = null; });
+      confirmGo.addEventListener('click', async function() {
+        if (!pending) return;
+        var p = pending;
+        confirmGo.disabled = true; goBtn.disabled = true;
+        setMsg(p.mode === 'NOW' ? 'Sending...' : 'Scheduling...');
+        try {
+          var d = await post('/admin/api/sector-emails', p);
+          confirmPop.hidden = true;
+          setMsg(d.scheduled ? 'Scheduled.' : 'Sent to ' + (d.sent || 0) + (d.skipped ? ' (' + d.skipped + ' with no email on file)' : '') + '.', true);
+          setTimeout(function() { location.href = '/admin/mailing-list?tab=sector'; }, 900);
+        } catch (err) {
+          confirmPop.hidden = true;
+          setMsg(err.message, false); goBtn.disabled = false; confirmGo.disabled = false;
+        }
+      });
+
+      document.addEventListener('click', async function(e) {
+        var c = e.target.closest('.se-cancel'), n = e.target.closest('.se-send-now');
+        if (!c && !n) return;
+        var b = c || n;
+        if (!confirm(c ? 'Cancel this scheduled email?' : 'Send this email now instead of at its scheduled time?')) return;
+        b.disabled = true;
+        try { await post('/admin/api/sector-emails/' + b.dataset.id + (c ? '/cancel' : '/send-now')); location.href = '/admin/mailing-list?tab=sector'; }
+        catch (err) { alert(err.message); b.disabled = false; }
+      });
+    })();
+    </script>`;
+}
+
+/* Unsubscribe from sector emails - for the event in the link only. The link
+   opens a confirm page rather than acting on GET, so mail scanners that
+   follow links do not unsubscribe people. */
+function sectorUnsubCheck(q) {
+  const eventId = Number(q?.ev);
+  let email = '';
+  try { email = Buffer.from(String(q?.e || ''), 'base64url').toString('utf8').trim().toLowerCase(); } catch {}
+  const ok = eventId > 0 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    && String(q?.t || '') === sectorEmailUnsubToken(eventId, email);
+  return ok ? { eventId, email } : null;
+}
+
+function sectorUnsubPage(req, res, { title, body }) {
+  const user = req.session?.user?.data || null;
+  res.send(renderLayout({
+    title: 'Sector Emails', user, isAdmin: isAdminUser(Number(user?.cid)),
+    content: `<section class="card" style="max-width:560px;margin:48px auto;padding:32px;text-align:center;">
+      <h2 style="margin:0 0 12px;">${title}</h2>${body}</section>`,
+    layoutClass: 'dashboard-full'
+  }));
+}
+
+app.get('/email/unsubscribe', async (req, res) => {
+  const who = sectorUnsubCheck(req.query);
+  if (!who) return sectorUnsubPage(req, res, { title: 'Link not valid', body: '<p style="color:var(--muted);">This unsubscribe link is incomplete or has expired.</p>' });
+  const ev = wfEvents.find(e => e.id === who.eventId);
+  const evName = escapeHtml(ev?.name || 'this WorldFlight event');
+  const existing = await prisma.sectorEmailOptOut?.findUnique({ where: { eventId_email: { eventId: who.eventId, email: who.email } } }).catch(() => null);
+  const q = `ev=${who.eventId}&e=${encodeURIComponent(req.query.e)}&t=${encodeURIComponent(req.query.t)}`;
+  const form = (action, label, primary) => `<form method="POST" action="/email/unsubscribe?${q}" style="margin-top:18px;">
+      <input type="hidden" name="action" value="${action}" />
+      <button type="submit" class="action-btn${primary ? ' primary' : ''}">${label}</button></form>`;
+  sectorUnsubPage(req, res, existing
+    ? { title: 'You are unsubscribed', body: `<p style="color:var(--muted);line-height:1.6;"><strong>${escapeHtml(who.email)}</strong> will not receive sector emails for ${evName}.</p>${form('resubscribe', 'Resubscribe', false)}` }
+    : { title: 'Unsubscribe from sector emails?', body: `<p style="color:var(--muted);line-height:1.6;">Stop sector briefing emails to <strong>${escapeHtml(who.email)}</strong> for ${evName}. You will hear from us again for future events.</p>${form('unsubscribe', 'Unsubscribe', true)}` });
+});
+
+app.post('/email/unsubscribe', express.urlencoded({ extended: false }), async (req, res) => {
+  const who = sectorUnsubCheck(req.query);
+  if (!who || !prisma.sectorEmailOptOut) return sectorUnsubPage(req, res, { title: 'Link not valid', body: '<p style="color:var(--muted);">This unsubscribe link is incomplete or has expired.</p>' });
+  const ev = wfEvents.find(e => e.id === who.eventId);
+  const evName = escapeHtml(ev?.name || 'this WorldFlight event');
+  if (req.body?.action === 'resubscribe') {
+    await prisma.sectorEmailOptOut.deleteMany({ where: { eventId: who.eventId, email: who.email } }).catch(() => null);
+    return sectorUnsubPage(req, res, { title: 'Resubscribed', body: `<p style="color:var(--muted);">You will receive sector emails for ${evName} again.</p>` });
+  }
+  await prisma.sectorEmailOptOut.upsert({
+    where: { eventId_email: { eventId: who.eventId, email: who.email } },
+    update: {}, create: { eventId: who.eventId, email: who.email }
+  }).catch(() => null);
+  console.log(`[SECTOR EMAIL] ${who.email} unsubscribed for event ${who.eventId}`);
+  sectorUnsubPage(req, res, { title: 'Unsubscribed', body: `<p style="color:var(--muted);line-height:1.6;">You will not receive any more sector emails for ${evName}. You will hear from us again for future events.</p>` });
 });
 
 /* ===== DEPARTURES PAGE ===== */
@@ -49602,12 +50603,8 @@ async function sendBookingOpenAlerts() {
   try {
     const pending = await prisma.bookingOpenAlert.findMany({ where: { eventId: activeEventId, sentAt: null } });
     if (!pending.length) return;
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-    });
+    // Shared pooled connection - one login, not one per email.
+    const transporter = sectorEmailTransport();
     const base = process.env.PUBLIC_BASE_URL || 'https://planning.worldflight.center';
     let sent = 0;
     for (const a of pending) {

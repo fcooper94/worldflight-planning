@@ -485,6 +485,44 @@ model BookingOpenAlert {
   @@index([sentAt])
 }
 
+// Briefing email to the pilots booked on one sector (Admin > Mailing List >
+// Sector Emails). subject/body carry {TAGS} that are filled per recipient
+// at send time, so a scheduled email always has the current route and
+// restrictions. mode: NOW | H6 | H12 | H24 | H48 (hours before the
+// scheduled departure, re-read from the schedule each sweep) | AT (sendAt).
+model SectorEmail {
+  id           Int       @id @default(autoincrement())
+  eventId      Int
+  sectorNumber String
+  subject      String
+  body         String
+  // BOOKED = pilots booked on the sector; ALL = every member with an
+  // email on file (User.email). Opt-outs for the event are skipped.
+  audience     String    @default("BOOKED")
+  mode         String
+  sendAt       DateTime?
+  status       String    @default("SCHEDULED")   // SCHEDULED | SENDING | SENT | FAILED | CANCELLED
+  sentAt       DateTime?
+  sentCount    Int?
+  skipped      Int?      // booked pilots with no email on file
+  error        String?
+  createdBy    Int
+  createdAt    DateTime  @default(now())
+
+  @@index([eventId, status])
+}
+
+// "Unsubscribe from sector emails" - remembered for one event only, so a
+// pilot hears from us again next year. Keyed on the address the email went to.
+model SectorEmailOptOut {
+  id        Int      @id @default(autoincrement())
+  eventId   Int
+  email     String
+  createdAt DateTime @default(now())
+
+  @@unique([eventId, email])
+}
+
 model MailingListSubscriber {
   id        Int      @id @default(autoincrement())
   email     String   @unique
