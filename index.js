@@ -8040,6 +8040,13 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
     return;
   }
 
+  // Bookings have closed for pilots (same exemptions as the open time).
+  const closedSince = !teamBooking && !isAdminUser(sessionCid) ? bookingsClosedSince(row) : null;
+  if (closedSince) {
+    socket.emit('bookingError', { error: `Bookings for ${row.number} closed at ${formatBookingsOpen(closedSince)}.` });
+    return;
+  }
+
   const slotKey =
     `${from}-${to}|${row.date_utc}|${row.dep_time_utc}|BOOKING_ONLY`;
 
@@ -9619,11 +9626,21 @@ const bookingsOpenByWf = new Map();   // wf -> { mode, at }
 async function loadBookingsOpenFromDb() {
   if (!activeEventId) return;
   const plans = await prisma.sectorPlan.findMany({
-    where: { eventId: activeEventId, bookingsOpenMode: { not: null } },
-    select: { wf: true, bookingsOpenMode: true, bookingsOpenAt: true }
+    where: {
+      eventId: activeEventId,
+      OR: [{ bookingsOpenMode: { not: null } }, { bookingsCloseMode: { not: null } }]
+    },
+    select: {
+      wf: true,
+      bookingsOpenMode: true, bookingsOpenAt: true,
+      bookingsCloseMode: true, bookingsCloseAt: true
+    }
   }).catch(() => []);
   bookingsOpenByWf.clear();
-  plans.forEach(p => bookingsOpenByWf.set(p.wf, { mode: p.bookingsOpenMode, at: p.bookingsOpenAt }));
+  plans.forEach(p => bookingsOpenByWf.set(p.wf, {
+    mode: p.bookingsOpenMode, at: p.bookingsOpenAt,
+    closeMode: p.bookingsCloseMode, closeAt: p.bookingsCloseAt
+  }));
 }
 
 // When pilots may first book `row`, as epoch ms - null when they always may.
@@ -9645,6 +9662,27 @@ function bookingsNotOpenUntil(row, now = Date.now()) {
   return t != null && now < t ? t : null;
 }
 
+// When pilot bookings stop for `row`, as epoch ms - null when they never do.
+// Anchored on the same instant as the open time (the departure window opens
+// at dep-60), so the two options read as a pair.
+function bookingsCloseAtMs(row) {
+  const cfg = row && bookingsOpenByWf.get(row.number);
+  if (!cfg || !cfg.closeMode) return null;
+  if (cfg.closeMode === 'AT') return cfg.closeAt ? new Date(cfg.closeAt).getTime() : null;
+  const hours = { H6: 6, H12: 12, H24: 24 }[cfg.closeMode];
+  if (!hours) return null;
+  const windowOpen = utcInstantMs(row.date_utc, row.dep_time_utc, -60);
+  return windowOpen == null ? null : windowOpen - hours * 3600000;
+}
+
+// Shut to new pilot bookings: the instant it closed; otherwise null.
+// Cancelling a booking you already hold is deliberately still allowed.
+function bookingsClosedSince(row, now = Date.now()) {
+  if (!row || (sharedFlowTypes[row.from + '-' + row.to] || 'NONE') === 'NONE') return null;
+  const t = bookingsCloseAtMs(row);
+  return t != null && now >= t ? t : null;
+}
+
 // "31st Oct 2000z" - the short form on the schedule's rotating pill.
 function formatBookingsOpenShort(ms) {
   const d = new Date(ms);
@@ -9652,6 +9690,14 @@ function formatBookingsOpenShort(ms) {
   const sfx = (day % 100 >= 11 && day % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[day % 10] || 'th');
   const mon = d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
   return `${day}${sfx} ${mon} ${d.toISOString().slice(11, 16).replace(':', '')}z`;
+}
+
+// "23h" / "1h" / "45m" - how long is left on the schedule's closing pill.
+// Short because the pill is a fixed 140px and shares it with the booking
+// count. Rounds down, so it never claims more time than there is.
+function formatClosesIn(ms) {
+  const mins = Math.max(0, Math.floor(ms / 60000));
+  return mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h';
 }
 
 // "Fri 30 Oct 2026, 20:00z"
@@ -12207,6 +12253,9 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
   // Pilot bookings held back until a set time (Sector Planning).
   const sectorOpensAt = leg ? bookingsNotOpenUntil(leg) : null;
   const sectorOpensLabel = sectorOpensAt ? formatBookingsOpen(sectorOpensAt) : '';
+  // ...and whether they have since closed again (Sector Planning).
+  const sectorClosedAt = leg && !sectorOpensAt ? bookingsClosedSince(leg) : null;
+  const sectorClosedLabel = sectorClosedAt ? formatBookingsOpen(sectorClosedAt) : '';
   const sectorAlertOn = sectorOpensAt && cid ? (await bookingAlertSectorsFor(cid)).has(wfNum) : false;
 
   // Count slots for slotted mode
@@ -12221,7 +12270,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
     }
   }
 
-  const remainingText = sectorOpensAt ? 'Not yet available to book' : bookingsFull ? '' :
+  const remainingText = sectorOpensAt ? 'Not yet available to book' : sectorClosedAt ? 'Bookings closed' : bookingsFull ? '' :
     flowType === 'SLOTTED' && slotTotal > 0 ? slotsLeft + ' Booking' + (slotsLeft !== 1 ? 's' : '') + ' Left' :
     flowType === 'BOOKING_ONLY' && bookingCap && bookingCap.total > 0 ? bookingCap.remaining + ' Booking' + (bookingCap.remaining !== 1 ? 's' : '') + ' Left' : '';
 
@@ -12424,6 +12473,11 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
                 + 'b.dataset.subscribed=d.subscribed?"1":"";b.textContent=d.subscribed?"Cancel email alert":"Email me when bookings open";'
                 + 'm.style.color="#4ade80";m.textContent=d.subscribed?"We will email you when bookings open.":"Email alert cancelled.";'
                 + '}catch(e){m.style.color="#f87171";m.textContent=e.message;}finally{b.disabled=false;}});})();</' + 'script>';
+            } else if (sectorClosedAt) {
+              return '<div class="sector-notopen" style="text-align:center;padding:10px 12px;margin:0 -17px -17px;border-top:1px solid var(--border);border-radius:0 0 11px 11px;width:calc(100% + 34px);box-sizing:border-box;background:rgba(239,68,68,0.08);">'
+                + '<div style="font-size:13px;font-weight:600;color:#f87171;">Bookings are closed</div>'
+                + '<div style="font-size:12px;color:var(--text);margin-top:3px;">Bookings for this sector closed at <strong>' + escapeHtml(sectorClosedLabel) + '</strong>.</div>'
+                + '</div>';
             } else if (!user) {
               return '<a href="/auth/login?next=' + encodeURIComponent('/sector/' + wfNum + '/' + fromIcao + '/' + toIcao) + '" style="display:block;text-align:center;padding:10px;margin:0 -17px -17px;border-top:1px solid var(--border);border-radius:0 0 11px 11px;width:calc(100% + 34px);font-size:13px;font-weight:600;text-decoration:none;background:var(--panel2);color:var(--warning);">'
                 + (flowType === 'SLOTTED' ? 'Login to book \u2192' : 'Login to make a Booking \u2192') + '</a>';
@@ -13281,14 +13335,29 @@ ${TZ_SELECT_HTML}
                     + '</button></td>';
                 }
 
-                /* Bookable — hover pill */
+                /* Bookings have closed again — no longer bookable. */
+                const closedSince = bookingsClosedSince(r);
+                if (closedSince) {
+                  return '<td class="col-book"><span class="flowtype-pill flowtype-full">Bookings Closed</span></td>';
+                }
+
+                /* Bookable — hover pill. Inside the last 24 hours before
+                   bookings close, line 1 counts down instead of repeating
+                   "Booking Required" - line 2 still carries the count. */
                 const pillClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
-                const label = 'Booking Required';
+                const closesAt = bookingsCloseAtMs(r);
+                const closesIn = closesAt != null ? closesAt - Date.now() : null;
+                const closingSoon = closesIn != null && closesIn > 0 && closesIn <= 86400000;
+                const closeAttr = closingSoon ? ' data-closes-at="' + closesAt + '"' : '';
+                const closingClass = closingSoon ? ' sched-closing-pill' : '';
+                const label = closingSoon
+                  ? '<span class="pill-closes"' + closeAttr + '>Bookings Close in ' + formatClosesIn(closesIn) + '</span>'
+                  : 'Booking Required';
                 const hoverLabel = isLoggedIn ? 'Click to Book' : 'Login to Book';
 
                 if (!isLoggedIn) {
                   return '<td class="col-book">'
-                    + '<a class="book-pill ' + pillClass + '" href="/auth/login">'
+                    + '<a class="book-pill ' + pillClass + closingClass + '" href="/auth/login">'
                     + '<span class="book-pill-label">' + label + '</span>'
                     + '<span class="book-pill-hover">' + hoverLabel + '</span>'
                     + '</a></td>';
@@ -13301,7 +13370,7 @@ ${TZ_SELECT_HTML}
                   }
                   const remainLabel = cap.total > 0 ? cap.remaining + ' Booking' + (cap.remaining !== 1 ? 's' : '') + ' Left' : '';
                   return '<td class="col-book">'
-                    + '<button class="book-pill booking-only ' + pillClass + '" data-sector="' + sk + '">'
+                    + '<button class="book-pill booking-only ' + pillClass + closingClass + '" data-sector="' + sk + '">'
                     + '<span class="book-pill-label pill-rotate">'
                     + '<span class="pill-line pill-line-1">' + label + '</span>'
                     + (remainLabel ? '<span class="pill-line pill-line-2">' + remainLabel + '</span>' : '')
@@ -13326,7 +13395,7 @@ ${TZ_SELECT_HTML}
                 }
 
                 return '<td class="col-book">'
-                  + '<a class="book-pill ' + pillClass + '" href="/book?from=' + r.from + '&to=' + r.to + '&dateUtc=' + encodeURIComponent(r.date_utc) + '&depTimeUtc=' + r.dep_time_utc + '">'
+                  + '<a class="book-pill ' + pillClass + closingClass + '" href="/book?from=' + r.from + '&to=' + r.to + '&dateUtc=' + encodeURIComponent(r.date_utc) + '&depTimeUtc=' + r.dep_time_utc + '">'
                   + '<span class="book-pill-label pill-rotate">'
                   + '<span class="pill-line pill-line-1">' + label + '</span>'
                   + (slotRemainLabel ? '<span class="pill-line pill-line-2">' + slotRemainLabel + '</span>' : '')
@@ -13874,6 +13943,23 @@ document.addEventListener('DOMContentLoaded', () => {
   modal.querySelectorAll('.sched-info-close').forEach(function(b) { b.addEventListener('click', close); });
   modal.querySelector('.route-modal-backdrop').addEventListener('click', close);
   document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
+})();
+
+/* The closing countdown is rendered server-side, so re-label it every
+   minute or a tab left open sits on a stale figure. */
+(function() {
+  var els = document.querySelectorAll('.pill-closes[data-closes-at]');
+  if (!els.length) return;
+  function tick() {
+    var now = Date.now();
+    els.forEach(function(el) {
+      var left = Number(el.dataset.closesAt) - now;
+      if (left <= 0) { el.textContent = 'Bookings Closed'; return; }
+      var mins = Math.floor(left / 60000);
+      el.textContent = 'Bookings Close in ' + (mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h');
+    });
+  }
+  setInterval(tick, 60000);
 })();
 </script>
 
@@ -20895,6 +20981,10 @@ app.post('/api/tobt/book', requireLogin, async (req, res) => {
       const notOpenUntil = bookingsNotOpenUntil(sectorRow);
       if (notOpenUntil) {
         return res.status(403).json({ error: `Bookings for ${sectorRow.number} open at ${formatBookingsOpen(notOpenUntil)}.` });
+      }
+      const closedSince = bookingsClosedSince(sectorRow);
+      if (closedSince) {
+        return res.status(403).json({ error: `Bookings for ${sectorRow.number} closed at ${formatBookingsOpen(closedSince)}.` });
       }
     }
 
@@ -48985,6 +49075,10 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
               const winOpen = utcInstantMs(sched.date_utc, sched.dep_time_utc, -60);
               const atVal = plan.bookingsOpenAt ? new Date(plan.bookingsOpenAt).toISOString().slice(0, 16) : '';
               const opt = (v, label) => `<option value="${v}"${mode === v ? ' selected' : ''}>${label}</option>`;
+              // And when they stop. Never, unless a close time is set.
+              const cMode = plan.bookingsCloseMode || '';
+              const cAtVal = plan.bookingsCloseAt ? new Date(plan.bookingsCloseAt).toISOString().slice(0, 16) : '';
+              const cOpt = (v, label) => `<option value="${v}"${cMode === v ? ' selected' : ''}>${label}</option>`;
               return `
             <div id="spBookOpenWrap" data-window-open="${winOpen != null ? winOpen : ''}" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -49001,6 +49095,23 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
               </div>
               <div id="spBookOpenWhen" style="font-size:11px;color:var(--text);margin-top:4px;"></div>
               <div style="font-size:10px;color:var(--muted);margin-top:2px;">Pilots can book from this time. WF Teams and Affiliates are allocated their places regardless.</div>
+            </div>
+            <div id="spBookCloseWrap" data-window-open="${winOpen != null ? winOpen : ''}" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">Bookings close</span>
+                <select id="spBookCloseMode" ${canEditDep ? '' : 'disabled'} style="padding:3px 6px;background:var(--panel2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;">
+                  ${cOpt('', 'Never')}
+                  ${cOpt('H6', '6 hours before the departure window')}
+                  ${cOpt('H12', '12 hours before the departure window')}
+                  ${cOpt('H24', '24 hours before the departure window')}
+                  ${cOpt('AT', 'At a specific date &amp; time')}
+                </select>
+                <input type="datetime-local" id="spBookCloseAt" value="${cAtVal}" ${canEditDep ? '' : 'disabled'} style="display:${cMode === 'AT' ? 'inline-block' : 'none'};padding:3px 6px;background:var(--panel2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;color-scheme:dark;" />
+                <span id="spBookCloseAtUtc" style="display:${cMode === 'AT' ? 'inline' : 'none'};font-size:11px;color:var(--muted);">UTC</span>
+                ${canEditDep ? '<button type="button" id="spBookCloseSave" class="action-btn primary" style="font-size:11px;padding:3px 10px;">Save</button>' : ''}
+              </div>
+              <div id="spBookCloseWhen" style="font-size:11px;color:var(--text);margin-top:4px;"></div>
+              <div style="font-size:10px;color:var(--muted);margin-top:2px;">Pilots cannot take a new place after this time. Cancelling an existing booking still works, and Teams, Affiliates and admins are not shut out.</div>
             </div>`;
             })()}
           </div>
@@ -49794,6 +49905,48 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
           if (m === 'AT' && !atInput.value) { when.textContent = 'Pick a date and time.'; when.style.color = '#f87171'; return; }
           save.disabled = true;
           var res = await spPostJson('/api/sector-plan/' + encodeURIComponent(window.SP.wf) + '/bookings-open',
+            { mode: m, at: m === 'AT' ? atInput.value + ':00Z' : null });
+          save.disabled = false;
+          when.style.color = res.ok ? '#4ade80' : '#f87171';
+          if (!res.ok) { when.textContent = (res.data && res.data.error) || 'Failed to save'; return; }
+          render();
+          when.textContent = 'Saved. ' + when.textContent;
+          setTimeout(function() { when.style.color = ''; render(); }, 3000);
+        });
+      })();
+
+      // ----- Bookings close time -----
+      (function() {
+        var wrap = document.getElementById('spBookCloseWrap');
+        if (!wrap) return;
+        var modeSel = document.getElementById('spBookCloseMode');
+        var atInput = document.getElementById('spBookCloseAt');
+        var atUtc = document.getElementById('spBookCloseAtUtc');
+        var when = document.getElementById('spBookCloseWhen');
+        var winOpen = Number(wrap.dataset.windowOpen) || null;
+        function fmt(ms) {
+          var d = new Date(ms);
+          return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace(/,/g, '')
+            + ', ' + d.toISOString().slice(11, 16) + 'z';
+        }
+        function render() {
+          var m = modeSel.value;
+          atInput.style.display = atUtc.style.display = m === 'AT' ? 'inline-block' : 'none';
+          var ms = null;
+          if ((m === 'H6' || m === 'H12' || m === 'H24') && winOpen) ms = winOpen - Number(m.slice(1)) * 3600000;
+          if (m === 'AT' && atInput.value) ms = new Date(atInput.value + ':00Z').getTime();
+          when.textContent = m === '' ? 'Bookings stay open.'
+            : (ms ? 'Pilots cannot book from ' + fmt(ms) + (ms <= Date.now() ? ' (already closed)' : '') : '');
+        }
+        modeSel.addEventListener('change', render);
+        atInput.addEventListener('input', render);
+        render();
+        var save = document.getElementById('spBookCloseSave');
+        if (save) save.addEventListener('click', async function() {
+          var m = modeSel.value;
+          if (m === 'AT' && !atInput.value) { when.textContent = 'Pick a date and time.'; when.style.color = '#f87171'; return; }
+          save.disabled = true;
+          var res = await spPostJson('/api/sector-plan/' + encodeURIComponent(window.SP.wf) + '/bookings-close',
             { mode: m, at: m === 'AT' ? atInput.value + ':00Z' : null });
           save.disabled = false;
           when.style.color = res.ok ? '#4ade80' : '#f87171';
@@ -50688,10 +50841,42 @@ app.post('/api/sector-plan/:wf/bookings-open', requireLogin, async (req, res) =>
       where: { id: plan.id },
       data: { bookingsOpenMode: mode || null, bookingsOpenAt: at, depUpdatedBy: cid, depUpdatedAt: new Date() }
     });
-    if (mode) bookingsOpenByWf.set(wf, { mode, at });
+    const prev = bookingsOpenByWf.get(wf) || {};
+    if (mode || prev.closeMode) bookingsOpenByWf.set(wf, { ...prev, mode, at });
     else bookingsOpenByWf.delete(wf);
     const opensAt = bookingsOpenAtMs(sched);
     res.json({ success: true, opensAt: opensAt != null ? new Date(opensAt).toISOString() : null, label: opensAt != null ? formatBookingsOpen(opensAt) : '' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// When pilot bookings stop: { mode: '' (never) | 'H6' | 'H12' | 'H24' |
+// 'AT', at: ISO instant, required for AT }.
+app.post('/api/sector-plan/:wf/bookings-close', requireLogin, async (req, res) => {
+  try {
+    const cid = Number(req.session?.user?.data?.cid);
+    const wf = String(req.params.wf || '').toUpperCase();
+    const mode = String(req.body?.mode || '').toUpperCase();
+    if (!['', 'H6', 'H12', 'H24', 'AT'].includes(mode)) return res.status(400).json({ error: 'Invalid option' });
+    let at = null;
+    if (mode === 'AT') {
+      at = new Date(String(req.body?.at || ''));
+      if (isNaN(at.getTime())) return res.status(400).json({ error: 'Pick a date and time' });
+    }
+    const sched = (adminSheetCache || []).find(r => r?.number === wf);
+    if (!sched) return res.status(404).json({ error: 'WF not found' });
+    if (!(await canEditPlanSide(cid, 'DEP', sched.from, sched.to))) return res.status(403).json({ error: 'No edit access' });
+    const plan = await getOrCreateSectorPlan(wf, sched.from, sched.to);
+    await prisma.sectorPlan.update({
+      where: { id: plan.id },
+      data: { bookingsCloseMode: mode || null, bookingsCloseAt: at, depUpdatedBy: cid, depUpdatedAt: new Date() }
+    });
+    const prev = bookingsOpenByWf.get(wf) || {};
+    if (mode || prev.mode) bookingsOpenByWf.set(wf, { ...prev, closeMode: mode, closeAt: at });
+    else bookingsOpenByWf.delete(wf);
+    const closesAt = bookingsCloseAtMs(sched);
+    res.json({ success: true, closesAt: closesAt != null ? new Date(closesAt).toISOString() : null, label: closesAt != null ? formatBookingsOpen(closesAt) : '' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -54557,6 +54742,11 @@ app.get('/book', async (req, res) => {
   // Not open to pilot bookings yet: the sector page says when, and offers
   // the "email me" alert. Admins and team bookers are not held back.
   if (bookLeg && !isAdmin && !teamBookingContext && bookingsNotOpenUntil(bookLeg)) {
+    return res.redirect(sectorUrl);
+  }
+
+  // Closed again: the sector page says when it closed.
+  if (bookLeg && !isAdmin && !teamBookingContext && bookingsClosedSince(bookLeg)) {
     return res.redirect(sectorUrl);
   }
 

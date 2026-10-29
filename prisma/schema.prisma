@@ -275,6 +275,11 @@ model SectorPlan {
   // regardless - only ordinary pilots wait.
   bookingsOpenMode   String?
   bookingsOpenAt     DateTime?
+  // When pilot bookings stop. NULL = never; "H6"/"H12"/"H24" = that many
+  // hours before the departure window opens; "AT" = at bookingsCloseAt.
+  // Teams, affiliates, controllers and admins are never shut out.
+  bookingsCloseMode  String?
+  bookingsCloseAt    DateTime?
   arrFlowRequest     String?
   arrFlowReason      String?   // reason for flow request (e.g. 'STAFFING', 'SINGLE_RUNWAY')
   arrFlowRequestedBy Int?
