@@ -2876,6 +2876,31 @@ async function dropDuplicateSectorBookings(callsign) {
   return dropped;
 }
 
+/* Hand back every place a callsign holds.
+
+   Used when an operator stops taking part: marked not participating, or
+   deleted. Turning participation ON runs auto-assignment, but turning it OFF
+   used to do nothing, so an operator who pulled out kept their slots - out of
+   the pool, still in the VATCAN list, and the sector reading as fuller than
+   it was. */
+async function releaseBookingsForCallsign(callsign, reason = '') {
+  const cs = String(callsign || '').trim().toUpperCase();
+  if (!cs) return 0;
+  const rows = await prisma.tobtBooking.findMany({ where: { callsign: cs } }).catch(() => []);
+  let released = 0;
+  for (const bk of rows) {
+    await prisma.tobtBooking.delete({ where: { id: bk.id } }).catch(() => null);
+    const bookingKey = `${Number(bk.cid)}:${bk.slotKey}`;
+    deleteBookingByBookingKey(bookingKey);
+    if (tobtBookingsByCid[Number(bk.cid)]) tobtBookingsByCid[Number(bk.cid)].delete(bookingKey);
+    try { io.emit('bookingCancelled', { slotKey: bk.slotKey }); } catch {}
+    vatcanPushForSlotKey(bk.slotKey);
+    released++;
+  }
+  if (released) console.log(`[BOOKING] Released ${released} place(s) held by ${cs}${reason ? ' - ' + reason : ''}`);
+  return released;
+}
+
 /* ===== TEAM AUTO-ASSIGNMENT ===== */
 // One booking per participating team per flow-restricted sector, filed under
 // the team owner's mainCid. SLOTTED picks the spare slot whose TOBT is
@@ -31832,7 +31857,7 @@ app.patch('/api/admin/official-teams/:id', requireAdmin, profilePhotoUpload.sing
   if (!Object.keys(data).length && !req.file) return res.status(400).json({ error: 'No fields to update' });
 
   // Read the current callsign too: a rename has to take the bookings with it.
-  const beforeRow = await prisma.officialTeam.findUnique({ where: { id }, select: { mainCid: true, teamName: true, callsign: true } }).catch(() => null);
+  const beforeRow = await prisma.officialTeam.findUnique({ where: { id }, select: { mainCid: true, teamName: true, callsign: true, participatingWf26: true } }).catch(() => null);
   const oldRow = data.mainCid ? beforeRow : null;
 
   if (Object.keys(data).length) await prisma.officialTeam.update({ where: { id }, data });
@@ -31840,6 +31865,11 @@ app.patch('/api/admin/official-teams/:id', requireAdmin, profilePhotoUpload.sing
 
   // Carry the bookings over, or auto-assign sees an unbooked team and
   // allocates them a second slot while the first sits under the old name.
+  // Stepping out of the event hands the places back, the same as a delete.
+  if (data.participatingWf26 === false && beforeRow?.participatingWf26) {
+    await releaseBookingsForCallsign(beforeRow.callsign, 'team ' + id + ' set not participating');
+  }
+
   if (data.callsign && beforeRow && data.callsign !== String(beforeRow.callsign || '').toUpperCase()) {
     const moved = await renameBookingsForCallsign(beforeRow.callsign, data.callsign);
     console.log('[TEAM-ADMIN] ' + beforeRow.callsign + ' -> ' + data.callsign
@@ -31939,7 +31969,7 @@ app.patch('/api/admin/affiliates/:id', requireAdmin, profilePhotoUpload.single('
   const id = Number(req.params.id);
   if (!id) return res.status(400).json({ error: 'Invalid id' });
   // Current callsign, so a rename can take its bookings with it.
-  const beforeAff = await prisma.affiliate.findUnique({ where: { id }, select: { callsign: true } }).catch(() => null);
+  const beforeAff = await prisma.affiliate.findUnique({ where: { id }, select: { callsign: true, participatingWf26: true } }).catch(() => null);
   const body = req.body || {};
   const data = {};
   if (body.callsign !== undefined) data.callsign = String(body.callsign).trim().toUpperCase();
@@ -32027,6 +32057,11 @@ app.patch('/api/admin/affiliates/:id', requireAdmin, profilePhotoUpload.single('
   // If they just turned on participation, run auto-assignment (teams first, then affiliates).
   if (data.participatingWf26 === true) {
     autoAssignTeamThenAffiliate({ reason: `affiliate ${id} patched` }).catch(() => {});
+  }
+  // ...and if they just turned it off, give the places back. Without this an
+  // operator who pulls out keeps their slots out of the pool.
+  if (data.participatingWf26 === false && beforeAff?.participatingWf26) {
+    await releaseBookingsForCallsign(beforeAff.callsign, 'affiliate ' + id + ' set not participating');
   }
 
   return res.json({ success: true });
