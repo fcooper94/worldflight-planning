@@ -260,6 +260,11 @@ model SectorPlan {
   depSplitPct        Int?      // percentage on primary route (0-100), remainder on split
   arrSplitRoute      String?   // second route for traffic split (arrival proposal)
   arrSplitPct        Int?      // percentage on primary route (0-100), remainder on split
+  /// Optional note shown alongside the split routes - e.g. how Clearance
+  /// Delivery decides which one you get. Per side like the routes
+  /// themselves; the departure side is the one published.
+  depSplitNote       String?
+  arrSplitNote       String?
   splitAgreed        Boolean   @default(false)
   depFlowType        String?   // 'NONE' | 'BOOKING_REQUIRED'
   depFlowReason      String?   // reason for flow restriction (e.g. 'STAFFING', 'SINGLE_RUNWAY')

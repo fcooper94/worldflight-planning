@@ -8339,6 +8339,9 @@ async function loadScheduleFromDb(eventId) {
     const split_state = published2 ? 'finalised' : (proposedRoute2 ? 'proposed' : 'none');
     const split_proposed_by = depSplit ? r.from : (arrSplit ? r.to : '');
     const split_pct = plan.depSplitPct != null ? plan.depSplitPct : null;
+    // Optional note shown with the split routes. Either side may write one;
+    // the departure side wins, as it does for the route itself.
+    const split_note = String(plan.depSplitNote || plan.arrSplitNote || '').trim();
 
     return {
       number: r.number,
@@ -8361,6 +8364,7 @@ async function loadScheduleFromDb(eventId) {
       split_state,
       split_proposed_by,
       split_pct,
+      split_note,
       is_wf_challenge: r.isWfChallenge === true,
       // '' on a leg with no alternative, else 'A' on the primary and the
       // alternative's own suffix ('B') on the alternative.
@@ -12285,7 +12289,7 @@ app.get('/sector/:wf/:from/:to', async (req, res) => {
           </div>
           ${(isAdmin || isPageEnabled('atc-route')) && leg && leg.atc_route
             ? '<div style="border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">ATC Route</div><div style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text);word-break:break-all;">' + leg.atc_route + '</div></div>'
-            + (leg.atc_route2 && leg.atc_route2 !== '-' ? '<div style="margin-top:8px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">Secondary ATC Route</div><div style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text);word-break:break-all;">' + leg.atc_route2 + '</div></div>' : '')
+            + (leg.atc_route2 && leg.atc_route2 !== '-' ? '<div style="margin-top:8px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">Secondary ATC Route</div><div style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text);word-break:break-all;">' + leg.atc_route2 + '</div>' + (leg.split_note ? '<div style="margin-top:8px;font-size:11px;line-height:1.5;color:#f59e0b;">' + escapeHtml(leg.split_note) + '</div>' : '') + '</div>' : '')
             : !(isAdmin || isPageEnabled('atc-route'))
               ? '<div style="border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;">ATC Route</div><div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.25);border-radius:8px;">'
                 + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px;"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
@@ -13214,8 +13218,9 @@ ${TZ_SELECT_HTML}
                   : '';
                 const route2Attr = r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : '';
                 const splitAttr = route2Attr && splitPctByWf[r.number] != null ? ' data-split-pct="' + splitPctByWf[r.number] + '"' : '';
+                const noteAttr = route2Attr && r.split_note ? ' data-split-note="' + String(r.split_note).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"' : '';
                 return '<td class="col-route">' + (hasRoute
-                  ? '<button type="button" class="show-route-btn" data-route="' + routeAttr + '" data-route2="' + route2Attr + '"' + splitAttr + '>Show Route</button>'
+                  ? '<button type="button" class="show-route-btn" data-route="' + routeAttr + '" data-route2="' + route2Attr + '"' + splitAttr + noteAttr + '>Show Route</button>'
                   : '<span style="color:var(--muted);font-size:11px;font-style:italic;" title="This information will be available once an ATC route has been agreed between the two airports.">Pending agreement</span>') + '</td>';
               })() : ''}
 
@@ -13708,7 +13713,7 @@ document.addEventListener('DOMContentLoaded', () => {
   var closeActionBtn = document.getElementById('routeModalCloseAction');
   var backdrop = modal.querySelector('.route-modal-backdrop');
 
-  function open(route, route2, splitPct) {
+  function open(route, route2, splitPct, splitNote) {
     body.textContent = '';
     body.innerHTML = '';
     if (route) {
@@ -13742,6 +13747,12 @@ document.addEventListener('DOMContentLoaded', () => {
       var r2 = document.createElement('span');
       r2.textContent = route2;
       body.appendChild(r2);
+      if (splitNote) {
+        var nEl = document.createElement('div');
+        nEl.style.cssText = 'margin-top:10px;font-size:11px;line-height:1.5;color:#f59e0b;font-family:inherit;';
+        nEl.textContent = splitNote;
+        body.appendChild(nEl);
+      }
     }
     modal.hidden = false;
   }
@@ -13751,7 +13762,7 @@ document.addEventListener('DOMContentLoaded', () => {
     var btn = e.target.closest('.show-route-btn');
     if (btn) {
       var pct = btn.getAttribute('data-split-pct');
-      open(btn.getAttribute('data-route') || '', btn.getAttribute('data-route2') || '', pct != null ? Number(pct) : null);
+      open(btn.getAttribute('data-route') || '', btn.getAttribute('data-route2') || '', pct != null ? Number(pct) : null, btn.getAttribute('data-split-note') || '');
     }
   });
   closeBtn.addEventListener('click', close);
@@ -23228,7 +23239,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                           ? `<span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span></span>`
                           : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}${flying ? flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) : ''}</td>` : ''}
                       ${showAtcRoute ? `<td>${first ? (r.atc_route && r.atc_route !== '-'
-                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
+                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" data-split-note="${escapeHtml(r.split_note || '')}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a>` : ''}</td>
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a>` : ''}</td>
@@ -23647,7 +23658,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
                       const sbAttr = sbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
                       const r2Attr = r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : '';
                       return r.atc_route && r.atc_route !== '-'
-                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r2Attr}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
+                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r2Attr}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" data-split-note="${escapeHtml(r.split_note || '')}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`;
                     })()}</td>` : ''}
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a></td>
@@ -24135,7 +24146,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
 
         var routeSimbrief = document.getElementById('affRouteModalSimbrief');
         var routeCopyText = '';
-        function openRouteModal(route, from, to, simbrief, route2, assigned) {
+        function openRouteModal(route, from, to, simbrief, route2, assigned, splitNote) {
           if (!routeModal) return;
           routeBody.textContent = '';
           // Copy and SimBrief act on the route this operator is actually
@@ -24167,6 +24178,12 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
             var r2 = document.createElement('span');
             r2.textContent = route2;
             routeBody.appendChild(r2);
+            if (splitNote) {
+              var sn = document.createElement('div');
+              sn.style.cssText = 'margin-top:10px;font-size:11px;line-height:1.5;color:#f59e0b;';
+              sn.textContent = splitNote;
+              routeBody.appendChild(sn);
+            }
           }
           routeSector.textContent = (from || '') + (to ? ' \u2192 ' + to : '');
           if (routeSimbrief) {
@@ -24193,7 +24210,8 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
             btn.getAttribute('data-to') || '',
             btn.getAttribute('data-simbrief') || '',
             btn.getAttribute('data-route2') || '',
-            btn.getAttribute('data-assigned') || ''
+            btn.getAttribute('data-assigned') || '',
+            btn.getAttribute('data-split-note') || ''
           );
         });
         if (routeClose) routeClose.addEventListener('click', closeRouteModal);
@@ -25619,7 +25637,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                           ? `<span class="aff-flow-status aff-flow-tobt"><span class="aff-tobt-label">${escapeHtml(status.label)}</span><span class="aff-tobt-time">${escapeHtml(status.time)}</span><span class="tobt-tooltip">Target Connection Time &mdash; connect to VATSIM at this time.<br><br>We stagger pilot connections at the departure airport so the network and controllers aren&#39;t overwhelmed.</span></span>`
                           : `<span class="aff-flow-status aff-flow-${status ? status.kind : 'empty'}">${escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))}</span>`)}${flying ? flyingRouteTag(r, bk => String(bk.callsign || '').toUpperCase() === cs) : ''}</td>` : ''}
                       ${showAtcRoute ? `<td>${first ? (r.atc_route && r.atc_route !== '-'
-                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
+                        ? `<button type="button" class="aff-route-btn" data-route="${String(r.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${r.atc_route2 && r.atc_route2 !== '-' ? String(r.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(r.from)}" data-to="${escapeHtml(r.to)}" data-assigned="${assignedRoute}" data-split-note="${escapeHtml(r.split_note || '')}" title="View the agreed ATC route">Route</button>`
                         : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`) : ''}</td>` : ''}
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a>` : ''}</td>
                       <td>${first ? `<a class="aff-icao-link" href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a>` : ''}</td>
@@ -25908,7 +25926,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
                         : escapeHtml(status ? status.text : (restricted ? 'Awaiting slot' : '—'))
                     }</span>${flyingRouteTag(wfRow, bk => teamCallsigns.has(String(bk.callsign || '').toUpperCase()))}</td>` : ''}
                     ${showAtcRoute ? `<td>${wfRow && wfRow.atc_route && wfRow.atc_route !== '-'
-                      ? `<button type="button" class="aff-route-btn" data-route="${String(wfRow.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${wfRow.atc_route2 && wfRow.atc_route2 !== '-' ? String(wfRow.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(wfRow.from)}" data-to="${escapeHtml(wfRow.to)}" data-assigned="${assignedRoute}" title="View the agreed ATC route">Route</button>`
+                      ? `<button type="button" class="aff-route-btn" data-route="${String(wfRow.atc_route).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" data-route2="${wfRow.atc_route2 && wfRow.atc_route2 !== '-' ? String(wfRow.atc_route2).replace(/&/g, '&amp;').replace(/"/g, '&quot;') : ''}" data-simbrief="${sbAttr}" data-from="${escapeHtml(wfRow.from)}" data-to="${escapeHtml(wfRow.to)}" data-assigned="${assignedRoute}" data-split-note="${escapeHtml(wfRow.split_note || '')}" title="View the agreed ATC route">Route</button>`
                       : `<span class="ot-muted" style="font-style:italic;" title="To be confirmed &mdash; the ATC route will appear here once agreed between the two airports.">TBC</span>`}</td>` : ''}
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(wfRow?.from || '')}">${escapeHtml(wfRow?.from || '—')}</a></td>
                     <td><a class="aff-icao-link" href="/icao/${escapeHtml(wfRow?.to || '')}">${escapeHtml(wfRow?.to || '—')}</a></td>
@@ -26266,6 +26284,12 @@ app.get('/team/hq', requireLogin, async (req, res) => {
               var p2 = document.createElement('span');
               p2.textContent = r2;
               body.appendChild(p2);
+              if (btn.dataset.splitNote) {
+                var sn = document.createElement('div');
+                sn.style.cssText = 'margin-top:10px;font-size:11px;line-height:1.5;color:#f59e0b;';
+                sn.textContent = btn.dataset.splitNote;
+                body.appendChild(sn);
+              }
             }
             sectorEl.textContent = btn.dataset.from + ' → ' + btn.dataset.to;
             if (sbLink) sbLink.href = btn.dataset.simbrief || '#';
@@ -48784,9 +48808,13 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
                 <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">Route B</span>
                 <textarea id="spDepSplitRoute" class="sp-textarea" ${canEditDep ? '' : 'disabled'} placeholder="${canEditDep ? 'Enter second route…' : ''}" style="margin-top:4px;">${(plan.depSplitRoute || '').replace(/</g, '&lt;')}</textarea>
               </div>
+              <div style="margin-top:8px;">
+                <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">Note (optional)</span>
+                <input type="text" id="spDepSplitNote" class="sp-input" maxlength="300" ${canEditDep ? '' : 'disabled'} placeholder="${canEditDep ? 'e.g. Clearance Delivery will assign your route on the day…' : ''}" style="margin-top:4px;width:100%;" value="${escapeHtml(plan.depSplitNote || '')}" />
+              </div>
               <div class="sp-split-slider-wrap">
                 <span class="sp-split-label sp-split-label-a">Route A<br><span id="spDepSplitPctA" style="font-size:14px;">${plan.depSplitPct != null ? plan.depSplitPct : 50}%</span></span>
-                <input type="range" id="spDepSplitPct" class="sp-split-slider" min="5" max="95" step="5" value="${plan.depSplitPct != null ? plan.depSplitPct : 50}" ${canEditDep ? '' : 'disabled'} />
+                <input type="range" id="spDepSplitPct" class="sp-split-slider" min="0" max="100" step="5" value="${plan.depSplitPct != null ? plan.depSplitPct : 50}" ${canEditDep ? '' : 'disabled'} />
                 <span class="sp-split-label sp-split-label-b">Route B<br><span id="spDepSplitPctB" style="font-size:14px;">${plan.depSplitPct != null ? (100 - plan.depSplitPct) : 50}%</span></span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
@@ -48817,9 +48845,13 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
                 <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">Route B</span>
                 <textarea id="spArrSplitRoute" class="sp-textarea" ${canEditArr ? '' : 'disabled'} placeholder="${canEditArr ? 'Enter second route…' : ''}" style="margin-top:4px;">${(plan.arrSplitRoute || '').replace(/</g, '&lt;')}</textarea>
               </div>
+              <div style="margin-top:8px;">
+                <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">Note (optional)</span>
+                <input type="text" id="spArrSplitNote" class="sp-input" maxlength="300" ${canEditArr ? '' : 'disabled'} placeholder="${canEditArr ? 'e.g. Clearance Delivery will assign your route on the day…' : ''}" style="margin-top:4px;width:100%;" value="${escapeHtml(plan.arrSplitNote || '')}" />
+              </div>
               <div class="sp-split-slider-wrap">
                 <span class="sp-split-label sp-split-label-a">Route A<br><span id="spArrSplitPctA" style="font-size:14px;">${plan.arrSplitPct != null ? plan.arrSplitPct : 50}%</span></span>
-                <input type="range" id="spArrSplitPct" class="sp-split-slider" min="5" max="95" step="5" value="${plan.arrSplitPct != null ? plan.arrSplitPct : 50}" ${canEditArr ? '' : 'disabled'} />
+                <input type="range" id="spArrSplitPct" class="sp-split-slider" min="0" max="100" step="5" value="${plan.arrSplitPct != null ? plan.arrSplitPct : 50}" ${canEditArr ? '' : 'disabled'} />
                 <span class="sp-split-label sp-split-label-b">Route B<br><span id="spArrSplitPctB" style="font-size:14px;">${plan.arrSplitPct != null ? (100 - plan.arrSplitPct) : 50}%</span></span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
@@ -49484,7 +49516,7 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
           + '</div>'
           + '<div class="sp-split-slider-wrap">'
           + '<span class="sp-split-label sp-split-label-a">Route A<br><span id="' + pfx + 'PctA" style="font-size:14px;">50%</span></span>'
-          + '<input type="range" id="' + pfx + 'Pct" class="sp-split-slider" min="5" max="95" step="5" value="50" />'
+          + '<input type="range" id="' + pfx + 'Pct" class="sp-split-slider" min="0" max="100" step="5" value="50" />'
           + '<span class="sp-split-label sp-split-label-b">Route B<br><span id="' + pfx + 'PctB" style="font-size:14px;">50%</span></span>'
           + '</div>'
           + '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">'
@@ -49523,10 +49555,14 @@ app.get('/sector-planning/:wf', requirePageEnabled('sector-planning'), async (re
         if (saveBtn) saveBtn.addEventListener('click', async function() {
           var route = document.getElementById(pfx + 'Route').value.trim();
           var pct = Number(document.getElementById(pfx + 'Pct').value);
+          var noteEl = document.getElementById(pfx + 'Note');
+          var note = noteEl ? noteEl.value.trim() : '';
           var msg = document.getElementById(pfx + 'Msg');
           if (!route) { spSetMsg(msg, 'Enter a route', false); return; }
-          if (!isFinite(pct) || pct < 5 || pct > 95) { spSetMsg(msg, 'Split must be 5–95%', false); return; }
-          var res = await spPostJson('/api/sector-plan/' + encodeURIComponent(window.SP.wf) + '/split', { side: side, route: route, pct: Math.round(pct) });
+          // 0 and 100 are allowed: one route can take the whole capacity
+          // while the other is still published for ATC to assign by hand.
+          if (!isFinite(pct) || pct < 0 || pct > 100) { spSetMsg(msg, 'Split must be 0–100%', false); return; }
+          var res = await spPostJson('/api/sector-plan/' + encodeURIComponent(window.SP.wf) + '/split', { side: side, route: route, pct: Math.round(pct), note: note });
           if (res.ok) {
             var cleanedSplit = res.data.cleanedRoute || route;
             if (res.data.sidStarStripped) document.getElementById(pfx + 'Route').value = cleanedSplit;
@@ -50754,9 +50790,15 @@ app.post('/api/sector-plan/:wf/split', requireLogin, async (req, res) => {
     const side = String(req.body?.side || '').toUpperCase();
     if (!['DEP', 'ARR'].includes(side)) return res.status(400).json({ error: 'invalid side' });
     const route = req.body?.route != null ? String(req.body.route).trim() || null : null;
+    // Optional free-text note shown with the split routes.
+    const note = req.body?.note != null ? String(req.body.note).trim().slice(0, 300) || null : undefined;
     const rawPct = req.body?.pct;
     const pct = rawPct != null ? Number(rawPct) : null;
-    if (pct !== null && (!Number.isFinite(pct) || pct < 5 || pct > 95)) return res.status(400).json({ error: 'Split must be 5–95%' });
+    // 0 and 100 are allowed on purpose: a sector can publish a secondary
+    // route without allocating anyone to it, leaving the choice to
+    // Clearance Delivery on the day. routeCapacity() then gives one route
+    // the whole capacity and the other none, so nothing overflows.
+    if (pct !== null && (!Number.isFinite(pct) || pct < 0 || pct > 100)) return res.status(400).json({ error: 'Split must be 0–100%' });
     const sched = (adminSheetCache || []).find(r => r?.number === wf);
     if (!sched) return res.status(404).json({ error: 'WF not found' });
     if (!(await canEditPlanSide(cid, side, sched.from, sched.to))) return res.status(403).json({ error: 'No edit access' });
@@ -50769,6 +50811,11 @@ app.post('/api/sector-plan/:wf/split', requireLogin, async (req, res) => {
     const data = side === 'DEP'
       ? { depSplitRoute: cleaned, depSplitPct: pct !== null ? Math.round(pct) : null, splitAgreed: false, depUpdatedBy: cid, depUpdatedAt: new Date() }
       : { arrSplitRoute: cleaned, arrSplitPct: pct !== null ? Math.round(pct) : null, splitAgreed: false, arrUpdatedBy: cid, arrUpdatedAt: new Date() };
+    // Left out of the body entirely = leave the existing note alone; sent
+    // empty = clear it.
+    if (note !== undefined) {
+      if (side === 'DEP') data.depSplitNote = note; else data.arrSplitNote = note;
+    }
     await prisma.sectorPlan.update({ where: { id: plan.id }, data });
     // The split now feeds staffing (staffing_route2), so a change here must
     // rebuild the schedule cache and drop the FIR analysis exactly as a
