@@ -20898,7 +20898,11 @@ if (parts.length === 3) {
   [from, to] = sectorPart.split('-');
   dateUtc = dateUtcRaw;
   depTimeUtc = depTimeUtcRaw;
-  tobtTimeUtc = tobtRaw;
+  // The slotKey keeps its #2/#3 suffix - that is what makes two slots in the
+  // same minute distinct - but tobtTimeUtc is the time pilots, controllers
+  // and VATCAN see, so it is the clean HH:MM. Storing the suffix here also
+  // broke the Route A/B bucketing, which parses this field as HH:MM.
+  tobtTimeUtc = String(tobtRaw || '').split('#')[0];
 
 } else {
   return res.status(400).json({ error: 'Invalid slot key format' });
