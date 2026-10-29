@@ -47685,10 +47685,12 @@ app.get('/sector-planning/:wf/slots', requirePageEnabled('sector-planning'), asy
   .rt{display:inline-block;min-width:18px;text-align:center;padding:1px 6px;border-radius:5px;font-size:11px;font-weight:700;}
   .rt-a{background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.4);color:#7dd3fc;}
   .rt-b{background:rgba(232,121,249,0.15);border:1px solid rgba(232,121,249,0.4);color:#f0abfc;}
-</style></head><body>
+</style>
+<script src="/socket.io/socket.io.js"></script>
+</head><body>
 <div class="head">
   <h1>${wf} — ${sched.from} → ${sched.to}</h1>
-  <div class="sub">${slotted ? 'Bookings and connect times' : 'Booking Required'} · auto-refreshes every 30s</div>
+  <div class="sub">${slotted ? 'Bookings and connect times' : 'Booking Required'} · updates live</div>
 </div>
 <div class="wrap">
   <input id="cidSearch" type="text" placeholder="Search CID or callsign…" autofocus />
@@ -47771,6 +47773,26 @@ app.get('/sector-planning/:wf/slots', requirePageEnabled('sector-planning'), asy
   var sb = document.getElementById('cidSearch');
   if (sb) sb.addEventListener('input', render);
   refresh();
+  // The list is served from the server’s in-memory booking cache, which is
+  // written through on every book/cancel/move - so the data is there at once
+  // and only the polling delayed it. Listen for the same events the rest of
+  // the site uses and refetch immediately; the interval stays as a fallback
+  // for a dropped socket.
+  var pending = null;
+  function refreshSoon() {
+    if (pending) return;
+    pending = setTimeout(function () { pending = null; refresh(); }, 400);
+  }
+  try {
+    if (typeof io === 'function') {
+      // Book and cancel notify the departure airport’s room, not everyone,
+      // so join it the same way the ATC pages do - via the handshake query.
+      // The event-wide jobs (auto-assign, rebalance, snap) emit globally.
+      var sock = io({ query: { icao: '${sched.from}' } });
+      ['bookingCreated', 'bookingCancelled', 'bookingUpdated', 'departures:update']
+        .forEach(function (ev) { sock.on(ev, refreshSoon); });
+    }
+  } catch (e) {}
   setInterval(refresh, 30000);
 </script>
 </body></html>`);
