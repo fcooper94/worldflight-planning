@@ -45324,6 +45324,47 @@ app.get('/wf-atc/requested', requirePageEnabled('requested-atc'), requireLogin, 
   const myClaims = claims.filter(c => Number(c.cid) === cid && requestById[c.requestId]);
   const allAccepted = requests.filter(r => r.status === 'accepted');
 
+  // Running order, so WF2601 is at the top rather than whatever order the
+  // requests happen to have been raised in.
+  const schedIdx = new Map((adminSheetCache || []).map((x, i) => [x.number, i]));
+  const sectorPos = n => schedIdx.has(n) ? schedIdx.get(n) : Number.MAX_SAFE_INTEGER;
+  openReqs.sort((x, y) =>
+    sectorPos(x.sectorNumber) - sectorPos(y.sectorNumber)
+    || String(x.sectorNumber).localeCompare(String(y.sectorNumber))
+    || String(x.timeFrom || '').localeCompare(String(y.timeFrom || '')));
+
+  /* What this controller has already taken on, as absolute UTC spans, so an
+     open request that would clash can say so rather than letting them claim
+     two positions at once. A request carries only HH:MM, so the date comes
+     from its sector. */
+  const spanOf = (sectorNumber, timeFrom, timeTo) => {
+    const sched = (adminSheetCache || []).find(x => x.number === sectorNumber);
+    const win = atcRequestWindow({ timeFrom, timeTo });
+    if (!sched || !win) return null;
+    const start = parseUtcDateTime(sched.date_utc, timeFrom);
+    if (!start || isNaN(start.getTime())) return null;
+    return { start: start.getTime(), end: start.getTime() + (win.end - win.start) * 60000 };
+  };
+  const myCommitments = [];
+  for (const r of myAccepted) {
+    const sp = spanOf(r.sectorNumber, r.timeFrom, r.timeTo);
+    if (sp) myCommitments.push({ reqId: r.id, label: r.callsign || r.sectorNumber, ...sp });
+  }
+  for (const cl of myClaims) {
+    const parent = requestById[cl.requestId];
+    if (!parent) continue;
+    const sp = spanOf(parent.sectorNumber, cl.timeFrom, cl.timeTo);
+    if (sp) myCommitments.push({ reqId: parent.id, label: parent.callsign || parent.sectorNumber, ...sp });
+  }
+  // A request they have already part-claimed overlaps their own claim, which
+  // is not a clash - skip commitments belonging to the request being tested.
+  const conflictFor = (r) => {
+    const sp = spanOf(r.sectorNumber, r.timeFrom, r.timeTo);
+    if (!sp) return null;
+    const hit = myCommitments.find(m => m.reqId !== r.id && sp.start < m.end && m.start < sp.end);
+    return hit ? hit.label : null;
+  };
+
   function buildRow(r, opts) {
     const showClaim = opts?.claim;
     const showAcceptedBy = opts?.acceptedBy;
@@ -45344,6 +45385,12 @@ app.get('/wf-atc/requested', requirePageEnabled('requested-atc'), requireLogin, 
       + cov.gaps.map(g => '<span style="font-size:10px;color:#f59e0b;font-weight:600;">\u26a0 '
           + g.from + '-' + g.to + 'z open</span>').join('')
       + '</div>';
+    // Only warn on the open list - their own rows are not a clash with
+    // themselves, and the all-requests table is informational.
+    const clashWith = (showClaim && !partial) ? conflictFor(r) : null;
+    const conflictHtml = !clashWith ? '' :
+      '<div style="margin-top:3px;font-size:10px;color:#f87171;font-weight:600;">⚠ Conflicts with your '
+      + escapeHtml(clashWith) + ' booking</div>';
     const sched = (adminSheetCache || []).find(s => s.number === r.sectorNumber);
     const date = sched ? sched.date_utc : '';
     const colCount = 5 + (showAcceptedBy ? 2 : 0) + (showClaim || showDrop ? 1 : 0);
@@ -45370,7 +45417,7 @@ app.get('/wf-atc/requested', requirePageEnabled('requested-atc'), requireLogin, 
       + '<td style="font-size:11px;">' + escapeHtml(r.fromIcao) + ' \u2192 ' + escapeHtml(r.toIcao) + '</td>'
       + '<td style="font-size:11px;">' + escapeHtml(date) + '</td>'
       + '<td><span style="font-family:monospace;font-size:12px;font-weight:600;">' + escapeHtml(cs) + '</span></td>'
-      + '<td style="font-size:11px;">' + escapeHtml(timesText) + coverHtml + '</td>'
+      + '<td style="font-size:11px;">' + escapeHtml(timesText) + coverHtml + conflictHtml + '</td>'
       + (showAcceptedBy ? '<td style="font-size:11px;color:var(--success);">' + (r.acceptedBy ? escapeHtml(nameOf[r.acceptedBy] || String(r.acceptedBy)) : '') + '</td>'
         + '<td style="font-size:11px;color:var(--muted);">' + (r.acceptedBy ? String(r.acceptedBy) : '') + '</td>' : '')
       + actionCell
