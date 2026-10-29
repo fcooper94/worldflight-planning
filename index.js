@@ -10105,6 +10105,7 @@ app.get('/', async (req, res) => {
                 ${!nsAssigned || nsAssigned === 'B' ? `<a class="db-next-sb" href="${nsSimbriefUrl(nextSector.atc_route2)}" target="_blank" rel="noopener" title="Plan the secondary route with SimBrief"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>SimBrief</a>` : ''}
               </div>` : ''}
               ${nsAssigned === 'B' ? `<div class="db-next-assigned">You have been assigned the secondary route.</div>` : ''}
+              ${nextSector.split_note ? `<div class="db-next-note">${escapeHtml(nextSector.split_note)}</div>` : ''}
             ` : `<div class="db-next-empty">${nsShowRoute ? 'No route published yet.' : 'Routes are not published yet.'}</div>`}
           </div>
 
@@ -10444,6 +10445,15 @@ app.get('/', async (req, res) => {
         font-weight: 600;
         color: #4ade80;
       }
+      /* The FIR managers’ note on the split, e.g. how Clearance Delivery
+         picks your route. Same indent as the assigned-route line. */
+      .db-next-note {
+        margin: 8px 0 0 84px;
+        font-size: 11px;
+        line-height: 1.5;
+        color: #f59e0b;
+      }
+      @media (max-width: 700px) { .db-next-note { margin-left: 0; } }
       /* The note breaks the .db-next-route + .db-next-route pairing above, so
          restore the divider after it - otherwise the next route crowds the
          note and looks as though it is the one being described. */
