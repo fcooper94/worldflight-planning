@@ -753,3 +753,26 @@ model TeamMember {
   @@index([teamName])
   @@index([cid])
 }
+
+// Personal Roster: a pilot's own copy of the schedule, switched on from the
+// Full Schedule page. One row per CID that has ever used the toggle.
+model PersonalRoster {
+  cid       Int      @id
+  enabled   Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+// A pilot's choices for one leg on their Personal Roster. No row means
+// flying and no notes - every leg starts ticked. Notes are private.
+model PersonalRosterLeg {
+  id           Int      @id @default(autoincrement())
+  eventId      Int
+  sectorNumber String
+  cid          Int
+  flying       Boolean  @default(true)
+  notes        String?
+  updatedAt    DateTime @updatedAt
+
+  @@unique([eventId, sectorNumber, cid])
+  @@index([cid, eventId])
+}

@@ -733,3 +733,22 @@ model TeamMember {
   @@index([teamName])
   @@index([cid])
 }
+
+model PersonalRoster {
+  cid       Int      @id
+  enabled   Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+model PersonalRosterLeg {
+  id           Int      @id @default(autoincrement())
+  eventId      Int
+  sectorNumber String
+  cid          Int
+  flying       Boolean  @default(true)
+  notes        String?
+  updatedAt    DateTime @updatedAt
+
+  @@unique([eventId, sectorNumber, cid])
+  @@index([cid, eventId])
+}

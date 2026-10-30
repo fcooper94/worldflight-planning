@@ -8493,3 +8493,187 @@ html {
 .sched-local-green { color: #4ade80; }
 .sched-local-amber { color: #fbbf24; }
 .sched-local-red   { color: #f87171; }
+
+/* =========================================================
+   PERSONAL ROSTER
+   ========================================================= */
+
+/* Switch on the Full Schedule header - same look as the Crew Roster
+   toggle on Team HQ. */
+.pr-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  transition: all 0.15s;
+}
+.pr-toggle.is-on { border-color: rgba(56,189,248,0.3); background: rgba(56,189,248,0.06); }
+.pr-switch { position: relative; width: 38px; height: 20px; flex: 0 0 auto; }
+.pr-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+.pr-switch-track { position: absolute; inset: 0; border-radius: 10px; background: var(--border); transition: background 0.2s; }
+.pr-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  transition: left 0.2s;
+}
+.pr-toggle.is-on .pr-switch-track { background: var(--accent); }
+.pr-toggle.is-on .pr-switch-knob { left: 20px; }
+.pr-toggle-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.pr-toggle.is-on .pr-toggle-label { color: var(--accent); }
+.pr-tip-host {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  font-size: 10px;
+  color: var(--muted);
+  cursor: help;
+}
+/* Opens downward - the switch sits at the top of the card. */
+.pr-tip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: -8px;
+  width: 260px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.6;
+  white-space: normal;
+  text-align: left;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  z-index: 100;
+  pointer-events: none;
+}
+.pr-tip::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  right: 10px;
+  width: 10px;
+  height: 10px;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  transform: rotate(45deg);
+}
+.pr-tip-host:hover .pr-tip { display: block; }
+
+/* Roster table - declared after the .schedule-page widths so these win. */
+.personal-roster-page .pr-lead { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+.personal-roster-page .col-wf-sector { width: 10%; }
+.personal-roster-page .col-from,
+.personal-roster-page .col-to        { width: 7%; }
+.personal-roster-page .col-date      { width: 12%; }
+.personal-roster-page .col-window    { width: 13%; }
+.personal-roster-page .col-book      { width: 15%; text-align: center; }
+.personal-roster-page .pr-col-flying { width: 12%; text-align: center; }
+.personal-roster-page .pr-col-notes  { width: 11%; text-align: center; }
+.personal-roster-page .col-wf-sector .sector-details-btn { display: inline-block; text-decoration: none; }
+.personal-roster-page .pr-empty { text-align: center; color: var(--muted); padding: 24px; }
+
+/* Flying legs are highlighted; legs you are sitting out are greyed. The
+   tick itself stays at full strength so it is obvious how to undo it. */
+.personal-roster-page tr.pr-row > td { transition: opacity 0.15s, background 0.15s; }
+.personal-roster-page tr.pr-row.is-flying > td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.personal-roster-page tr.pr-row.is-flying > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.personal-roster-page tr.pr-row.is-off > td { opacity: 0.4; filter: grayscale(1); }
+.personal-roster-page tr.pr-row.is-off > td.pr-col-flying { opacity: 1; filter: none; }
+.pr-flying-label { display: inline-flex; padding: 4px; cursor: pointer; }
+.pr-flying { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+
+/* Notes button - turns purple with a dot once the leg has notes. */
+.pr-notes-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.pr-notes-btn:hover { color: var(--text); border-color: var(--accent); }
+.pr-notes-dot { display: none; width: 7px; height: 7px; border-radius: 50%; background: #a78bfa; }
+.pr-notes-btn.has-notes { color: #c4b5fd; background: rgba(167,139,250,0.12); border-color: rgba(167,139,250,0.45); }
+.pr-notes-btn.has-notes .pr-notes-dot { display: inline-block; }
+[data-theme="light"] .pr-notes-btn.has-notes { color: #6d28d9; }
+
+/* Notes modal - its own classes, so the global .modal-card input rules
+   (uppercase, centred) never reach the textarea. */
+.pr-notes-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.pr-notes-modal[hidden] { display: none; }
+.pr-notes-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.55); }
+.pr-notes-dialog {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+}
+.pr-notes-dialog h3 { margin: 0 0 4px; font-size: 16px; }
+.pr-notes-sub { margin-bottom: 12px; font-size: 12px; color: var(--muted); }
+#prNotesText {
+  width: 100%;
+  min-height: 180px;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2, #0d1526);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.pr-notes-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.pr-notes-msg { flex: 1; font-size: 12px; color: #f87171; }
+.pr-btn {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pr-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pr-btn:disabled { opacity: 0.6; cursor: default; }

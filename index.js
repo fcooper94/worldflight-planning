@@ -534,6 +534,7 @@ function renderLayout(opts) {
     canManageAffiliateMembers: cid ? canManageAffiliateMembers(cid) : false,
     canManageTeamMembers: cid ? canManageTeamMembers(cid) : false,
     teamRosterEnabled: cid ? hasTeamRoster(cid) : false,
+    personalRosterEnabled: cid ? personalRosterCids.has(cid) : false,
     activeEvent: active ? { id: active.id, name: active.name, year: active.year } : null
   });
 }
@@ -2296,6 +2297,17 @@ function hasTeamRoster(cid) {
   if (tn && teamRosterNames.has(tn)) return true;
   // Also check owner CIDs directly
   return false;
+}
+
+// CIDs with the Personal Roster switched on - read by renderLayout, which is
+// synchronous, so the sidebar link needs it in memory.
+const personalRosterCids = new Set();
+
+async function loadPersonalRosterCids() {
+  if (!prisma.personalRoster) return;
+  const rows = await prisma.personalRoster.findMany({ where: { enabled: true }, select: { cid: true } }).catch(() => []);
+  personalRosterCids.clear();
+  rows.forEach(r => personalRosterCids.add(Number(r.cid)));
 }
 
 function requireTeamMember(req, res, next) {
@@ -4425,6 +4437,7 @@ async function bootstrap() {
   await loadMasterUsers();
   await refreshOpenAtcRequestCount();
   await loadTeamMembers();
+  await loadPersonalRosterCids();
   await loadAffiliates();
   await loadWfAtcMembers();
   await loadAffiliateOwners();
@@ -12965,6 +12978,508 @@ app.get('/api/sector-traffic/:wf/:from/:to', async (req, res) => {
   res.json(pilots);
 });
 
+// Callsigns the viewer flies for as an affiliate (main CID or active
+// member) - affiliate bookings sit under the main CID, so a member's own
+// bookings alone would miss them.
+async function affiliateCallsignsFor(cid) {
+  let myAffCallsigns = new Set();
+  if (cid && isAffiliate(cid)) {
+    const memberOf = await prisma.affiliateMember.findMany({ where: { cid, active: true }, select: { affiliateId: true } }).catch(() => []);
+    const affs = await prisma.affiliate.findMany({
+      where: { OR: [{ cid }, { id: { in: memberOf.map(m => m.affiliateId) } }] },
+      select: { callsign: true }
+    }).catch(() => []);
+    myAffCallsigns = new Set(affs.map(a => String(a.callsign || '').toUpperCase()).filter(Boolean));
+  }
+  return myAffCallsigns;
+}
+
+// A full option of a route-alternative leg: the other option holding the
+// viewer's (or their affiliate's) booking, so the row can say it
+// overflowed there rather than "No Bookings Left!". Only for viewers who
+// may see alternatives - for anyone else option B does not exist.
+function scheduleOverflowPill(r, cid, myAffCallsigns) {
+  if (!cid || !r.variant_label || !canSeeRouteAlternatives(cid)) return '';
+  for (const o of legOptionsFor(r)) {
+    if (o.number === r.number) continue;
+    const prefix = optionPrefix(o) + '|';
+    const mine = Object.values(tobtBookingsByKey).some(b =>
+      b && String(b.slotKey || '').startsWith(prefix)
+        && (Number(b.cid) === cid || myAffCallsigns.has(String(b.callsign || '').toUpperCase())));
+    if (!mine) continue;
+    const colour = o.variant_label === 'A' ? '#34d399' : '#e879f9';
+    return '<td class="col-book"><span class="flowtype-pill flowtype-overflow" style="--opt:' + colour + ';"'
+      + ' title="' + r.number + ' is full - your booking is on ' + o.number + ' (' + o.from + ' → ' + o.to + ')">Overflowed to ' + o.variant_label + '</span></td>';
+  }
+  return '';
+}
+
+// Team-booking context for booking-only flow (same resolution as /sector)
+async function teamBookingContextFor(cid) {
+  let teamBookingContext = null;
+  if (cid && isTeamMember(cid)) {
+    const wfTeamRow = await prisma.userAdditionalRole.findUnique({
+      where: { cid_role: { cid, role: 'WF_TEAM' } }
+    }).catch(() => null);
+    if (wfTeamRow?.teamName) {
+      const mates = await prisma.officialTeam.findMany({
+        select: { teamName: true, mainCid: true, participatingWf26: true, callsign: true }
+      });
+      const teamCallsigns = mates
+        .filter(t => String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName && t.participatingWf26)
+        .map(t => String(t.callsign || '').toUpperCase())
+        .filter(Boolean);
+      const match = mates.find(t =>
+        String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
+        t.participatingWf26 && t.mainCid
+      );
+      if (match) {
+        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid), callsigns: teamCallsigns };
+      }
+    }
+  }
+
+  return teamBookingContext;
+}
+
+// The Book cell of a schedule row. Shared by the Full Schedule and the
+// Personal Roster so the pill behaves the same on both - pair it with
+// scheduleBookingScript() on the page. roster swaps the pill's second line
+// for whether the viewer holds a booking.
+function scheduleBookCellHtml(r, { cid, isLoggedIn, myBookings, myAlertSectors, overflowPill, roster = false }) {
+  const flowtype = sharedFlowTypes[`${r.from}-${r.to}`] || 'NONE';
+  const sk = r.from + '-' + r.to + '|' + r.date_utc + '|' + r.dep_time_utc;
+
+  if (flowtype === 'NONE') {
+    return '<td class="col-book"><span class="flowtype-pill flowtype-none">No Restrictions</span></td>';
+  }
+
+  /* Already booked — show CID pill, hover to cancel */
+  if (isLoggedIn && myBookings) {
+    const prefixWithCid = cid + ':' + sk + '|';
+    const prefixNoCid = sk + '|';
+    const mySlotKey = [...myBookings].find(k =>
+      (k.startsWith(prefixWithCid) || k.startsWith(prefixNoCid)) && tobtBookingsByKey[k]
+    );
+    if (mySlotKey) {
+      const booking = tobtBookingsByKey[mySlotKey];
+      const bookedCid = booking?.cid || 'Booked';
+      const tobt = booking?.tobtTimeUtc || '';
+      const isBookingOnly = tobt === 'BOOKING_ONLY' || !tobt || tobt === 'null';
+      const pillLabel = isBookingOnly ? 'Booked' : bookedCid + ' (' + tobt.slice(0, 5) + ')';
+      const rawSlotKey = booking?.slotKey || mySlotKey;
+      return '<td class="col-book">'
+        + '<a href="/my-slots?view=' + encodeURIComponent(rawSlotKey) + '" class="book-pill book-pill-booked" style="text-decoration:none;">'
+        + (roster
+          ? '<span class="book-pill-label pill-rotate">'
+            + '<span class="pill-line pill-line-1">Booking Required</span>'
+            + '<span class="pill-line pill-line-2">' + escapeHtml(isBookingOnly ? 'Booked' : 'Booked ' + tobt.slice(0, 5)) + '</span>'
+            + '</span>'
+          : '<span class="book-pill-label">' + escapeHtml(pillLabel) + '</span>')
+        + '<span class="book-pill-hover">View Booking</span>'
+        + '</a></td>';
+    }
+  }
+
+  /* Bookings not open yet — when they open; click for the
+     details and the "email me" option. */
+  const opensAt = bookingsNotOpenUntil(r);
+  if (opensAt) {
+    const opensLabel = formatBookingsOpen(opensAt);
+    const notOpenClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
+    return '<td class="col-book"><button type="button" class="book-pill sched-notopen-pill ' + notOpenClass + '"'
+      + ' data-wf="' + escapeHtml(r.number) + '" data-opens="' + escapeHtml(opensLabel) + '"'
+      + ' data-subscribed="' + (myAlertSectors.has(r.number) ? '1' : '') + '" data-logged-in="' + (isLoggedIn ? '1' : '') + '">'
+      + '<span class="book-pill-label pill-rotate">'
+      + '<span class="pill-line pill-line-1">Booking Required</span>'
+      + '<span class="pill-line pill-line-2">Opens ' + escapeHtml(formatBookingsOpenShort(opensAt)) + '</span>'
+      + '</span>'
+      + '<span class="book-pill-hover">More Info</span>'
+      + '</button></td>';
+  }
+
+  /* Bookings have closed again — no longer bookable. */
+  const closedSince = bookingsClosedSince(r);
+  if (closedSince) {
+    return '<td class="col-book"><span class="flowtype-pill flowtype-full">Bookings Closed</span></td>';
+  }
+
+  /* Bookable — hover pill. Inside the last 24 hours before
+     bookings close, line 1 counts down instead of repeating
+     "Booking Required" - line 2 still carries the count. */
+  const pillClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
+  const closesAt = bookingsCloseAtMs(r);
+  const closesIn = closesAt != null ? closesAt - Date.now() : null;
+  const closingSoon = closesIn != null && closesIn > 0 && closesIn <= 86400000;
+  const closeAttr = closingSoon ? ' data-closes-at="' + closesAt + '"' : '';
+  const closingClass = closingSoon ? ' sched-closing-pill' : '';
+  const label = closingSoon
+    ? '<span class="pill-closes"' + closeAttr + '>Bookings Close in ' + formatClosesIn(closesIn) + '</span>'
+    : 'Booking Required';
+  const hoverLabel = isLoggedIn ? 'Click to Book' : 'Login to Book';
+
+  if (!isLoggedIn) {
+    return '<td class="col-book">'
+      + '<a class="book-pill ' + pillClass + closingClass + '" href="/auth/login">'
+      + '<span class="book-pill-label">' + label + '</span>'
+      + '<span class="book-pill-hover">' + hoverLabel + '</span>'
+      + '</a></td>';
+  }
+
+  if (flowtype === 'BOOKING_ONLY') {
+    const cap = getBookingOnlyCapacity(r.from, r.to);
+    if (cap.total > 0 && cap.remaining <= 0) {
+      return overflowPill(r) || '<td class="col-book"><button type="button" class="flowtype-pill flowtype-full sched-full-pill" data-wf="' + escapeHtml(r.number) + '" data-window="' + escapeHtml(buildTimeWindow(r.dep_time_utc)) + '">No Bookings Left!</button></td>';
+    }
+    const remainLabel = roster ? 'Not Booked' : cap.total > 0 ? cap.remaining + ' Booking' + (cap.remaining !== 1 ? 's' : '') + ' Left' : '';
+    return '<td class="col-book">'
+      + '<button class="book-pill booking-only ' + pillClass + closingClass + '" data-sector="' + sk + '">'
+      + '<span class="book-pill-label pill-rotate">'
+      + '<span class="pill-line pill-line-1">' + label + '</span>'
+      + (remainLabel ? '<span class="pill-line pill-line-2">' + remainLabel + '</span>' : '')
+      + '</span>'
+      + '<span class="book-pill-hover">' + hoverLabel + '</span>'
+      + '</button></td>';
+  }
+
+  // Slotted — count available slots from allTobtSlots
+  const slotSectorPrefix = r.from + '-' + r.to + '|';
+  let slotTotal = 0, slotsLeft = 0;
+  for (const [k, s] of Object.entries(allTobtSlots)) {
+    if (k.startsWith(slotSectorPrefix)) {
+      slotTotal++;
+      if (!isSlotTaken(k)) slotsLeft++;
+    }
+  }
+  const slotRemainLabel = roster ? 'Not Booked' : slotTotal > 0 ? slotsLeft + ' Booking' + (slotsLeft !== 1 ? 's' : '') + ' Left' : '';
+
+  if (slotTotal > 0 && slotsLeft <= 0) {
+    return overflowPill(r) || '<td class="col-book"><button type="button" class="flowtype-pill flowtype-full sched-full-pill" data-wf="' + escapeHtml(r.number) + '" data-window="' + escapeHtml(buildTimeWindow(r.dep_time_utc)) + '">No Bookings Left!</button></td>';
+  }
+
+  return '<td class="col-book">'
+    + '<a class="book-pill ' + pillClass + closingClass + '" href="/book?from=' + r.from + '&to=' + r.to + '&dateUtc=' + encodeURIComponent(r.date_utc) + '&depTimeUtc=' + r.dep_time_utc + '">'
+    + '<span class="book-pill-label pill-rotate">'
+    + '<span class="pill-line pill-line-1">' + label + '</span>'
+    + (slotRemainLabel ? '<span class="pill-line pill-line-2">' + slotRemainLabel + '</span>' : '')
+    + '</span>'
+    + '<span class="book-pill-hover">' + hoverLabel + '</span>'
+    + '</a></td>';
+}
+
+// Client side of the Book cell: booking-only / team modals, the booking
+// socket, and the "not open yet" / "no bookings left" modal.
+function scheduleBookingScript(teamBookingContext, cid) {
+  return `<style>
+  .route-modal[hidden] { display: none; }
+  .route-modal { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center; }
+  .route-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+  .route-modal-card {
+    position: relative; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; width: min(640px, 92vw); max-height: 80vh;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .route-modal-header { display: flex; align-items: center; justify-content: space-between; }
+  .route-modal-close {
+    background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer;
+    line-height: 1; padding: 0 4px;
+  }
+  .route-modal-close:hover { color: var(--text); }
+  .route-modal-body {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px; line-height: 1.5; color: var(--text);
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; overflow: auto; word-break: break-word; white-space: pre-wrap;
+  }
+  .route-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .route-modal-copy {
+    padding: 6px 14px; background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .route-modal-copy.route-modal-secondary {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+  }
+  .route-modal-copy.route-modal-secondary:hover { background: var(--panel2); }
+</style>
+<script>
+var WF_TEAM_CTX = ${teamBookingContext ? JSON.stringify(teamBookingContext) : 'null'};
+var WF_MY_CID = ${cid ? cid : 'null'};
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.booking-only');
+  if (!btn) return;
+
+  const sector = btn.dataset.sector;
+  if (!sector) return;
+
+  if (WF_TEAM_CTX) {
+    openTeamBookingModal(sector);
+  } else {
+    openCidModal(function(enteredCid) {
+      socket.emit('createBookingOnly', { sector: sector, callsign: enteredCid });
+    });
+  }
+});
+
+function openTeamBookingModal(sector) {
+  var overlay = document.createElement('div');
+  overlay.className = 'modal';
+  overlay.style.zIndex = '20000';
+  overlay.innerHTML = '<div class="modal-backdrop"></div>'
+    + '<div class="modal-dialog booking-confirm-dialog">'
+    + '<div class="booking-confirm-icon">\u2708</div>'
+    + '<h3 class="booking-confirm-title">Confirm Booking</h3>'
+    + '<p class="booking-confirm-sub">Who should this booking be filed under?</p>'
+    + '<div class="booking-confirm-btns">'
+    + '<button class="booking-confirm-btn booking-confirm-self" id="sbkSelf">\ud83d\udc64 Book for Myself</button>'
+    + '<button class="booking-confirm-btn booking-confirm-team" id="sbkTeam">\ud83d\udc65 Book for ' + WF_TEAM_CTX.teamName + '</button>'
+    + '</div>'
+    + '<div id="sbkMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
+    + '<button class="booking-confirm-cancel" id="sbkCancel">Cancel</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-backdrop').addEventListener('click', close);
+  document.getElementById('sbkCancel').addEventListener('click', close);
+
+  document.getElementById('sbkSelf').addEventListener('click', function() {
+    socket.emit('createBookingOnly', { sector: sector, callsign: String(WF_MY_CID) });
+    close();
+  });
+  // Operator slots are allocated by auto-assignment - booking one by hand
+  // here would double-book the team/affiliate.
+  document.getElementById('sbkTeam').addEventListener('click', function() {
+    var msg = document.getElementById('sbkMsg');
+    msg.innerHTML = 'Bookings for your team/affiliate are handled automatically and you do not need to make bookings. See your <a href="/team/hq" style="color:var(--accent);">Team/Affiliate HQ</a> for your bookings.';
+    msg.style.color = '#fbbf24';
+    msg.style.display = '';
+  });
+}
+
+function openCidModal(onSubmit) {
+  const modal = document.getElementById('callsignModal');
+  const input = document.getElementById('callsignModalInput');
+  const confirmBtn = document.getElementById('callsignConfirm');
+  const cancelBtn = document.getElementById('callsignCancel');
+  const errorEl = document.getElementById('modalError');
+
+  modal.classList.remove('hidden');
+  input.value = '';
+  input.focus();
+  errorEl.classList.add('hidden');
+  errorEl.textContent = '';
+
+  // Store reference so socket errors can reach it
+  window._cidModalErrorEl = errorEl;
+  window._cidModalOpen = true;
+
+  function cleanup() {
+    confirmBtn.removeEventListener('click', onConfirm);
+    cancelBtn.removeEventListener('click', onCancel);
+    input.removeEventListener('keydown', onKey);
+    window._cidModalOpen = false;
+    window._cidModalErrorEl = null;
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+    errorEl.classList.add('hidden');
+    cleanup();
+  }
+
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.classList.remove('hidden');
+    input.focus();
+  }
+
+  function onConfirm() {
+    const value = input.value.trim();
+    if (!value) return;
+    if (!/^[0-9]+$/.test(value)) {
+      showError('Please enter a valid numeric CID.');
+      return;
+    }
+    // Don't close — wait for server response
+    onSubmit(value);
+  }
+
+  function onCancel() { closeModal(); }
+
+  function onKey(e) {
+    if (e.key === 'Enter') onConfirm();
+    if (e.key === 'Escape') onCancel();
+  }
+
+  confirmBtn.addEventListener('click', onConfirm);
+  cancelBtn.addEventListener('click', onCancel);
+  input.addEventListener('keydown', onKey);
+}
+
+</script>
+<script>
+<script>
+let bookingOnlySector = null;
+const socket = io();
+socket.on('bookingError', ({ error }) => {
+  if (window._cidModalOpen && window._cidModalErrorEl) {
+    window._cidModalErrorEl.textContent = error;
+    window._cidModalErrorEl.classList.remove('hidden');
+  } else {
+    alert(error);
+  }
+});
+socket.on('bookingCreated', () => { location.reload(); });
+
+function showCallsignModal(sector) {
+  bookingOnlySector = sector;
+
+  const modal = document.getElementById('callsignModal');
+  if (!modal) return;
+
+  modal.classList.add('open');
+
+  const input = modal.querySelector('#callsignInput');
+  input.value = '';
+  input.focus();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const confirmBtn = document.getElementById('callsignConfirm');
+  const cancelBtn  = document.getElementById('callsignCancel');
+  const input      = document.getElementById('callsignInput');
+
+  if (!confirmBtn || !input) return;
+
+  confirmBtn.addEventListener('click', () => {
+    const callsign = input.value.trim().toUpperCase();
+    if (!callsign || !bookingOnlySector) return;
+
+    console.log('[CLIENT] booking-only submit', bookingOnlySector, callsign);
+
+    socket.emit('createBookingOnly', {
+      sector: bookingOnlySector,
+      callsign
+    });
+
+    document.getElementById('callsignModal').classList.remove('open');
+    bookingOnlySector = null;
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    bookingOnlySector = null;
+    document.getElementById('callsignModal').classList.remove('open');
+  });
+});
+</script>
+
+<div id="schedInfoModal" class="route-modal" hidden>
+  <div class="route-modal-backdrop"></div>
+  <div class="route-modal-card" role="dialog" aria-modal="true" aria-labelledby="schedInfoTitle">
+    <div class="route-modal-header">
+      <div id="schedInfoTitle" style="font-weight:700;font-size:14px;"></div>
+      <button type="button" class="route-modal-close sched-info-close" aria-label="Close">&times;</button>
+    </div>
+    <div id="schedInfoBody" class="route-modal-body" style="font-family:inherit;font-size:13px;line-height:1.6;white-space:normal;"></div>
+    <div class="route-modal-actions">
+      <button type="button" class="route-modal-copy route-modal-secondary sched-info-close">Close</button>
+      <button type="button" id="schedInfoAlert" class="route-modal-copy" style="display:none;"></button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var modal = document.getElementById('schedInfoModal');
+  if (!modal) return;
+  var title = document.getElementById('schedInfoTitle');
+  var body = document.getElementById('schedInfoBody');
+  var alertBtn = document.getElementById('schedInfoAlert');
+  var current = null;
+  function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  function close() { modal.hidden = true; current = null; }
+  function setAlertBtn(subscribed) {
+    alertBtn.textContent = subscribed ? 'Cancel email alert' : 'Email me when bookings open';
+  }
+
+  document.addEventListener('click', function(e) {
+    var full = e.target.closest('.sched-full-pill');
+    if (full) {
+      // "20:00–22:00" (en dash) from the server.
+      var w = String(full.dataset.window || '').split(/[–—-]/);
+      title.textContent = full.dataset.wf + ' — No bookings left';
+      body.innerHTML = '<p style="margin:0 0 10px;">There are no bookings left for this sector to depart within the departure window of <strong>'
+        + esc((w[0] || '').trim()) + 'z</strong> to <strong>' + esc((w[1] || '').trim()) + 'z</strong>.</p>'
+        + '<p style="margin:0;">You can still choose to fly, but will need to depart outside this window.</p>';
+      alertBtn.style.display = 'none';
+      current = null;
+      modal.hidden = false;
+      return;
+    }
+    var notOpen = e.target.closest('.sched-notopen-pill');
+    if (notOpen) {
+      current = notOpen;
+      title.textContent = notOpen.dataset.wf + ' — Not yet available to book';
+      body.innerHTML = '<p style="margin:0 0 10px;">This sector is flow restricted, but it is not yet available to book.</p>'
+        + '<p style="margin:0;">Bookings for this sector will open at <strong>' + esc(notOpen.dataset.opens) + '</strong>.</p>'
+        + (notOpen.dataset.loggedIn ? '' : '<p style="margin:10px 0 0;color:var(--muted);">Log in to be emailed when bookings open.</p>');
+      alertBtn.style.display = notOpen.dataset.loggedIn ? '' : 'none';
+      setAlertBtn(!!notOpen.dataset.subscribed);
+      modal.hidden = false;
+    }
+  });
+
+  alertBtn.addEventListener('click', async function() {
+    if (!current) return;
+    var subscribed = !!current.dataset.subscribed;
+    alertBtn.disabled = true;
+    try {
+      var r = await fetch('/api/booking-alerts/' + encodeURIComponent(current.dataset.wf), {
+        method: subscribed ? 'DELETE' : 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      var d = await r.json().catch(function() { return {}; });
+      if (!r.ok) throw new Error(d.error || 'Something went wrong');
+      current.dataset.subscribed = d.subscribed ? '1' : '';
+      setAlertBtn(d.subscribed);
+      var note = body.querySelector('.sched-alert-note') || body.appendChild(document.createElement('p'));
+      note.className = 'sched-alert-note';
+      note.style.cssText = 'margin:10px 0 0;color:#4ade80;';
+      note.textContent = d.subscribed ? 'We will email you when bookings open for this sector.' : 'Email alert cancelled.';
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      alertBtn.disabled = false;
+    }
+  });
+
+  modal.querySelectorAll('.sched-info-close').forEach(function(b) { b.addEventListener('click', close); });
+  modal.querySelector('.route-modal-backdrop').addEventListener('click', close);
+  document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
+})();
+
+/* The closing countdown is rendered server-side, so re-label it every
+   minute or a tab left open sits on a stale figure. */
+(function() {
+  var els = document.querySelectorAll('.pill-closes[data-closes-at]');
+  if (!els.length) return;
+  function tick() {
+    var now = Date.now();
+    els.forEach(function(el) {
+      var left = Number(el.dataset.closesAt) - now;
+      if (left <= 0) { el.textContent = 'Bookings Closed'; return; }
+      var mins = Math.floor(left / 60000);
+      el.textContent = 'Bookings Close in ' + (mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h');
+    });
+  }
+  setInterval(tick, 60000);
+})();
+</script>
+`;
+}
+
 app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
   const isAdmin = isAdminUser(cid);
@@ -12975,34 +13490,12 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   // Callsigns the viewer flies for as an affiliate (main CID or active
   // member) - affiliate bookings sit under the main CID, so a member's own
   // bookings alone would miss them.
-  let myAffCallsigns = new Set();
-  if (cid && isAffiliate(cid)) {
-    const memberOf = await prisma.affiliateMember.findMany({ where: { cid, active: true }, select: { affiliateId: true } }).catch(() => []);
-    const affs = await prisma.affiliate.findMany({
-      where: { OR: [{ cid }, { id: { in: memberOf.map(m => m.affiliateId) } }] },
-      select: { callsign: true }
-    }).catch(() => []);
-    myAffCallsigns = new Set(affs.map(a => String(a.callsign || '').toUpperCase()).filter(Boolean));
-  }
+  const myAffCallsigns = await affiliateCallsignsFor(cid);
   // A full option of a route-alternative leg: the other option holding the
   // viewer's (or their affiliate's) booking, so the row can say it
   // overflowed there rather than "No Bookings Left!". Only for viewers who
   // may see alternatives - for anyone else option B does not exist.
-  const overflowPill = r => {
-    if (!cid || !r.variant_label || !canSeeRouteAlternatives(cid)) return '';
-    for (const o of legOptionsFor(r)) {
-      if (o.number === r.number) continue;
-      const prefix = optionPrefix(o) + '|';
-      const mine = Object.values(tobtBookingsByKey).some(b =>
-        b && String(b.slotKey || '').startsWith(prefix)
-          && (Number(b.cid) === cid || myAffCallsigns.has(String(b.callsign || '').toUpperCase())));
-      if (!mine) continue;
-      const colour = o.variant_label === 'A' ? '#34d399' : '#e879f9';
-      return '<td class="col-book"><span class="flowtype-pill flowtype-overflow" style="--opt:' + colour + ';"'
-        + ' title="' + r.number + ' is full - your booking is on ' + o.number + ' (' + o.from + ' → ' + o.to + ')">Overflowed to ' + o.variant_label + '</span></td>';
-    }
-    return '';
-  };
+  const overflowPill = r => scheduleOverflowPill(r, cid, myAffCallsigns);
   const showBookSlot = isPageVisibleTo('flow-restrictions', isAdmin);
   const showAtcRoute = isAdmin || isPageEnabled('atc-route');
   const showWfChallenge = isPageVisibleTo('worldflight-challenge', isAdmin);
@@ -13126,29 +13619,7 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
   }
 
   // Team-booking context for booking-only flow (same resolution as /sector)
-  let teamBookingContext = null;
-  if (cid && isTeamMember(cid)) {
-    const wfTeamRow = await prisma.userAdditionalRole.findUnique({
-      where: { cid_role: { cid, role: 'WF_TEAM' } }
-    }).catch(() => null);
-    if (wfTeamRow?.teamName) {
-      const mates = await prisma.officialTeam.findMany({
-        select: { teamName: true, mainCid: true, participatingWf26: true, callsign: true }
-      });
-      const teamCallsigns = mates
-        .filter(t => String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName && t.participatingWf26)
-        .map(t => String(t.callsign || '').toUpperCase())
-        .filter(Boolean);
-      const match = mates.find(t =>
-        String(t.teamName || '').trim().toUpperCase() === wfTeamRow.teamName &&
-        t.participatingWf26 && t.mainCid
-      );
-      if (match) {
-        teamBookingContext = { teamName: wfTeamRow.teamName, teamOwnerCid: Number(match.mainCid), callsigns: teamCallsigns };
-      }
-    }
-  }
-
+  const teamBookingContext = await teamBookingContextFor(cid);
   // Load agreed split percentages for sectors with a secondary route
   const _splitPlans = await prisma.sectorPlan.findMany({
     where: { eventId: activeEventId, splitAgreed: true },
@@ -13170,11 +13641,25 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
     return (a != null && d != null && a < d) ? 1440 : 0;
   };
 
+  // Personal Roster switch - logged-in viewers only, since the roster is
+  // stored against their CID.
+  const rosterOn = isLoggedIn && personalRosterCids.has(cid);
+  const rosterToggleHtml = !isLoggedIn ? '' : `
+        <label class="pr-toggle${rosterOn ? ' is-on' : ''}" id="prToggleWrap">
+          <span class="pr-switch">
+            <input type="checkbox" id="prToggle" ${rosterOn ? 'checked' : ''} />
+            <span class="pr-switch-track"></span>
+            <span class="pr-switch-knob"></span>
+          </span>
+          <span class="pr-toggle-label">Personal Roster</span>
+          <span class="pr-tip-host">?<span class="pr-tip">Adds a Personal Roster page under Full Schedule in the sidebar: your own copy of the schedule where you can tick the legs you plan to fly, see at a glance whether you hold a booking, and keep private notes for each leg.</span></span>
+        </label>`;
+
   const content = `
   <section class="card card-full">
     <div class="sched-head">
       <h2>WorldFlight Event Schedule</h2>
-      <div class="sched-tz">
+      <div class="sched-tz">${rosterToggleHtml}
         <div class="sched-tz-note">All times are in UTC</div>
 ${TZ_SELECT_HTML}
       </div>
@@ -13289,120 +13774,7 @@ ${TZ_SELECT_HTML}
               })() : ''}
 
               <!-- ✅ BOOK (combined booking type + action) -->
-              ${showBookSlot ? (() => {
-                const sk = r.from + '-' + r.to + '|' + r.date_utc + '|' + r.dep_time_utc;
-
-                if (flowtype === 'NONE') {
-                  return '<td class="col-book"><span class="flowtype-pill flowtype-none">No Restrictions</span></td>';
-                }
-
-                /* Already booked — show CID pill, hover to cancel */
-                if (isLoggedIn && myBookings) {
-                  const prefixWithCid = cid + ':' + sk + '|';
-                  const prefixNoCid = sk + '|';
-                  const mySlotKey = [...myBookings].find(k =>
-                    (k.startsWith(prefixWithCid) || k.startsWith(prefixNoCid)) && tobtBookingsByKey[k]
-                  );
-                  if (mySlotKey) {
-                    const booking = tobtBookingsByKey[mySlotKey];
-                    const bookedCid = booking?.cid || 'Booked';
-                    const tobt = booking?.tobtTimeUtc || '';
-                    const isBookingOnly = tobt === 'BOOKING_ONLY' || !tobt || tobt === 'null';
-                    const pillLabel = isBookingOnly ? 'Booked' : bookedCid + ' (' + tobt.slice(0, 5) + ')';
-                    const rawSlotKey = booking?.slotKey || mySlotKey;
-                    return '<td class="col-book">'
-                      + '<a href="/my-slots?view=' + encodeURIComponent(rawSlotKey) + '" class="book-pill book-pill-booked" style="text-decoration:none;">'
-                      + '<span class="book-pill-label">' + escapeHtml(pillLabel) + '</span>'
-                      + '<span class="book-pill-hover">View Booking</span>'
-                      + '</a></td>';
-                  }
-                }
-
-                /* Bookings not open yet — when they open; click for the
-                   details and the "email me" option. */
-                const opensAt = bookingsNotOpenUntil(r);
-                if (opensAt) {
-                  const opensLabel = formatBookingsOpen(opensAt);
-                  const notOpenClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
-                  return '<td class="col-book"><button type="button" class="book-pill sched-notopen-pill ' + notOpenClass + '"'
-                    + ' data-wf="' + escapeHtml(r.number) + '" data-opens="' + escapeHtml(opensLabel) + '"'
-                    + ' data-subscribed="' + (myAlertSectors.has(r.number) ? '1' : '') + '" data-logged-in="' + (isLoggedIn ? '1' : '') + '">'
-                    + '<span class="book-pill-label pill-rotate">'
-                    + '<span class="pill-line pill-line-1">Booking Required</span>'
-                    + '<span class="pill-line pill-line-2">Opens ' + escapeHtml(formatBookingsOpenShort(opensAt)) + '</span>'
-                    + '</span>'
-                    + '<span class="book-pill-hover">More Info</span>'
-                    + '</button></td>';
-                }
-
-                /* Bookings have closed again — no longer bookable. */
-                const closedSince = bookingsClosedSince(r);
-                if (closedSince) {
-                  return '<td class="col-book"><span class="flowtype-pill flowtype-full">Bookings Closed</span></td>';
-                }
-
-                /* Bookable — hover pill. Inside the last 24 hours before
-                   bookings close, line 1 counts down instead of repeating
-                   "Booking Required" - line 2 still carries the count. */
-                const pillClass = flowtype === 'BOOKING_ONLY' ? 'flowtype-booking_only' : 'flowtype-slotted';
-                const closesAt = bookingsCloseAtMs(r);
-                const closesIn = closesAt != null ? closesAt - Date.now() : null;
-                const closingSoon = closesIn != null && closesIn > 0 && closesIn <= 86400000;
-                const closeAttr = closingSoon ? ' data-closes-at="' + closesAt + '"' : '';
-                const closingClass = closingSoon ? ' sched-closing-pill' : '';
-                const label = closingSoon
-                  ? '<span class="pill-closes"' + closeAttr + '>Bookings Close in ' + formatClosesIn(closesIn) + '</span>'
-                  : 'Booking Required';
-                const hoverLabel = isLoggedIn ? 'Click to Book' : 'Login to Book';
-
-                if (!isLoggedIn) {
-                  return '<td class="col-book">'
-                    + '<a class="book-pill ' + pillClass + closingClass + '" href="/auth/login">'
-                    + '<span class="book-pill-label">' + label + '</span>'
-                    + '<span class="book-pill-hover">' + hoverLabel + '</span>'
-                    + '</a></td>';
-                }
-
-                if (flowtype === 'BOOKING_ONLY') {
-                  const cap = getBookingOnlyCapacity(r.from, r.to);
-                  if (cap.total > 0 && cap.remaining <= 0) {
-                    return overflowPill(r) || '<td class="col-book"><button type="button" class="flowtype-pill flowtype-full sched-full-pill" data-wf="' + escapeHtml(r.number) + '" data-window="' + escapeHtml(buildTimeWindow(r.dep_time_utc)) + '">No Bookings Left!</button></td>';
-                  }
-                  const remainLabel = cap.total > 0 ? cap.remaining + ' Booking' + (cap.remaining !== 1 ? 's' : '') + ' Left' : '';
-                  return '<td class="col-book">'
-                    + '<button class="book-pill booking-only ' + pillClass + closingClass + '" data-sector="' + sk + '">'
-                    + '<span class="book-pill-label pill-rotate">'
-                    + '<span class="pill-line pill-line-1">' + label + '</span>'
-                    + (remainLabel ? '<span class="pill-line pill-line-2">' + remainLabel + '</span>' : '')
-                    + '</span>'
-                    + '<span class="book-pill-hover">' + hoverLabel + '</span>'
-                    + '</button></td>';
-                }
-
-                // Slotted — count available slots from allTobtSlots
-                const slotSectorPrefix = r.from + '-' + r.to + '|';
-                let slotTotal = 0, slotsLeft = 0;
-                for (const [k, s] of Object.entries(allTobtSlots)) {
-                  if (k.startsWith(slotSectorPrefix)) {
-                    slotTotal++;
-                    if (!isSlotTaken(k)) slotsLeft++;
-                  }
-                }
-                const slotRemainLabel = slotTotal > 0 ? slotsLeft + ' Booking' + (slotsLeft !== 1 ? 's' : '') + ' Left' : '';
-
-                if (slotTotal > 0 && slotsLeft <= 0) {
-                  return overflowPill(r) || '<td class="col-book"><button type="button" class="flowtype-pill flowtype-full sched-full-pill" data-wf="' + escapeHtml(r.number) + '" data-window="' + escapeHtml(buildTimeWindow(r.dep_time_utc)) + '">No Bookings Left!</button></td>';
-                }
-
-                return '<td class="col-book">'
-                  + '<a class="book-pill ' + pillClass + closingClass + '" href="/book?from=' + r.from + '&to=' + r.to + '&dateUtc=' + encodeURIComponent(r.date_utc) + '&depTimeUtc=' + r.dep_time_utc + '">'
-                  + '<span class="book-pill-label pill-rotate">'
-                  + '<span class="pill-line pill-line-1">' + label + '</span>'
-                  + (slotRemainLabel ? '<span class="pill-line pill-line-2">' + slotRemainLabel + '</span>' : '')
-                  + '</span>'
-                  + '<span class="book-pill-hover">' + hoverLabel + '</span>'
-                  + '</a></td>';
-              })() : ''}
+              ${showBookSlot ? scheduleBookCellHtml(r, { cid, isLoggedIn, myBookings, myAlertSectors, overflowPill }) : ''}
 
 
               <!-- SIMBRIEF PLAN (commented out for now)
@@ -13476,177 +13848,33 @@ document.addEventListener('click', function(e) {
   window.location.href = '/sector/' + wf + '/' + from + '/' + to;
 });
 
-var WF_TEAM_CTX = ${teamBookingContext ? JSON.stringify(teamBookingContext) : 'null'};
-var WF_MY_CID = ${cid ? cid : 'null'};
-
-document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('.booking-only');
-  if (!btn) return;
-
-  const sector = btn.dataset.sector;
-  if (!sector) return;
-
-  if (WF_TEAM_CTX) {
-    openTeamBookingModal(sector);
-  } else {
-    openCidModal(function(enteredCid) {
-      socket.emit('createBookingOnly', { sector: sector, callsign: enteredCid });
-    });
-  }
-});
-
-function openTeamBookingModal(sector) {
-  var overlay = document.createElement('div');
-  overlay.className = 'modal';
-  overlay.style.zIndex = '20000';
-  overlay.innerHTML = '<div class="modal-backdrop"></div>'
-    + '<div class="modal-dialog booking-confirm-dialog">'
-    + '<div class="booking-confirm-icon">\u2708</div>'
-    + '<h3 class="booking-confirm-title">Confirm Booking</h3>'
-    + '<p class="booking-confirm-sub">Who should this booking be filed under?</p>'
-    + '<div class="booking-confirm-btns">'
-    + '<button class="booking-confirm-btn booking-confirm-self" id="sbkSelf">\ud83d\udc64 Book for Myself</button>'
-    + '<button class="booking-confirm-btn booking-confirm-team" id="sbkTeam">\ud83d\udc65 Book for ' + WF_TEAM_CTX.teamName + '</button>'
-    + '</div>'
-    + '<div id="sbkMsg" style="display:none;margin-bottom:12px;font-size:13px;"></div>'
-    + '<button class="booking-confirm-cancel" id="sbkCancel">Cancel</button>'
-    + '</div>';
-  document.body.appendChild(overlay);
-
-  function close() { overlay.remove(); }
-  overlay.querySelector('.modal-backdrop').addEventListener('click', close);
-  document.getElementById('sbkCancel').addEventListener('click', close);
-
-  document.getElementById('sbkSelf').addEventListener('click', function() {
-    socket.emit('createBookingOnly', { sector: sector, callsign: String(WF_MY_CID) });
-    close();
-  });
-  // Operator slots are allocated by auto-assignment - booking one by hand
-  // here would double-book the team/affiliate.
-  document.getElementById('sbkTeam').addEventListener('click', function() {
-    var msg = document.getElementById('sbkMsg');
-    msg.innerHTML = 'Bookings for your team/affiliate are handled automatically and you do not need to make bookings. See your <a href="/team/hq" style="color:var(--accent);">Team/Affiliate HQ</a> for your bookings.';
-    msg.style.color = '#fbbf24';
-    msg.style.display = '';
-  });
-}
-
-function openCidModal(onSubmit) {
-  const modal = document.getElementById('callsignModal');
-  const input = document.getElementById('callsignModalInput');
-  const confirmBtn = document.getElementById('callsignConfirm');
-  const cancelBtn = document.getElementById('callsignCancel');
-  const errorEl = document.getElementById('modalError');
-
-  modal.classList.remove('hidden');
-  input.value = '';
-  input.focus();
-  errorEl.classList.add('hidden');
-  errorEl.textContent = '';
-
-  // Store reference so socket errors can reach it
-  window._cidModalErrorEl = errorEl;
-  window._cidModalOpen = true;
-
-  function cleanup() {
-    confirmBtn.removeEventListener('click', onConfirm);
-    cancelBtn.removeEventListener('click', onCancel);
-    input.removeEventListener('keydown', onKey);
-    window._cidModalOpen = false;
-    window._cidModalErrorEl = null;
-  }
-
-  function closeModal() {
-    modal.classList.add('hidden');
-    errorEl.classList.add('hidden');
-    cleanup();
-  }
-
-  function showError(msg) {
-    errorEl.textContent = msg;
-    errorEl.classList.remove('hidden');
-    input.focus();
-  }
-
-  function onConfirm() {
-    const value = input.value.trim();
-    if (!value) return;
-    if (!/^[0-9]+$/.test(value)) {
-      showError('Please enter a valid numeric CID.');
-      return;
+/* Personal Roster switch - reload on success so the sidebar link appears
+   or disappears straight away. */
+(function() {
+  var t = document.getElementById('prToggle');
+  if (!t) return;
+  t.addEventListener('change', async function() {
+    var enabled = t.checked;
+    document.getElementById('prToggleWrap').classList.toggle('is-on', enabled);
+    try {
+      var r = await fetch('/api/personal-roster/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ enabled: enabled })
+      });
+      if (!r.ok) throw new Error();
+      location.reload();
+    } catch (e) {
+      t.checked = !enabled;
+      document.getElementById('prToggleWrap').classList.toggle('is-on', !enabled);
+      alert('Failed to update Personal Roster');
     }
-    // Don't close — wait for server response
-    onSubmit(value);
-  }
-
-  function onCancel() { closeModal(); }
-
-  function onKey(e) {
-    if (e.key === 'Enter') onConfirm();
-    if (e.key === 'Escape') onCancel();
-  }
-
-  confirmBtn.addEventListener('click', onConfirm);
-  cancelBtn.addEventListener('click', onCancel);
-  input.addEventListener('keydown', onKey);
-}
+  });
+})();
 
 </script>
-<script>
-let bookingOnlySector = null;
-const socket = io();
-socket.on('bookingError', ({ error }) => {
-  if (window._cidModalOpen && window._cidModalErrorEl) {
-    window._cidModalErrorEl.textContent = error;
-    window._cidModalErrorEl.classList.remove('hidden');
-  } else {
-    alert(error);
-  }
-});
-socket.on('bookingCreated', () => { location.reload(); });
-
-function showCallsignModal(sector) {
-  bookingOnlySector = sector;
-
-  const modal = document.getElementById('callsignModal');
-  if (!modal) return;
-
-  modal.classList.add('open');
-
-  const input = modal.querySelector('#callsignInput');
-  input.value = '';
-  input.focus();
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  const confirmBtn = document.getElementById('callsignConfirm');
-  const cancelBtn  = document.getElementById('callsignCancel');
-  const input      = document.getElementById('callsignInput');
-
-  if (!confirmBtn || !input) return;
-
-  confirmBtn.addEventListener('click', () => {
-    const callsign = input.value.trim().toUpperCase();
-    if (!callsign || !bookingOnlySector) return;
-
-    console.log('[CLIENT] booking-only submit', bookingOnlySector, callsign);
-
-    socket.emit('createBookingOnly', {
-      sector: bookingOnlySector,
-      callsign
-    });
-
-    document.getElementById('callsignModal').classList.remove('open');
-    bookingOnlySector = null;
-  });
-
-  cancelBtn?.addEventListener('click', () => {
-    bookingOnlySector = null;
-    document.getElementById('callsignModal').classList.remove('open');
-  });
-});
-</script>
-
+${scheduleBookingScript(teamBookingContext, cid)}
 
 
 
@@ -13751,35 +13979,6 @@ document.addEventListener('DOMContentLoaded', () => {
     font-family: inherit;
   }
   .show-route-btn:hover { background: rgba(56,189,248,0.16); }
-  .route-modal[hidden] { display: none; }
-  .route-modal { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center; }
-  .route-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
-  .route-modal-card {
-    position: relative; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; padding: 16px; width: min(640px, 92vw); max-height: 80vh;
-    display: flex; flex-direction: column; gap: 12px;
-  }
-  .route-modal-header { display: flex; align-items: center; justify-content: space-between; }
-  .route-modal-close {
-    background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer;
-    line-height: 1; padding: 0 4px;
-  }
-  .route-modal-close:hover { color: var(--text); }
-  .route-modal-body {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 13px; line-height: 1.5; color: var(--text);
-    background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 8px; padding: 12px; overflow: auto; word-break: break-word; white-space: pre-wrap;
-  }
-  .route-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  .route-modal-copy {
-    padding: 6px 14px; background: var(--accent); color: #fff; border: none; border-radius: 6px;
-    font-weight: 600; cursor: pointer; font-family: inherit;
-  }
-  .route-modal-copy.route-modal-secondary {
-    background: transparent; color: var(--text); border: 1px solid var(--border);
-  }
-  .route-modal-copy.route-modal-secondary:hover { background: var(--panel2); }
 </style>
 
 <script>
@@ -13859,109 +14058,6 @@ document.addEventListener('DOMContentLoaded', () => {
 })();
 </script>
 
-<div id="schedInfoModal" class="route-modal" hidden>
-  <div class="route-modal-backdrop"></div>
-  <div class="route-modal-card" role="dialog" aria-modal="true" aria-labelledby="schedInfoTitle">
-    <div class="route-modal-header">
-      <div id="schedInfoTitle" style="font-weight:700;font-size:14px;"></div>
-      <button type="button" class="route-modal-close sched-info-close" aria-label="Close">&times;</button>
-    </div>
-    <div id="schedInfoBody" class="route-modal-body" style="font-family:inherit;font-size:13px;line-height:1.6;white-space:normal;"></div>
-    <div class="route-modal-actions">
-      <button type="button" class="route-modal-copy route-modal-secondary sched-info-close">Close</button>
-      <button type="button" id="schedInfoAlert" class="route-modal-copy" style="display:none;"></button>
-    </div>
-  </div>
-</div>
-
-<script>
-(function() {
-  var modal = document.getElementById('schedInfoModal');
-  if (!modal) return;
-  var title = document.getElementById('schedInfoTitle');
-  var body = document.getElementById('schedInfoBody');
-  var alertBtn = document.getElementById('schedInfoAlert');
-  var current = null;
-  function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
-  function close() { modal.hidden = true; current = null; }
-  function setAlertBtn(subscribed) {
-    alertBtn.textContent = subscribed ? 'Cancel email alert' : 'Email me when bookings open';
-  }
-
-  document.addEventListener('click', function(e) {
-    var full = e.target.closest('.sched-full-pill');
-    if (full) {
-      // "20:00–22:00" (en dash) from the server.
-      var w = String(full.dataset.window || '').split(/[–—-]/);
-      title.textContent = full.dataset.wf + ' — No bookings left';
-      body.innerHTML = '<p style="margin:0 0 10px;">There are no bookings left for this sector to depart within the departure window of <strong>'
-        + esc((w[0] || '').trim()) + 'z</strong> to <strong>' + esc((w[1] || '').trim()) + 'z</strong>.</p>'
-        + '<p style="margin:0;">You can still choose to fly, but will need to depart outside this window.</p>';
-      alertBtn.style.display = 'none';
-      current = null;
-      modal.hidden = false;
-      return;
-    }
-    var notOpen = e.target.closest('.sched-notopen-pill');
-    if (notOpen) {
-      current = notOpen;
-      title.textContent = notOpen.dataset.wf + ' — Not yet available to book';
-      body.innerHTML = '<p style="margin:0 0 10px;">This sector is flow restricted, but it is not yet available to book.</p>'
-        + '<p style="margin:0;">Bookings for this sector will open at <strong>' + esc(notOpen.dataset.opens) + '</strong>.</p>'
-        + (notOpen.dataset.loggedIn ? '' : '<p style="margin:10px 0 0;color:var(--muted);">Log in to be emailed when bookings open.</p>');
-      alertBtn.style.display = notOpen.dataset.loggedIn ? '' : 'none';
-      setAlertBtn(!!notOpen.dataset.subscribed);
-      modal.hidden = false;
-    }
-  });
-
-  alertBtn.addEventListener('click', async function() {
-    if (!current) return;
-    var subscribed = !!current.dataset.subscribed;
-    alertBtn.disabled = true;
-    try {
-      var r = await fetch('/api/booking-alerts/' + encodeURIComponent(current.dataset.wf), {
-        method: subscribed ? 'DELETE' : 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      var d = await r.json().catch(function() { return {}; });
-      if (!r.ok) throw new Error(d.error || 'Something went wrong');
-      current.dataset.subscribed = d.subscribed ? '1' : '';
-      setAlertBtn(d.subscribed);
-      var note = body.querySelector('.sched-alert-note') || body.appendChild(document.createElement('p'));
-      note.className = 'sched-alert-note';
-      note.style.cssText = 'margin:10px 0 0;color:#4ade80;';
-      note.textContent = d.subscribed ? 'We will email you when bookings open for this sector.' : 'Email alert cancelled.';
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      alertBtn.disabled = false;
-    }
-  });
-
-  modal.querySelectorAll('.sched-info-close').forEach(function(b) { b.addEventListener('click', close); });
-  modal.querySelector('.route-modal-backdrop').addEventListener('click', close);
-  document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
-})();
-
-/* The closing countdown is rendered server-side, so re-label it every
-   minute or a tab left open sits on a stale figure. */
-(function() {
-  var els = document.querySelectorAll('.pill-closes[data-closes-at]');
-  if (!els.length) return;
-  function tick() {
-    var now = Date.now();
-    els.forEach(function(el) {
-      var left = Number(el.dataset.closesAt) - now;
-      if (left <= 0) { el.textContent = 'Bookings Closed'; return; }
-      var mins = Math.floor(left / 60000);
-      el.textContent = 'Bookings Close in ' + (mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h');
-    });
-  }
-  setInterval(tick, 60000);
-})();
-</script>
 
   `;
 
@@ -13972,6 +14068,242 @@ document.addEventListener('DOMContentLoaded', () => {
     content,
     layoutClass: 'dashboard-full schedule-page'
   }));
+});
+
+/* ===== PERSONAL ROSTER =====
+   A pilot's own copy of the schedule, switched on from the Full Schedule
+   page. Every leg starts ticked as flying; unticking greys it out. Notes are
+   private to the CID. Both live in PersonalRosterLeg, and a leg with no row
+   is simply "flying, no notes". */
+app.get('/personal-roster', requireLogin, requirePageEnabled('schedule'), async (req, res) => {
+  const cid = Number(req.session.user.data.cid);
+  const isAdmin = isAdminUser(cid);
+  if (!personalRosterCids.has(cid)) return res.redirect('/schedule');
+
+  const showFlow = isPageVisibleTo('flow-restrictions', isAdmin);
+  const scheduleRows = visibleScheduleRows(adminSheetCache, cid);
+
+  const legRows = prisma.personalRosterLeg
+    ? await prisma.personalRosterLeg.findMany({ where: { eventId: activeEventId, cid } }).catch(() => [])
+    : [];
+  const legByWf = {};
+  legRows.forEach(l => { legByWf[l.sectorNumber] = l; });
+  const notesByWf = {};
+  legRows.forEach(l => { if (l.notes) notesByWf[l.sectorNumber] = l.notes; });
+
+  // The flow pill is the Full Schedule's own Book cell, so it books, links
+  // to the booking and opens the same modals.
+  const myBookings = tobtBookingsByCid[cid];
+  const myAlertSectors = await bookingAlertSectorsFor(cid);
+  const myAffCallsigns = await affiliateCallsignsFor(cid);
+  const overflowPill = r => scheduleOverflowPill(r, cid, myAffCallsigns);
+  const teamBookingContext = await teamBookingContextFor(cid);
+
+  const arrDayShift = (r) => {
+    const toM = s => { const m = /^(\d{1,2}):?(\d{2})$/.exec(String(s || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+    const a = toM(r.arr_time_utc), d = toM(r.dep_time_utc);
+    return (a != null && d != null && a < d) ? 1440 : 0;
+  };
+
+  const noteIcon = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>';
+
+  const rowsHtml = scheduleRows.map(r => {
+    const leg = legByWf[r.number];
+    const flying = leg ? leg.flying : true;
+    const hasNotes = !!notesByWf[r.number];
+    const label = scheduleRowLabel(r, cid);
+    const depWin = buildTimeWindow(r.dep_time_utc);
+    const arrWin = r.arr_time_utc ? buildTimeWindow(r.arr_time_utc) : '';
+    const shift = arrDayShift(r);
+    return `
+          <tr class="pr-row ${flying ? 'is-flying' : 'is-off'}" data-wf="${escapeHtml(r.number)}">
+            <td class="col-wf-sector"><a class="sector-details-btn" href="/sector/${encodeURIComponent(r.number)}/${encodeURIComponent(r.from)}/${encodeURIComponent(r.to)}">${escapeHtml(label)}</a></td>
+            <td class="col-from"><a href="/icao/${escapeHtml(r.from)}">${escapeHtml(r.from)}</a></td>
+            <td class="col-to"><a href="/icao/${escapeHtml(r.to)}">${escapeHtml(r.to)}</a></td>
+            <td class="col-date">${tzSpanHtml(windowOpenDate(r.date_utc, r.dep_time_utc), 'date', utcInstantMs(r.date_utc, r.dep_time_utc, -60), null)}</td>
+            <td class="col-window">${depWin ? tzSpanHtml(depWin, 'window', utcInstantMs(r.date_utc, r.dep_time_utc, -60), utcInstantMs(r.date_utc, r.dep_time_utc, 60)) : '-'}</td>
+            <td class="col-window">${arrWin ? tzSpanHtml(arrWin, 'window', utcInstantMs(r.date_utc, r.arr_time_utc, shift - 60), utcInstantMs(r.date_utc, r.arr_time_utc, shift + 60)) : '-'}</td>
+            ${showFlow ? scheduleBookCellHtml(r, { cid, isLoggedIn: true, myBookings, myAlertSectors, overflowPill, roster: true }) : ''}
+            <td class="pr-col-flying"><label class="pr-flying-label"><input type="checkbox" class="pr-flying" ${flying ? 'checked' : ''} aria-label="Flying ${escapeHtml(label)}" /></label></td>
+            <td class="pr-col-notes"><button type="button" class="pr-notes-btn${hasNotes ? ' has-notes' : ''}" data-label="${escapeHtml(label + ': ' + r.from + ' → ' + r.to)}"${hasNotes ? ' title="You have notes for this leg"' : ''}>${noteIcon}<span>Notes</span><span class="pr-notes-dot" aria-hidden="true"></span></button></td>
+          </tr>`;
+  }).join('');
+
+  // Notes go to the page as JSON for the modal; escape "<" so a note can
+  // never close the script tag.
+  const notesJson = JSON.stringify(notesByWf).replace(/</g, '\\u003c');
+
+  const content = `
+  <section class="card card-full">
+    <div class="sched-head">
+      <h2>Personal Roster</h2>
+      <div class="sched-tz">
+        <div class="sched-tz-note">All times are in UTC</div>
+${TZ_SELECT_HTML}
+      </div>
+    </div>
+    <p class="pr-lead">Untick the legs you are not flying. Notes are private to you.</p>
+
+    <div class="table-scroll">
+      <table class="departures-table">
+        <thead>
+          <tr>
+            <th class="col-wf-sector">Sector</th>
+            <th class="col-from">From</th>
+            <th class="col-to">To</th>
+            <th class="col-date">Date</th>
+            <th class="col-window">Dep Window</th>
+            <th class="col-window">Arr Window</th>
+            ${showFlow ? '<th class="col-book">Flow Restrictions</th>' : ''}
+            <th class="pr-col-flying">Flying this leg?</th>
+            <th class="pr-col-notes">My Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml || `<tr><td colspan="${showFlow ? 9 : 8}" class="pr-empty">The schedule has not been published yet.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="pr-notes-modal" id="prNotesModal" hidden>
+    <div class="pr-notes-backdrop"></div>
+    <div class="pr-notes-dialog" role="dialog" aria-modal="true" aria-labelledby="prNotesTitle">
+      <h3 id="prNotesTitle">My Notes</h3>
+      <div class="pr-notes-sub" id="prNotesSub"></div>
+      <textarea id="prNotesText" maxlength="4000" placeholder="Anything you want to remember for this leg - gate, fuel, who you are flying with..."></textarea>
+      <div class="pr-notes-foot">
+        <span class="pr-notes-msg" id="prNotesMsg"></span>
+        <button type="button" class="pr-btn" id="prNotesCancel">Cancel</button>
+        <button type="button" class="pr-btn pr-btn-primary" id="prNotesSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+${TZ_PICKER_SCRIPT}
+${showFlow ? scheduleBookingScript(teamBookingContext, cid) : ''}
+
+<script>
+(function() {
+  var NOTES = ${notesJson};
+
+  function saveLeg(wf, data) {
+    data.wf = wf;
+    return fetch('/api/personal-roster/leg', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(data)
+    }).then(function(r) { if (!r.ok) throw new Error(); return r.json(); });
+  }
+
+  document.querySelectorAll('.pr-flying').forEach(function(box) {
+    box.addEventListener('change', function() {
+      var row = box.closest('.pr-row');
+      var flying = box.checked;
+      row.classList.toggle('is-flying', flying);
+      row.classList.toggle('is-off', !flying);
+      saveLeg(row.dataset.wf, { flying: flying }).catch(function() {
+        box.checked = !flying;
+        row.classList.toggle('is-flying', !flying);
+        row.classList.toggle('is-off', flying);
+        alert('Could not save - please try again.');
+      });
+    });
+  });
+
+  var modal = document.getElementById('prNotesModal');
+  var text = document.getElementById('prNotesText');
+  var msg = document.getElementById('prNotesMsg');
+  var saveBtn = document.getElementById('prNotesSave');
+  var current = null;
+
+  function close() { modal.hidden = true; current = null; }
+
+  document.querySelectorAll('.pr-notes-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var row = btn.closest('.pr-row');
+      current = { wf: row.dataset.wf, btn: btn };
+      document.getElementById('prNotesSub').textContent = btn.dataset.label;
+      text.value = NOTES[current.wf] || '';
+      msg.textContent = '';
+      modal.hidden = false;
+      text.focus();
+    });
+  });
+
+  saveBtn.addEventListener('click', function() {
+    if (!current) return;
+    var c = current;
+    var value = text.value.trim();
+    saveBtn.disabled = true;
+    msg.textContent = '';
+    saveLeg(c.wf, { notes: value }).then(function() {
+      if (value) NOTES[c.wf] = value; else delete NOTES[c.wf];
+      c.btn.classList.toggle('has-notes', !!value);
+      if (value) c.btn.title = 'You have notes for this leg'; else c.btn.removeAttribute('title');
+      close();
+    }).catch(function() {
+      msg.textContent = 'Could not save - please try again.';
+    }).then(function() { saveBtn.disabled = false; });
+  });
+
+  document.getElementById('prNotesCancel').addEventListener('click', close);
+  modal.querySelector('.pr-notes-backdrop').addEventListener('click', close);
+  document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
+})();
+</script>`;
+
+  res.send(renderLayout({
+    title: 'Personal Roster',
+    user: req.session.user?.data || null,
+    isAdmin,
+    content,
+    layoutClass: 'dashboard-full schedule-page personal-roster-page'
+  }));
+});
+
+app.post('/api/personal-roster/toggle', requireLogin, async (req, res) => {
+  const cid = Number(req.session.user.data.cid);
+  if (!prisma.personalRoster) return res.status(503).json({ error: 'Personal Roster is not available yet' });
+  const enabled = !!req.body?.enabled;
+  try {
+    await prisma.personalRoster.upsert({
+      where: { cid },
+      update: { enabled },
+      create: { cid, enabled }
+    });
+    if (enabled) personalRosterCids.add(cid); else personalRosterCids.delete(cid);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Saves one leg's flying tick and/or notes. Only sectors the viewer can see
+// on the schedule are accepted.
+app.post('/api/personal-roster/leg', requireLogin, async (req, res) => {
+  const cid = Number(req.session.user.data.cid);
+  if (!prisma.personalRosterLeg) return res.status(503).json({ error: 'Personal Roster is not available yet' });
+  if (!isPageVisibleTo('schedule', isAdminUser(cid))) return res.status(403).json({ error: 'Schedule not available' });
+  const wf = String(req.body?.wf || '').trim();
+  if (!wf || !visibleScheduleRows(adminSheetCache, cid).some(r => r.number === wf)) {
+    return res.status(400).json({ error: 'Unknown sector' });
+  }
+  const data = {};
+  if (typeof req.body.flying === 'boolean') data.flying = req.body.flying;
+  if (typeof req.body.notes === 'string') data.notes = req.body.notes.trim().slice(0, 4000) || null;
+  if (!Object.keys(data).length) return res.status(400).json({ error: 'Nothing to save' });
+  try {
+    await prisma.personalRosterLeg.upsert({
+      where: { eventId_sectorNumber_cid: { eventId: activeEventId, sectorNumber: wf, cid } },
+      update: data,
+      create: { eventId: activeEventId, sectorNumber: wf, cid, ...data }
+    });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 
