@@ -8137,7 +8137,7 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
   }
   tobtBookingsByCid[bookingCid].add(bookingKey);
 
-  io.emit('bookingCreated', { slotKey, assignedRoute });
+  io.emit('bookingCreated', { slotKey, assignedRoute, cid: bookingCid });
   vatcanPushForSlotKey(slotKey);
 });
 
@@ -13330,7 +13330,13 @@ socket.on('bookingError', ({ error }) => {
     alert(error);
   }
 });
-socket.on('bookingCreated', () => { location.reload(); });
+// Every booking anywhere is broadcast, and the reload refreshes the counts.
+// Hold it while this viewer is typing their CID, unless the booking is
+// theirs - otherwise anyone else booking wipes the modal mid-entry.
+socket.on('bookingCreated', (d) => {
+  if (window._cidModalOpen && !(d && Number(d.cid) === WF_MY_CID)) return;
+  location.reload();
+});
 
 function showCallsignModal(sector) {
   bookingOnlySector = sector;
@@ -21346,6 +21352,10 @@ if (parts.length === 3) {
   // and VATCAN see, so it is the clean HH:MM. Storing the suffix here also
   // broke the Route A/B bucketing, which parses this field as HH:MM.
   tobtTimeUtc = String(tobtRaw || '').split('#')[0];
+  // The sector page books a booking-only sector as "...|BOOKING_ONLY". That
+  // is not a connect time: treated as one, the shared slotKey read as taken
+  // after the first pilot and everyone else got "Slot already booked".
+  if (tobtTimeUtc === 'BOOKING_ONLY') tobtTimeUtc = null;
 
 } else {
   return res.status(400).json({ error: 'Invalid slot key format' });
@@ -21377,6 +21387,14 @@ const wantsManual = !isBookingOnly && manual === true;
     // 5️⃣ Prevent double booking (TOBT slots only — booking-only allows multiple users)
     if (!isBookingOnly && isSlotTaken(slotKey)) {
       return res.status(409).json({ error: 'Slot already booked' });
+    }
+    // Booking-only is capped by headcount instead - same check as the
+    // schedule's socket path.
+    if (isBookingOnly && !teamBooking && !manual) {
+      const cap = getBookingOnlyCapacity(from, to);
+      if (cap.total > 0 && cap.remaining <= 0) {
+        return res.status(409).json({ error: 'No remaining bookings for this sector' });
+      }
     }
 
     // 6️⃣ Determine target CID — the team owner for team bookings, the pilot's
