@@ -7991,12 +7991,29 @@ socket.on('updateDepFlowType', async ({ sector, flowtype, eventId: clientEventId
   }
 });
 
-socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBooking, teamCallsign }) => {
+// Every exit reports back: the client closes its modal as soon as it emits,
+// so a silent return or an uncaught throw looked like "nothing happens".
+socket.on('createBookingOnly', async (payload) => {
+  try {
+    await createBookingOnly(payload || {});
+  } catch (err) {
+    console.error('[BOOKING ONLY] failed:', err?.code || '', err?.message || err);
+    socket.emit('bookingError', { error: 'Booking failed: ' + (err?.message || 'unknown error') });
+  }
+});
+
+async function createBookingOnly({ sector, callsign: enteredCid, teamBooking, teamCallsign }) {
 
   console.log('[BOOKING ONLY]', sector, enteredCid, teamBooking ? '(team)' : '');
 
-  if (!sector || !enteredCid) return;
-  if (!user || !user.cid) return;
+  if (!sector || !enteredCid) {
+    socket.emit('bookingError', { error: 'Booking request was incomplete - please refresh and try again.' });
+    return;
+  }
+  if (!user || !user.cid) {
+    socket.emit('bookingError', { error: 'Your login was not recognised on this page - please refresh and try again.' });
+    return;
+  }
 
   const sessionCid = Number(user.cid);
 
@@ -8033,7 +8050,10 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
   }
 
   const [leg, dateUtc, depTimeUtc] = sector.split('|');
-  if (!leg || !dateUtc || !depTimeUtc) return;
+  if (!leg || !dateUtc || !depTimeUtc) {
+    socket.emit('bookingError', { error: 'Unrecognised sector - please refresh and try again.' });
+    return;
+  }
 
   const [from, to] = leg.split('-');
 
@@ -8044,7 +8064,10 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
       r.date_utc === dateUtc &&
       r.dep_time_utc === depTimeUtc
   );
-  if (!row) return;
+  if (!row) {
+    socket.emit('bookingError', { error: 'This sector is no longer on the schedule - please refresh and try again.' });
+    return;
+  }
 
   // Bookings not open yet for pilots (teams keep their priority places).
   const notOpenUntil = !teamBooking && !isAdminUser(sessionCid) ? bookingsNotOpenUntil(row) : null;
@@ -8139,7 +8162,7 @@ socket.on('createBookingOnly', async ({ sector, callsign: enteredCid, teamBookin
 
   io.emit('bookingCreated', { slotKey, assignedRoute, cid: bookingCid });
   vatcanPushForSlotKey(slotKey);
-});
+}
 
 
 
@@ -13318,7 +13341,6 @@ function openCidModal(onSubmit) {
 }
 
 </script>
-<script>
 <script>
 let bookingOnlySector = null;
 const socket = io();
