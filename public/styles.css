@@ -508,6 +508,11 @@ body.sidebar-collapsed .sidebar { width: var(--sidebar-collapsed); }
   border-right:1px solid var(--border);
   overflow-x:hidden;
   overflow-y:auto;
+  /* The sidebar scrolls its own nav and nothing else. Without this the
+     wheel chains straight through to the page, so the content behind it
+     moves while you are only reading the menu. Same treatment the mobile
+     drawer and the modals already get. */
+  overscroll-behavior: contain;
   transition: width .25s ease;
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.05) transparent;
@@ -5951,10 +5956,20 @@ html[data-map-theme="light"] .ac-label {
   overflow: hidden;
 }
 
-/* Scroll wrapper */
+/* Scroll wrapper. The table is fixed-layout at 100% width with percentage
+   columns, so it only needs a horizontal scroller below 900px, where
+   min-width: 800px kicks in. Left a scroll container on desktop it also
+   swallows the wheel: overflow-x: auto makes the box scrollable on BOTH
+   axes, and the hover bubbles (ICAO name, dep/arr window, the A/B choice)
+   are absolutely positioned and hang below the last row, so the box has a
+   few rows' worth of vertical scroll to get through before the page moves.
+   That reads as the table scrolling separately from the page. */
 .schedule-page .table-scroll {
   width: 100%;
-  overflow-x: auto;
+  overflow: visible;
+}
+@media (max-width: 900px) {
+  .schedule-page .table-scroll { overflow-x: auto; }
 }
 
 /* Table: fixed layout, full width */
@@ -6318,8 +6333,8 @@ html[data-map-theme="light"] .ac-label {
   border-color: rgba(15,23,42,0.12);
 }
 [data-theme="light"] .alt-tt-choice { border-bottom-color: rgba(15,23,42,0.10); }
-/* .table-scroll is overflow-x: auto, which makes it clip on both axes, so a
-   bubble on one of the last rows would be cut off below. Those open upward. */
+/* The card is overflow: hidden, so a bubble on one of the last rows would be
+   cut off below. Those open upward. */
 .schedule-page .departures-table tbody tr:nth-last-child(-n+3) .alt-tt-bubble {
   top: auto;
   bottom: calc(100% + 8px);
