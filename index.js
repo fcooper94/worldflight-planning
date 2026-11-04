@@ -13488,6 +13488,22 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('keydown', function(e) { if (!modal.hidden && e.key === 'Escape') close(); });
 })();
 
+/* Previous sectors are rendered but hidden, so showing them is a class
+   toggle - no second request, and the table keeps its live updates. */
+(function() {
+  var btn = document.getElementById('schedPastBtn');
+  var table = document.getElementById('schedTable');
+  if (!btn || !table) return;
+  var text = btn.querySelector('.sched-past-text');
+  var n = btn.dataset.count;
+  btn.addEventListener('click', function() {
+    var shown = table.classList.toggle('show-past');
+    btn.setAttribute('aria-expanded', shown ? 'true' : 'false');
+    btn.classList.toggle('is-open', shown);
+    text.textContent = shown ? 'Hide previous sectors' : 'Show previous sectors (' + n + ')';
+  });
+})();
+
 /* The closing countdown is rendered server-side, so re-label it every
    minute or a tab left open sits on a stale figure. */
 (function() {
@@ -13669,6 +13685,44 @@ app.get('/schedule', requirePageEnabled('schedule'), async (req, res) => {
     return (a != null && d != null && a < d) ? 1440 : 0;
   };
 
+  /* Once the event is running, finished legs push the live ones off the
+     screen. Only what is still to come renders by default, plus the last
+     two completed legs for context. The rest stay in the table behind the
+     "Show previous sectors" button rather than being dropped, so nothing
+     has to go back to the server to see them. */
+  const PAST_LEGS_SHOWN = 2;
+  // Finished = the arrival window has shut. Keeping the airborne leg on
+  // screen is the whole point, so this is not anchored on departure.
+  const legPastAtMs = (r) => r.arr_time_utc
+    ? schedUtcMs(r.date_utc, r.arr_time_utc, arrDayShift(r) + 60)
+    : schedUtcMs(r.date_utc, r.dep_time_utc, 60);
+  // An alternative shares its primary's slot in the running order, so count
+  // legs, not rows, or one undecided leg eats the whole budget. A leg is
+  // only finished once every one of its options is.
+  const legKeyOf = (r) => (r.is_variant ? r.variant_of : r.number);
+  const legPastAt = new Map();   // legKey -> ms, null when it cannot be told
+  for (const r of scheduleRows) {
+    const k = legKeyOf(r);
+    const t = legPastAtMs(r);
+    if (!legPastAt.has(k)) { legPastAt.set(k, t); continue; }
+    const cur = legPastAt.get(k);
+    legPastAt.set(k, (t == null || cur == null) ? null : Math.max(cur, t));
+  }
+  const _schedNow = Date.now();
+  const pastLegKeys = [...legPastAt.entries()]
+    .filter(([, t]) => t != null && _schedNow >= t)
+    .map(([k]) => k);
+  const hiddenPastKeys = new Set(pastLegKeys.slice(0, Math.max(0, pastLegKeys.length - PAST_LEGS_SHOWN)));
+  const hiddenPastCount = hiddenPastKeys.size;
+  const pastBarHtml = !hiddenPastCount ? '' : `
+    <div class="sched-pastbar">
+      <button type="button" id="schedPastBtn" class="sched-past-btn" aria-expanded="false"
+        data-count="${hiddenPastCount}">
+        <svg class="sched-past-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <span class="sched-past-text">Show previous sectors (${hiddenPastCount})</span>
+      </button>
+    </div>`;
+
   // Personal Roster switch - logged-in viewers only, since the roster is
   // stored against their CID.
   const rosterOn = isLoggedIn && personalRosterCids.has(cid);
@@ -13693,8 +13747,9 @@ ${TZ_SELECT_HTML}
       </div>
     </div>
 
+    ${pastBarHtml}
     <div class="table-scroll">
-      <table class="departures-table">
+      <table class="departures-table" id="schedTable">
         <thead>
           <tr>
             <th class="col-wf-sector">Sector</th>
@@ -13741,7 +13796,7 @@ ${TZ_SELECT_HTML}
               + '</span>';
 
             return `
-            <tr class="${r.variant_label && canSeeRouteAlternatives(cid) ? (r.is_variant ? 'sched-variant sched-variant-alt' : 'sched-variant sched-variant-primary') : ''}">
+            <tr class="${r.variant_label && canSeeRouteAlternatives(cid) ? (r.is_variant ? 'sched-variant sched-variant-alt' : 'sched-variant sched-variant-primary') : ''}${hiddenPastKeys.has(legKeyOf(r)) ? ' sched-past-row' : ''}">
               <td class="col-wf-sector">${showAltTt ? '<span class="alt-tt">' : ''}<button class="sector-details-btn${r.is_wf_challenge && showWfChallenge ? ' wf-challenge-btn' : ''}"${r.is_wf_challenge && showWfChallenge ? ' title="WorldFlight Challenge sector"' : ''} data-from="${r.from}" data-to="${r.to}" data-wf="${r.number}" data-date="${r.date_utc}" data-dep="${r.dep_time_utc}" data-block="${r.block_time}" data-route="${showAtcRoute ? escapeHtml(r.atc_route) : ''}">${altLabel}</button>${altBubble}${showAltTt ? '</span>' : ''}</td>
 
               <td class="col-from">

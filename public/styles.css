@@ -6090,6 +6090,30 @@ html[data-map-theme="light"] .ac-label {
   margin-bottom: 12px;
 }
 .sched-tz-note { font-size: 12px; color: var(--muted); }
+/* Completed legs beyond the last two are rendered but folded away. The
+   rows stay in the DOM so live booking updates still land on them. */
+.sched-pastbar { margin: 0 0 10px; }
+.sched-past-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--panel2, #0d1526);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease;
+}
+.sched-past-btn:hover { color: var(--text); border-color: var(--muted); }
+.sched-past-chev { transition: transform .15s ease; }
+.sched-past-btn.is-open .sched-past-chev { transform: rotate(180deg); }
+.departures-table tbody tr.sched-past-row { display: none; }
+.departures-table.show-past tbody tr.sched-past-row { display: table-row; opacity: 0.62; }
+.departures-table.show-past tbody tr.sched-past-row:hover { opacity: 1; }
 .sched-tz-select {
   background: var(--panel2, #0d1526);
   color: var(--text);
