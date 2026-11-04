@@ -262,6 +262,37 @@ about a dozen sectors are `BOOKING_ONLY` and the rest `NONE`.
 - **Route alternatives** — one leg, two *different destination airports*,
   below.
 
+### The route split in practice
+
+`depSplitPct` divides **capacity**, not bookings. `routeCapacity()` gives
+Route A `rate × hours × pct%` and Route B the rest; Route A fills in priority
+order (teams, then affiliates by Display Order, then pilots by booking time)
+and only the overflow reaches B. A slotted sector is split **per 30-minute
+bucket**, a Booking Required one across the whole window.
+
+- **0 and 100 are legal and useful.** 100% gives Route A the whole capacity so
+  nothing overflows, while the secondary route still *publishes* — display
+  depends on `splitAgreed` and `depSplitRoute`, not the percentage. WF2601 runs
+  this way: everyone files Primary and Clearance Delivery assigns Secondary
+  tactically. The clamp lived in **three** places — the sliders, the save
+  handler and the endpoint — so widening one is not enough.
+- **The slider reads backwards.** Its track is labelled Route A on the left and
+  Route B on the right, but the value is A's share, so dragging the handle
+  *towards the "Route A" label* gives Route A **less**. The badges update live
+  and are the thing to trust. Setting WF2601 to "100% A" by dragging left put
+  every pilot on the secondary route until it was corrected.
+- **Bucketing parses `tobtTimeUtc` as plain `HH:MM`.** A value that will not
+  parse falls into one unnamed bucket, which then blows past capacity and pins
+  people to Route B for no reason. See the TCT gotcha below.
+- `rebalanceSplitRoutes()` re-seats every split sector **every 5 minutes** and
+  updates the DB, `tobtBookingsByKey` and the open pages. There is no manual
+  resync button because none is needed — and letting the sweep do the work is
+  better than a script, which would leave the running instance stale.
+- An optional note per side (`depSplitNote` / `arrSplitNote`) reaches the
+  schedule cache as `split_note` (departure wins, falling back to arrival) and
+  renders under the secondary route on **five** surfaces: sector page, schedule
+  ATC Route modal, Team HQ, Affiliate HQ and the dashboard's Next Sector panel.
+
 ## Route alternatives (an undecided leg)
 
 A leg whose destination is not settled is carried as **two schedule rows**:
@@ -317,6 +348,52 @@ placeholder as a confirmed aircraft.
   books under the base callsign; the take-over only runs when the operator
   presses Save. A claim made before the place existed stays bookingless until
   they re-save that row.
+
+## An operator's bookings follow the operator
+
+A team or affiliate's places are held under its **callsign**, not its CID, so
+anything that changes the operator has to move or release them. The three
+paths must stay symmetrical, and each has been wrong at some point:
+
+| The operator… | …and their places |
+|---|---|
+| is renamed | `renameBookingsForCallsign()` moves them, then drops any duplicate the old callsign was masking |
+| stops participating | `releaseBookingsForCallsign()` hands them back |
+| is deleted | released inline on the delete path |
+
+- **Renaming without moving them double-books.** Auto-assign's "already
+  booked" test matches by callsign, so an operator whose bookings stayed under
+  the old name looked unbooked and was allocated a *second* place. The
+  `(cid, slotKey)` index hides this on a Booking Required sector, where every
+  booking shares one slotKey, but on a slotted sector each TCT is its own key
+  and the duplicate goes straight through — five operators ended up holding two
+  or three TCTs each on WF2601.
+- **Where duplicates are resolved, the EARLIEST slot is kept**: it is the one
+  they had before whatever split them, and on a slotted sector it is the better
+  slot. Keeping "the one with the right callsign" instead silently demotes
+  them.
+- **The affiliate booked-check must cover named aircraft too.** A
+  manual-callsign affiliate's sector can be taken over by a named aircraft, at
+  which point nothing is booked under the base callsign — so a base-only test
+  reads the operator as unbooked and mints another placeholder, on a different
+  cid, which no cid-based duplicate check will find.
+
+## Repair scripts
+
+One-off fixes for data the bugs above left behind. All dry-run by default and
+write only with `--push`; all are re-runnable and report nothing to do when
+clean.
+
+| Script | Fixes |
+|---|---|
+| `rebalance-routes.mjs` | Re-seats Route A/B across every sector with an agreed split. **Already existed — do not write another one.** `--only WF2632` for one sector. |
+| `scripts/fix-duplicate-bookings.js` | One operator holding several places on a sector |
+| `scripts/fix-chain-consistency.js` | An aircraft landing at one airport and departing another |
+| `scripts/fix-reserved-state.js` | Placeholders that lost `reserved`, or shadow a named aircraft |
+| `scripts/release-inactive-operator-bookings.js` | Places still held by operators not taking part |
+
+`lib/route-split.mjs` is the shared pure planner behind the live sweep and
+`rebalance-routes.mjs` — read its header before touching anything A/B.
 
 ## Teams, Affiliates and their HQs
 
@@ -502,6 +579,11 @@ returns almost nothing, so:
 - **`fetchVatsimName()` is broken** — the v2 member endpoint no longer returns a name, so it returns `''` for every CID. Use the `User` row.
 - **Never edit `TobtBooking` straight in Postgres on a running app.** Bookings ARE live: `/api/tobt/book` writes the row, updates `tobtBookingsByKey` via `setBooking()`, emits `departures:update` over Socket.IO and calls `vatcanPushForSlotKey()` in the same request, so a pilot’s booking reaches controllers and VATCAN immediately. Cancel mirrors it. The cache is write-through, not a refresh on a timer. What it cannot see is a change made BEHIND it — a cleanup script or backfill run with `pg` — which leaves the instance serving rows that no longer exist. There is no safe "reload bookings" endpoint (the only callers are `resolve-variant` and event `activate`, both destructive), so direct DB surgery is always two steps: write, then restart the app. Prefer doing it through the app’s own endpoints where one exists.
 - **`.env` on the dev PC points at PROD.** There is no `.env.dev` on this machine, so `npm run dev`, every `pg` script and every `prisma` command here act on the live database unless a URL is passed explicitly. Treat any write as a production change and confirm it as one.
+- **`tobtTimeUtc` is the clean `HH:MM`; only the `slotKey` carries the `#2`/`#3` suffix.** The suffix exists to tell apart two slots in the same minute, so it belongs in the key and nowhere else — it is the time pilots, controllers and VATCAN all see. `/api/tobt/book` used to copy the 4th slotKey segment verbatim and stored `"20:10#3"`; auto-assign was never affected because it uses `best.tobt`, so it only appeared once pilots could book. Worse than the display: `bucketOf()` in the A/B planner parses this field as `HH:MM`, so every suffixed booking landed in one unparseable bucket and overflowed to Route B.
+- **A move that is a delete + create must restate every field.** `rebalanceSlottedSectors()` moves a booking between TCTs that way, and the create originally restated only the slot fields — so `assignedRoute`, `manual` and `reserved` silently took schema defaults. The in-memory mirror spreads the old booking, so DB and memory then disagreed until the next restart settled it in the DB's favour and the Route B assignment was lost. `snapBookingsToSlotGrid()` moves with an `update` and is fine.
+- **An allocation only governs bookings as they are created.** Setting `autoBookVariant` / `affiliateBookVariant` after bookings exist does not re-seat them — every operator on WF2631/WF2632 was landing at EGKB and departing EGSS until `scripts/fix-chain-consistency.js` was run. Change an allocation and the existing bookings need the repair script.
+- **`emitToIcao()` is room-scoped.** Book and cancel notify `icao:<ICAO>` only, so a page that opens a plain `io()` hears the event-wide jobs (auto-assign, rebalance, snap) but **not an individual pilot booking**. Join the room the way the ATC pages do — `io({ query: { icao: 'YSSY' } })` — which also triggers `rebuildTSATStateForICAO()` for that airport.
+- **My Bookings is personal bookings only.** Operator places are filed under the main CID, so without filtering out callsigns belonging to a team or affiliate an owner sees their whole operator schedule as their own — 570 of 613 bookings on WF2026 are operator places. Those belong on the HQ. The page also has to sort: its source is a `Set`, so unsorted it renders in cache order.
 
 ## Tools the user values
 
