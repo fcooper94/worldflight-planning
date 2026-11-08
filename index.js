@@ -9757,13 +9757,15 @@ function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
       <button type="button" class="ct-copy" data-text="${escapeHtml(bannerText)}" title="Copy this line to share">Copy</button>
     </div>` : '';
 
+  // Read-only viewers still get the card, so the page is never blank before
+  // a total is saved.
   if (!canEdit) {
-    return showBanner ? `<section class="card aff-members-card ct-card">
+    return `<section class="card aff-members-card ct-card">
       <header class="aff-members-header">
         <h3 class="section-title" style="margin:0;">Our Total</h3>
       </header>
-      ${banner}
-    </section>` : '';
+      ${showBanner ? banner : `<p class="ct-readonly">Nothing recorded for ${escapeHtml(eventName)} yet. Your main CID or a manager can add what you raised here.</p>`}
+    </section>`;
   }
 
   return `
@@ -9817,7 +9819,8 @@ function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
 // The group whose charity total `cid` sees and saves, resolved from the
 // session and never from the request, so nobody reaches another operator's
 // total. `kind` ('team' / 'affiliate') picks one for a CID that is both;
-// without it a team wins, as the save always did. Main CID or admin edits.
+// without it a team wins, as the save always did. The main CID, a manager
+// (team members with Manage Members, affiliate managers) or an admin edits.
 async function resolveCharityGroup(cid, kind) {
   const isAdmin = isAdminUser(cid);
   if (kind !== 'affiliate') {
@@ -9830,7 +9833,7 @@ async function resolveCharityGroup(cid, kind) {
         entityType: 'team',
         entityName: upper,
         displayName: (fleet.find(t => t.participatingWf26) || fleet[0])?.teamName || upper,
-        canEdit: isAdmin || fleet.some(t => Number(t.mainCid) === cid)
+        canEdit: isAdmin || canManageTeamMembers(cid) || fleet.some(t => Number(t.mainCid) === cid)
       };
     }
     if (kind === 'team') return null;
@@ -9841,7 +9844,7 @@ async function resolveCharityGroup(cid, kind) {
     entityType: 'affiliate',
     entityName: charityKeyForAffiliate(affiliate),
     displayName: affiliate.name || affiliate.callsign,
-    canEdit: isAdmin || Number(affiliate.cid) === cid
+    canEdit: isAdmin || actsForAffiliate(affiliate)
   };
 }
 
@@ -10485,6 +10488,13 @@ app.get('/', async (req, res) => {
   const fxDateLabel = fxRates?.date
     ? new Date(fxRates.date + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
     : '';
+  // One figure on show, in GBP unless the viewer picks another. Without a
+  // rate (fetch down, or an AED total) there is nothing to convert with, so
+  // the totals fall back to one figure per currency as raised.
+  const charityDefault = charityConverted.GBP ? 'GBP' : null;
+  const charityFiguresHtml = charityDefault
+    ? `<span class="db-charity-amount">${charityConverted.GBP.exact ? '' : '≈ '}${escapeHtml(charityConverted.GBP.text)}</span>`
+    : charitySums.map(([c, m]) => `<span class="db-charity-amount">${escapeHtml(formatMoney(m, c))}</span>`).join('<span class="db-charity-sep">+</span>');
 
   const content = `
     <div class="db-page">
@@ -10518,31 +10528,29 @@ app.get('/', async (req, res) => {
           <span class="db-charity-icon" aria-hidden="true">❤</span>
           <div class="db-charity-main">
             <div class="db-charity-figures" id="dbCharityFigures">
-              ${charitySums.map(([c, m]) => `<span class="db-charity-amount">${escapeHtml(formatMoney(m, c))}</span>`).join('<span class="db-charity-sep">+</span>')}
+              ${charityFiguresHtml}
             </div>
             <div class="db-charity-sub">raised by ${charityPublic.length} ${charityPublic.length === 1 ? 'team or affiliate' : 'teams &amp; affiliates'} during ${escapeHtml(activeEvent.name || 'WorldFlight')}</div>
-            <div class="db-charity-fx" id="dbCharityFx" hidden>Converted at the European Central Bank rate for ${escapeHtml(fxDateLabel)}</div>
+            <div class="db-charity-fx" id="dbCharityFx"${charityDefault && !charityConverted.GBP.exact ? '' : ' hidden'}>Converted at the European Central Bank rate for ${escapeHtml(fxDateLabel)}</div>
           </div>
-          ${Object.keys(charityConverted).length ? `
+          ${charityDefault ? `
           <label class="db-charity-cur">
             <span>Show in</span>
             <select id="dbCharityCurrency">
-              <option value="">As raised</option>
-              ${Object.keys(charityConverted).map(c => `<option value="${c}">${c}</option>`).join('')}
+              ${Object.keys(charityConverted).map(c => `<option value="${c}"${c === charityDefault ? ' selected' : ''}>${c}</option>`).join('')}
             </select>
           </label>` : ''}
         </div>
-        ${Object.keys(charityConverted).length ? `<script>
+        ${charityDefault ? `<script>
           (function () {
             var CONVERTED = ${JSON.stringify(charityConverted).replace(/</g, '\\u003c')};
             var sel = document.getElementById('dbCharityCurrency');
             var figs = document.getElementById('dbCharityFigures');
             var fx = document.getElementById('dbCharityFx');
-            var original = figs.innerHTML;
             var KEY = 'wfCharityCurrency';
             function show(code) {
               var c = CONVERTED[code];
-              if (!c) { figs.innerHTML = original; fx.hidden = true; return; }
+              if (!c) return;
               figs.textContent = '';
               var amt = document.createElement('span');
               amt.className = 'db-charity-amount';
@@ -23245,6 +23253,7 @@ const HQ_STYLES = `    <style>
       }
       .ct-field input:focus, .ct-field select:focus { outline: none; border-color: var(--accent); }
       .ct-actions { display: flex; align-items: center; gap: 12px; }
+      .ct-readonly { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
       .ct-msg { font-size: 12px; }
 
       .ct-banner {
@@ -47722,7 +47731,7 @@ app.post('/api/charity-total', requireLogin, async (req, res) => {
   const group = await resolveCharityGroup(cid, kind);
   if (!group) return res.status(403).json({ error: 'You are not linked to a team or affiliate.' });
   if (!group.canEdit) {
-    return res.status(403).json({ error: `Only the ${group.entityType} main CID can set the charity total.` });
+    return res.status(403).json({ error: `Only the ${group.entityType}'s main CID or a manager can set the charity total.` });
   }
   const { entityType, entityName } = group;
   if (!entityName) return res.status(400).json({ error: 'Could not work out which group this is for.' });
