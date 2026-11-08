@@ -870,7 +870,16 @@ const DIVISION_ICAO_MAP = {
   'VATSIM':  '****'
 };
 
-// pageVisibility[key] is a string mode: 'visible' | 'hidden' | 'admin-only'
+// pageVisibility[key] is a string mode: 'visible' | 'hidden' | 'admin-only',
+// or 'direct-link' for the keys in DIRECT_LINK_KEYS.
+//
+// 'direct-link' = unlisted: anyone with the URL can open the page, but it is
+// reported as not public everywhere else - no sidebar link, no dashboard
+// tile or preview, nothing that links to it or shows its content. Only the
+// page's own routes pass (requirePageEnabled / canOpenPage).
+const DIRECT_LINK_KEYS = ['schedule'];
+const PAGE_MODES = ['visible', 'hidden', 'admin-only', 'direct-link'];
+
 async function loadPageVisibility() {
   const rows = await prisma.pageVisibility.findMany();
   const found = new Set();
@@ -878,7 +887,8 @@ async function loadPageVisibility() {
     // Prefer the explicit mode column. Fall back to the legacy enabled boolean
     // so older rows keep working: enabled=false → 'hidden', enabled=true → 'visible'.
     let mode = r.mode;
-    if (!mode || (mode !== 'visible' && mode !== 'hidden' && mode !== 'admin-only')) {
+    if (mode === 'direct-link' && !DIRECT_LINK_KEYS.includes(r.key)) mode = null;
+    if (!mode || !PAGE_MODES.includes(mode)) {
       mode = r.enabled === false ? 'hidden' : 'visible';
     }
     pageVisibility[r.key] = mode;
@@ -894,7 +904,16 @@ async function loadPageVisibility() {
 function getPageMode(key) {
   const m = pageVisibility[key];
   if (m === 'hidden' || m === 'admin-only') return m;
+  if (m === 'direct-link' && DIRECT_LINK_KEYS.includes(key)) return m;
   return 'visible';
+}
+
+// May this viewer open the page itself? Visible pages, admins, and a
+// direct-link page reached by its URL. Everything that would list or link
+// to the page keeps using isPageEnabled / isPageVisibleTo, which report a
+// direct-link page as not public.
+function canOpenPage(key, isAdminUserFlag) {
+  return !!isAdminUserFlag || isPageEnabled(key) || getPageMode(key) === 'direct-link';
 }
 
 // Legacy shim: returns true if the page is publicly accessible (visible to everyone).
@@ -974,7 +993,7 @@ function requirePageEnabled(pageKey) {
   return (req, res, next) => {
     const cid = req.session?.user?.data?.cid;
     const isAdmin = isAdminUser(cid);
-    if (isAdmin || isPageEnabled(pageKey)) return next();
+    if (canOpenPage(pageKey, isAdmin)) return next();
     return res.status(403).send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14929,7 +14948,7 @@ app.post('/api/personal-roster/toggle', requireLogin, async (req, res) => {
 app.post('/api/personal-roster/leg', requireLogin, async (req, res) => {
   const cid = Number(req.session.user.data.cid);
   if (!prisma.personalRosterLeg) return res.status(503).json({ error: 'Personal Roster is not available yet' });
-  if (!isPageVisibleTo('schedule', isAdminUser(cid))) return res.status(403).json({ error: 'Schedule not available' });
+  if (!canOpenPage('schedule', isAdminUser(cid))) return res.status(403).json({ error: 'Schedule not available' });
   const wf = String(req.body?.wf || '').trim();
   if (!wf || !visibleScheduleRows(adminSheetCache, cid).some(r => r.number === wf)) {
     return res.status(400).json({ error: 'Unknown sector' });
@@ -38537,7 +38556,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
       title: 'Pages',
       hint: 'Top-level pages — disabled ones are hidden from navigation and return 403.',
       items: [
-        { key: 'schedule',        label: 'WF Schedule',         icon: '🏠', desc: 'Main event schedule with slot booking' },
+        { key: 'schedule',        label: 'WF Schedule',         icon: '🏠', desc: 'Main event schedule with slot booking. Direct link: opens for anyone with the URL, but is not in the sidebar or linked from anywhere, and the route stays unpublished elsewhere (dashboard, portal banners, HQs).' },
         { key: 'world-map',       label: 'Route Map',           icon: '🗺️', desc: 'Interactive world map with live flights' },
         { key: 'my-slots',        label: 'My Bookings', icon: '✈️', desc: 'Personal booking overview' },
         { key: 'atc',             label: 'WF Flow Control',     icon: '🎧', desc: 'Controller departure management view' },
@@ -38582,6 +38601,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         <div class="settings-row-controls">
           <div class="vis-segctrl" data-page="${p.key}">
             ${opt('visible', 'Visible')}
+            ${DIRECT_LINK_KEYS.includes(p.key) ? opt('direct-link', 'Direct link only') : ''}
             ${opt('admin-only', p.adminLabel || 'Admin')}
             ${opt('hidden', 'Hidden')}
           </div>
@@ -38848,6 +38868,7 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
       }
       .vis-seg[data-mode="hidden"].active { background: #ef4444; }
       .vis-seg[data-mode="admin-only"].active { background: #f59e0b; color: #1f1107; }
+      .vis-seg[data-mode="direct-link"].active { background: #8b5cf6; }
       .vis-seg.is-pending { opacity: 0.6; }
 
       .toggle-switch {
@@ -39079,8 +39100,8 @@ app.post('/api/admin/banner', requireAdmin, async (req, res) => {
 
 app.post('/api/admin/page-visibility', requireAdmin, async (req, res) => {
   const { key, mode } = req.body;
-  const VALID_MODES = ['visible', 'hidden', 'admin-only'];
-  if (!PAGE_KEYS.includes(key) || !VALID_MODES.includes(mode)) {
+  if (!PAGE_KEYS.includes(key) || !PAGE_MODES.includes(mode)
+      || (mode === 'direct-link' && !DIRECT_LINK_KEYS.includes(key))) {
     return res.status(400).json({ error: 'Invalid key or mode' });
   }
 

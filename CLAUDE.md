@@ -110,6 +110,7 @@ Always ask before `git push`, even right after a recently approved push. Each pu
 - **`visible`** — shown to everyone (in nav and accessible)
 - **`admin-only`** — shown in admin's nav, hidden from non-admin nav, returns 403 for non-admins (admin can access)
 - **`hidden`** — hidden from nav for everyone, returns 403 for non-admins (admin can still URL-navigate)
+- **`direct-link`** — **schedule only** (`DIRECT_LINK_KEYS`). Unlisted: anyone with the URL can open `/schedule` (and its CSV / Personal Roster), but `isPageEnabled` / `isPageVisibleTo` report it as not public, so the sidebar, dashboard tile/preview/Next Sector, sector "Back" link, HQ schedules and portal banners all treat the route as unpublished. Gate a page's own routes with `requirePageEnabled` / `canOpenPage`, never with `isPageVisibleTo`, or direct-link visitors get a 403 there.
 
 Helpers:
 

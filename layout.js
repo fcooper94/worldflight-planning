@@ -26,6 +26,8 @@ export default function renderLayout({
   // pageVisibility[key] is a string mode: 'visible' | 'hidden' | 'admin-only'.
   // Show in nav when visible to all, or when admin-only and viewer is an admin.
   // 'hidden' means hidden from the nav for everyone (admin can still URL-navigate).
+  // 'direct-link' (schedule only) is the same here: never in the nav, though
+  // anyone with the URL can open the page.
   const pv = (key) => {
     const m = pageVisibility[key];
     if (m === undefined || m === 'visible' || m === true) return true;  // default visible
