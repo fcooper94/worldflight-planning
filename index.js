@@ -9750,8 +9750,8 @@ function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
             <input type="text" name="charityName" maxlength="120" placeholder="e.g. Cancer Research UK"
               value="${escapeHtml(row?.charityName || '')}" />
           </label>
-          <label class="ct-field ct-field-wide">Link <span class="ct-opt">optional</span>
-            <input type="text" name="charityUrl" maxlength="250" placeholder="https://..."
+          <label class="ct-field ct-field-wide"><span>Link to the charity <span class="ct-opt">(optional)</span></span>
+            <input type="text" name="charityUrl" maxlength="250" placeholder="The charity's website or fundraising page"
               value="${escapeHtml(row?.charityUrl || '')}" />
           </label>
           <label class="ct-field">Amount raised
@@ -10426,6 +10426,17 @@ app.get('/', async (req, res) => {
     };
   };
 
+  // Raised for charity this event, across every team and affiliate that
+  // chose to show their total. A hidden total stays out of the sum too -
+  // with only a few groups raising, the sum would give it away. Currencies
+  // total separately; adding pounds to euros means nothing.
+  const charityPublic = await prisma.charityTotal?.findMany({
+    where: { eventId: activeEventId || null, raised: true, showPublic: true, amountMinor: { not: null } }
+  }).catch(() => []) || [];
+  const charityByCurrency = {};
+  charityPublic.forEach(r => { charityByCurrency[r.currency] = (charityByCurrency[r.currency] || 0) + r.amountMinor; });
+  const charitySums = Object.entries(charityByCurrency).sort((a, b) => b[1] - a[1]);
+
   const content = `
     <div class="db-page">
 
@@ -10447,6 +10458,23 @@ app.get('/', async (req, res) => {
           </div>
         </a>`).join('')}
       </div>
+
+      ${charitySums.length ? `
+      <div class="db-section db-charity">
+        <div class="db-section-header">
+          <h2 class="db-section-title">Raised for Charity</h2>
+          ${isPageVisibleTo('who-we-are', isAdmin) ? '<a href="/teams" class="db-section-link">See the teams</a>' : ''}
+        </div>
+        <div class="db-charity-body">
+          <span class="db-charity-icon" aria-hidden="true">❤</span>
+          <div>
+            <div class="db-charity-figures">
+              ${charitySums.map(([c, m]) => `<span class="db-charity-amount">${escapeHtml(formatMoney(m, c))}</span>`).join('<span class="db-charity-sep">+</span>')}
+            </div>
+            <div class="db-charity-sub">raised by ${charityPublic.length} ${charityPublic.length === 1 ? 'team or affiliate' : 'teams &amp; affiliates'} during ${escapeHtml(activeEvent.name || 'WorldFlight')}</div>
+          </div>
+        </div>
+      </div>` : ''}
 
       ${nextSector ? `
       <div class="db-section db-next">
@@ -10644,6 +10672,14 @@ app.get('/', async (req, res) => {
         justify-content: space-between;
         gap: 16px;
       }
+
+      /* Raised for Charity - same pink as the Our Total banner. */
+      .db-charity-body { display: flex; align-items: center; gap: 16px; }
+      .db-charity-icon { font-size: 30px; color: #f472b6; flex: 0 0 auto; line-height: 1; }
+      .db-charity-figures { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+      .db-charity-amount { font-size: 32px; font-weight: 800; color: var(--text, #e2e8f0); line-height: 1.15; }
+      .db-charity-sep { font-size: 18px; color: var(--muted, #94a3b8); }
+      .db-charity-sub { margin-top: 4px; font-size: 13px; color: var(--muted, #94a3b8); }
       .db-greeting {
         font-size: 24px;
         font-weight: 700;
@@ -23095,7 +23131,10 @@ const HQ_STYLES = `    <style>
       .ct-form { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
       .ct-toggle { display: flex; align-items: center; gap: 10px; font-size: 13px; cursor: pointer; }
       .ct-toggle input { width: 16px; height: 16px; }
-      .ct-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+      .ct-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; align-items: end; }
+      /* display:grid would otherwise beat the hidden attribute, leaving the
+         fields up while "We raised money" is unticked. */
+      .ct-fields[hidden] { display: none; }
       .ct-field { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 4px; }
       .ct-field-wide { grid-column: span 2; }
       .ct-field-cur { max-width: 130px; }
@@ -31283,17 +31322,28 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
   ]);
   const hasPhoto = new Set(photoMeta.map(p => `${p.entityType}:${p.entityId}`));
 
-  // This event's charity totals the group chose to show publicly, keyed like
-  // the cards below: uppercase teamName, or the affiliate's group key.
+  // Each group's most recent charity total, keyed like the cards below:
+  // uppercase teamName, or the affiliate's group key. It stays on the card
+  // into the next event until that event's total is saved. A newer total the
+  // group chose to hide shows nothing - an older year does not reappear.
   const charityRows = await prisma.charityTotal?.findMany({
-    where: { eventId: activeEventId || null, raised: true, showPublic: true }
+    where: { raised: true, amountMinor: { not: null } }
   }).catch(() => []) || [];
-  const raisedByGroup = new Map(charityRows
-    .filter(r => r.charityName && r.amountMinor != null)
-    .map(r => [`${r.entityType}:${r.entityName}`, r]));
+  const eventRank = new Map(wfEvents.map((e, i) => [e.id, i]));   // newest first
+  const raisedByGroup = new Map();
+  charityRows
+    .filter(r => r.charityName)
+    .sort((a, b) => (eventRank.get(a.eventId) ?? 1e9) - (eventRank.get(b.eventId) ?? 1e9))
+    .forEach(r => {
+      const key = `${r.entityType}:${r.entityName}`;
+      if (!raisedByGroup.has(key)) raisedByGroup.set(key, r);
+    });
   const raisedLine = (type, key) => {
     const r = raisedByGroup.get(`${type}:${key}`);
-    return r ? `<div class="wwa-raised"><span aria-hidden="true">❤</span> Raised <strong>${escapeHtml(formatMoney(r.amountMinor, r.currency))}</strong> for ${escapeHtml(r.charityName)}</div>` : '';
+    if (!r || r.showPublic === false) return '';
+    const e = wfEvents.find(x => x.id === r.eventId);
+    const when = e?.year ? ` in ${e.year}` : (e?.name ? ` during ${escapeHtml(e.name)}` : '');
+    return `<div class="wwa-raised"><span aria-hidden="true">❤</span> Raised <strong>${escapeHtml(formatMoney(r.amountMinor, r.currency))}</strong>${when} for ${escapeHtml(r.charityName)}</div>`;
   };
 
   const initials = (name) => escapeHtml(String(name || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase());
