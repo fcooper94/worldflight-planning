@@ -768,3 +768,19 @@ model WfFeedback {
   @@index([eventId])
   @@index([role])
 }
+
+model CharityTotal {
+  id          Int      @id @default(autoincrement())
+  eventId     Int?
+  entityType  String
+  entityName  String
+  raised      Boolean  @default(false)
+  charityName String?
+  charityUrl  String?
+  amountMinor Int?
+  currency    String   @default("GBP")
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([entityType, entityName, eventId])
+  @@index([eventId])
+}

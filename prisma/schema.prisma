@@ -800,3 +800,28 @@ model WfFeedback {
   @@index([eventId])
   @@index([role])
 }
+
+// What a team or affiliate raised for charity during an event. Keyed on the
+// group, not a row: a multi-aircraft operator is several Affiliate rows
+// sharing a name, and the total belongs to the operator rather than to one
+// aircraft. entityName is the uppercase teamName, or the affiliate's group
+// key (name, falling back to callsign).
+//
+// The amount is held in minor units (pence, cents) so money is never a
+// float. How many minor units make a major one depends on the currency -
+// JPY has none - so always convert through the helpers rather than by 100.
+model CharityTotal {
+  id          Int      @id @default(autoincrement())
+  eventId     Int?
+  entityType  String   // 'team' | 'affiliate'
+  entityName  String
+  raised      Boolean  @default(false)
+  charityName String?
+  charityUrl  String?
+  amountMinor Int?
+  currency    String   @default("GBP")
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([entityType, entityName, eventId])
+  @@index([eventId])
+}

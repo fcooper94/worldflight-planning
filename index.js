@@ -9623,6 +9623,218 @@ const TZ_PICKER_SCRIPT = `<script>
 
 // Epoch ms for a UTC date + HH:MM, offset by addMin. Returns null when
 // either part is unparseable, which callers treat as "do not convert".
+/* ===== CHARITY TOTALS =====
+   What a team or affiliate raised, shown on their HQ and summarised as a
+   banner. Money is held in minor units; everything here converts through
+   the currency's own fraction digits rather than assuming 100, because
+   JPY and friends have none. */
+const CHARITY_CURRENCIES = [
+  'GBP', 'EUR', 'USD', 'AUD', 'NZD', 'CAD', 'CHF', 'SEK', 'NOK', 'DKK',
+  'PLN', 'CZK', 'ZAR', 'JPY', 'SGD', 'HKD', 'CNY', 'INR', 'AED', 'BRL', 'MXN'
+];
+
+// 2 for GBP, 0 for JPY. Falls back to 2 if the runtime does not know the
+// code, which keeps a bad currency from corrupting an amount.
+function currencyDigits(code) {
+  try {
+    return new Intl.NumberFormat('en-GB', { style: 'currency', currency: code })
+      .resolvedOptions().maximumFractionDigits;
+  } catch (e) { return 2; }
+}
+
+// "1250.5" -> 125050 for GBP, 1251 for JPY. Null for anything that is not a
+// plain positive amount, rather than coercing it: stripping non-digits first
+// would turn "abc" into 0 and "-5" into 5, and both would be saved as a real
+// total. Validate the shape, then convert.
+function moneyToMinor(input, code) {
+  const raw = String(input ?? '').trim();
+  if (!raw) return null;
+  // Digits, separators and a currency symbol are allowed; a letter or a sign
+  // means it is not an amount ('1e20', '-5', 'abc').
+  if (!/^[\s\d.,£€¥$]+$/.test(raw)) return null;
+  const cleaned = raw.replace(/[^\d.]/g, '');
+  if (!/^\d+(\.\d+)?$/.test(cleaned)) return null;
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return null;
+  const minor = Math.round(n * Math.pow(10, currencyDigits(code)));
+  // A total nobody could plausibly raise is a typo, not a donation.
+  if (!Number.isSafeInteger(minor) || minor > 1e11) return null;
+  return minor;
+}
+
+function minorToMajor(amountMinor, code) {
+  if (amountMinor == null) return null;
+  return amountMinor / Math.pow(10, currencyDigits(code));
+}
+
+// "£1,250.50". Falls back to "GBP 1250.50" if the code is unknown.
+function formatMoney(amountMinor, code) {
+  if (amountMinor == null) return '';
+  const major = minorToMajor(amountMinor, code);
+  try {
+    return new Intl.NumberFormat('en-GB', { style: 'currency', currency: code }).format(major);
+  } catch (e) { return code + ' ' + major.toFixed(currencyDigits(code)); }
+}
+
+// The group a charity total belongs to. Teams key on teamName; an affiliate
+// keys on its group name (falling back to callsign), because a
+// multi-aircraft affiliate is several rows sharing one name.
+function charityKeyForAffiliate(affiliate) {
+  if (!affiliate) return null;
+  return String(affiliate.name || affiliate.callsign || '').trim().toUpperCase() || null;
+}
+
+async function loadCharityTotal(entityType, entityName) {
+  if (!entityName) return null;
+  return prisma.charityTotal?.findFirst({
+    where: { entityType, entityName, eventId: activeEventId || null }
+  }).catch(() => null) ?? null;
+}
+
+// The "Our Total" card, shared by both HQs so they cannot drift. `canEdit`
+// is the main CID (or an admin); everyone else sees the banner only.
+function charityTotalSection(row, displayName, canEdit, eventName) {
+  const raised = !!row?.raised;
+  const currency = row?.currency || 'GBP';
+  const amountMajor = minorToMajor(row?.amountMinor, currency);
+  const amountValue = amountMajor == null
+    ? ''
+    : amountMajor.toFixed(currencyDigits(currency));
+
+  // The banner only makes sense once there is a charity and an amount.
+  const showBanner = raised && row?.charityName && row?.amountMinor != null;
+  const bannerText = showBanner
+    ? `${displayName} raised ${formatMoney(row.amountMinor, currency)} for ${row.charityName} during ${eventName}`
+    : '';
+
+  const banner = showBanner ? `
+    <div class="ct-banner">
+      <span class="ct-banner-icon" aria-hidden="true">\u2764</span>
+      <span class="ct-banner-text">
+        <strong>${escapeHtml(displayName)}</strong> raised
+        <strong class="ct-amount">${escapeHtml(formatMoney(row.amountMinor, currency))}</strong> for
+        ${row.charityUrl
+          ? `<a href="${escapeHtml(row.charityUrl)}" target="_blank" rel="noopener"><strong>${escapeHtml(row.charityName)}</strong></a>`
+          : `<strong>${escapeHtml(row.charityName)}</strong>`}
+        during ${escapeHtml(eventName)}
+      </span>
+      <button type="button" class="ct-copy" data-text="${escapeHtml(bannerText)}" title="Copy this line to share">Copy</button>
+    </div>` : '';
+
+  if (!canEdit) {
+    return showBanner ? `<section class="card aff-members-card ct-card">
+      <header class="aff-members-header">
+        <h3 class="section-title" style="margin:0;">Our Total</h3>
+      </header>
+      ${banner}
+    </section>` : '';
+  }
+
+  return `
+    <section class="card aff-members-card ct-card">
+      <header class="aff-members-header">
+        <h3 class="section-title" style="margin:0;">Our Total</h3>
+        <span style="font-size:11px;color:var(--muted);">Did you raise money while you flew?</span>
+      </header>
+
+      <form id="charityForm" class="ct-form">
+        <label class="ct-toggle">
+          <input type="checkbox" name="raised" ${raised ? 'checked' : ''} />
+          <span>We raised money for charity during ${escapeHtml(eventName)}</span>
+        </label>
+
+        <div class="ct-fields" ${raised ? '' : 'hidden'}>
+          <label class="ct-field ct-field-wide">Charity
+            <input type="text" name="charityName" maxlength="120" placeholder="e.g. Cancer Research UK"
+              value="${escapeHtml(row?.charityName || '')}" />
+          </label>
+          <label class="ct-field ct-field-wide">Link <span class="ct-opt">optional</span>
+            <input type="text" name="charityUrl" maxlength="250" placeholder="https://..."
+              value="${escapeHtml(row?.charityUrl || '')}" />
+          </label>
+          <label class="ct-field">Amount raised
+            <input type="text" name="amount" inputmode="decimal" maxlength="15" placeholder="0.00"
+              value="${escapeHtml(amountValue)}" />
+          </label>
+          <label class="ct-field ct-field-cur">Currency
+            <select name="currency">
+              ${CHARITY_CURRENCIES.map(c =>
+                `<option value="${c}" ${c === currency ? 'selected' : ''}>${c}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+
+        <div class="ct-actions">
+          <button type="submit" class="action-btn primary">Save total</button>
+          <span id="charityMsg" class="ct-msg" hidden></span>
+        </div>
+      </form>
+
+      ${banner}
+    </section>`;
+}
+
+// One handler for both HQs.
+function charityTotalScript() {
+  return `<script>
+  (function () {
+    var form = document.getElementById('charityForm');
+    var msg = document.getElementById('charityMsg');
+    if (form) {
+      var box = form.querySelector('input[name=raised]');
+      var fields = form.querySelector('.ct-fields');
+      box.addEventListener('change', function () { fields.hidden = !box.checked; });
+
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        var fd = new FormData(form);
+        var btn = form.querySelector('button[type=submit]');
+        btn.disabled = true;
+        msg.hidden = true;
+        try {
+          var r = await fetch('/api/charity-total', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+              raised: box.checked,
+              charityName: fd.get('charityName') || '',
+              charityUrl: fd.get('charityUrl') || '',
+              amount: fd.get('amount') || '',
+              currency: fd.get('currency') || 'GBP'
+            })
+          });
+          var d = await r.json().catch(function () { return {}; });
+          if (!r.ok) {
+            msg.textContent = d.error || 'Could not save your total.';
+            msg.style.color = 'var(--danger, #f87171)';
+            msg.hidden = false;
+            btn.disabled = false;
+            return;
+          }
+          location.reload();
+        } catch (err) {
+          msg.textContent = 'Could not save your total.';
+          msg.style.color = 'var(--danger, #f87171)';
+          msg.hidden = false;
+          btn.disabled = false;
+        }
+      });
+    }
+
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest && e.target.closest('.ct-copy');
+      if (!b) return;
+      navigator.clipboard.writeText(b.dataset.text).then(function () {
+        var prev = b.textContent;
+        b.textContent = 'Copied';
+        setTimeout(function () { b.textContent = prev; }, 1400);
+      }).catch(function () {});
+    });
+  })();
+  </script>`;
+}
+
 /* ===== WF FEEDBACK =====
    Post-event feedback. Which questions apply depends on the role answering;
    the shared block is asked of everyone. One definition drives the form, the
@@ -22840,6 +23052,42 @@ const HQ_STYLES = `    <style>
         font-family: inherit;
       }
 
+      /* Our Total: the charity panel and its banner. */
+      .ct-form { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
+      .ct-toggle { display: flex; align-items: center; gap: 10px; font-size: 13px; cursor: pointer; }
+      .ct-toggle input { width: 16px; height: 16px; }
+      .ct-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+      .ct-field { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 4px; }
+      .ct-field-wide { grid-column: span 2; }
+      .ct-field-cur { max-width: 130px; }
+      .ct-opt { color: var(--muted2); font-weight: 400; }
+      .ct-field input, .ct-field select {
+        padding: 8px 10px; font-size: 13px; font-family: inherit;
+        background: var(--panel2); color: var(--text);
+        border: 1px solid var(--border); border-radius: 8px;
+        text-transform: none; text-align: left;
+      }
+      .ct-field input:focus, .ct-field select:focus { outline: none; border-color: var(--accent); }
+      .ct-actions { display: flex; align-items: center; gap: 12px; }
+      .ct-msg { font-size: 12px; }
+
+      .ct-banner {
+        display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        margin-top: 16px; padding: 14px 16px; border-radius: 10px;
+        border: 1px solid color-mix(in srgb, #f472b6 35%, var(--border));
+        background: color-mix(in srgb, #f472b6 8%, transparent);
+      }
+      .ct-banner-icon { font-size: 18px; color: #f472b6; flex: 0 0 auto; }
+      .ct-banner-text { font-size: 14px; line-height: 1.6; min-width: 0; flex: 1 1 auto; }
+      .ct-banner-text a { color: inherit; }
+      .ct-amount { color: #f472b6; }
+      .ct-copy {
+        flex: 0 0 auto; font-size: 11px; font-weight: 600; cursor: pointer;
+        padding: 4px 10px; border-radius: 6px; color: var(--muted);
+        background: transparent; border: 1px solid var(--border);
+      }
+      .ct-copy:hover { color: var(--accent); border-color: var(--accent); }
+
       .aff-schedule-actions { display: inline-flex; align-items: center; gap: 14px; }
       .aff-schedule-csv {
         display: inline-flex;
@@ -23646,6 +23894,10 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   // Main CID holders manage members on /affiliates/my-members, so their HQ
   // shows the public-profile editor instead of the Our Members table.
   const isMainHolder = !!(affiliate && !readOnly && Number(affiliate.cid) === cid);
+  // Our Total: the main CID sets it, the rest of the affiliate sees it.
+  const charityRow = await loadCharityTotal('affiliate', charityKeyForAffiliate(affiliate));
+  const charityEventName = (wfEvents.find(e => e.id === activeEventId)?.name) || 'WorldFlight';
+
   const profilePhotoRow = affiliate
     ? await prisma.profilePhoto.findUnique({
         where: { entityType_entityId: { entityType: 'affiliate', entityId: affiliate.id } },
@@ -24163,6 +24415,8 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
       ${affFleetCard}
 
       ${affiliate ? `
+      ${affiliate ? charityTotalSection(charityRow, affiliate.name || affiliate.callsign, isMainHolder || isAdmin, charityEventName) : ''}
+
       <section class="card aff-schedule-card">
         <header class="aff-schedule-header">
           <h3 class="section-title" style="margin:0;">${isMultiAircraft ? 'Our Bookings &amp; Slots' : soloSchedule ? 'My Bookings &amp; Slots' : 'Assign Pilots / Our Bookings &amp; Slots'}</h3>
@@ -24300,6 +24554,7 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
     </div>
 
     ${HQ_STYLES}
+    ${charityTotalScript()}
 
     <script>
       // Which affiliate this HQ is showing. Sent with every write so the
@@ -26118,6 +26373,10 @@ app.get('/team/hq', requireLogin, async (req, res) => {
     const p = String(b.slotKey).split('|');
     teamBookingBySector[`${p[0]}|${p[1]}|${p[2]}`] = b;
   });
+  // Our Total: the main CID sets it, everyone on the team sees the banner.
+  const charityRow = await loadCharityTotal('team', teamNameUpper);
+  const charityEventName = (wfEvents.find(e => e.id === activeEventId)?.name) || 'WorldFlight';
+
   // Only the option this team is on - see legOptionsVisibleTo().
   const teamLegRows = showSchedule
     ? legOptionsVisibleTo((adminSheetCache || []).filter(r => r.number), 'team', teamCallsigns)
@@ -26469,6 +26728,8 @@ app.get('/team/hq', requireLogin, async (req, res) => {
       </div>
       ` : ''}
 
+      ${charityTotalSection(charityRow, displayName, isMainHolder || isAdmin, charityEventName)}
+
       <section class="card aff-schedule-card">
         <header class="aff-schedule-header">
           <h3 class="section-title" style="margin:0;">Our Bookings &amp; Slots</h3>
@@ -26583,6 +26844,7 @@ app.get('/team/hq', requireLogin, async (req, res) => {
     </div>
 
     ${HQ_STYLES}
+    ${charityTotalScript()}
 
 
 
@@ -46926,6 +47188,82 @@ app.get('/admin/feedback.csv', requireAdminPage('feedback'), async (req, res) =>
 });
 
 /* ===== WF FEEDBACK: the form ===== */
+// Save a team's or affiliate's charity total. The group is resolved from
+// the session, never from the request, so a member cannot post a total
+// against another operator. Main CID or admin only, matching who may edit
+// the public profile.
+app.post('/api/charity-total', requireLogin, async (req, res) => {
+  const cid = Number(req.session?.user?.data?.cid);
+  const isAdmin = isAdminUser(cid);
+
+  let entityType = null;
+  let entityName = null;
+
+  const teamName = await resolveUserTeamName(cid).catch(() => null);
+  if (teamName) {
+    const fleet = await prisma.officialTeam.findMany({ where: { teamName } }).catch(() => []);
+    const owns = fleet.some(t => Number(t.mainCid) === cid);
+    if (!owns && !isAdmin) {
+      return res.status(403).json({ error: 'Only the team main CID can set the charity total.' });
+    }
+    entityType = 'team';
+    entityName = String(teamName).trim().toUpperCase();
+  } else {
+    const affiliate = await resolveUserAffiliate(cid).catch(() => null);
+    if (!affiliate) return res.status(403).json({ error: 'You are not linked to a team or affiliate.' });
+    if (Number(affiliate.cid) !== cid && !isAdmin) {
+      return res.status(403).json({ error: 'Only the affiliate main CID can set the charity total.' });
+    }
+    entityType = 'affiliate';
+    entityName = charityKeyForAffiliate(affiliate);
+  }
+  if (!entityName) return res.status(400).json({ error: 'Could not work out which group this is for.' });
+
+  const raised = req.body?.raised === true;
+  const currency = CHARITY_CURRENCIES.includes(String(req.body?.currency || '').toUpperCase())
+    ? String(req.body.currency).toUpperCase()
+    : 'GBP';
+  const charityName = String(req.body?.charityName || '').trim().slice(0, 120) || null;
+  let charityUrl = String(req.body?.charityUrl || '').trim().slice(0, 250) || null;
+  // Only http(s) links, so the banner cannot carry a javascript: URL.
+  if (charityUrl && !/^https?:\/\//i.test(charityUrl)) charityUrl = 'https://' + charityUrl;
+  if (charityUrl && !/^https?:\/\/[^\s]+\.[^\s]+/i.test(charityUrl)) {
+    return res.status(400).json({ error: 'That charity link does not look like a web address.' });
+  }
+
+  const amountMinor = raised ? moneyToMinor(req.body?.amount, currency) : null;
+  if (raised && !charityName) return res.status(400).json({ error: 'Tell us which charity you raised for.' });
+  if (raised && req.body?.amount && amountMinor == null) {
+    return res.status(400).json({ error: 'That amount does not look right.' });
+  }
+
+  try {
+    const existing = await prisma.charityTotal.findFirst({
+      where: { entityType, entityName, eventId: activeEventId || null }
+    });
+    const data = {
+      raised,
+      charityName: raised ? charityName : null,
+      charityUrl: raised ? charityUrl : null,
+      amountMinor: raised ? amountMinor : null,
+      currency
+    };
+    if (existing) {
+      await prisma.charityTotal.update({ where: { id: existing.id }, data });
+    } else {
+      await prisma.charityTotal.create({
+        data: { entityType, entityName, eventId: activeEventId || null, ...data }
+      });
+    }
+    console.log('[CHARITY] ' + entityType + ' ' + entityName + ' -> '
+      + (raised ? formatMoney(amountMinor, currency) + ' for ' + charityName : 'not raising'));
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[CHARITY] save failed:', e.message);
+    res.status(500).json({ error: 'Could not save your total.' });
+  }
+});
+
 app.get('/feedback', requirePageEnabled('wf-feedback'), async (req, res) => {
   const user = req.session?.user?.data || null;
   const cid = Number(user?.cid) || null;
