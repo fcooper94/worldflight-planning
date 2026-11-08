@@ -9727,9 +9727,18 @@ async function loadCharityTotal(entityType, entityName) {
 
 // The "Our Total" card on /our-total, for teams and affiliates alike.
 // `canEdit` is the main CID (or an admin); everyone else sees the banner
-// only. `entityType` tells the save which of the viewer's groups it is for.
-function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
+// only. `entityType` tells the save which of the viewer's groups it is for;
+// `others` are the viewer's other sims ({ key, displayName }) that this
+// total can be combined with.
+function charityTotalSection(row, displayName, canEdit, eventName, entityType, others = []) {
   const raised = !!row?.raised;
+  const combined = charityCombined(row);
+  const combinedKeys = new Set((combined?.groups || []).map(g => g.key));
+  const bannerName = combined?.name || displayName;
+  const across = combined ? ' ' + charityAcross(combined) : '';
+  const combinedNote = combined
+    ? `<p class="ct-combined-note">This is the combined total for ${joinNames(combined.groups.map(g => `<strong>${escapeHtml(g.name)}</strong>`))}.${canEdit ? ` Saving it here updates it for ${combined.groups.length === 2 ? 'both' : 'all of them'}.` : ''}</p>`
+    : '';
   const showPublic = row?.showPublic !== false;
   const currency = row?.currency || 'GBP';
   const amountMajor = minorToMajor(row?.amountMinor, currency);
@@ -9740,19 +9749,19 @@ function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
   // The banner only makes sense once there is a charity and an amount.
   const showBanner = raised && row?.charityName && row?.amountMinor != null;
   const bannerText = showBanner
-    ? `${displayName} raised ${formatMoney(row.amountMinor, currency)} for ${row.charityName} during ${eventName}`
+    ? `${bannerName} raised ${formatMoney(row.amountMinor, currency)} for ${row.charityName} during ${eventName}${across}`
     : '';
 
   const banner = showBanner ? `
     <div class="ct-banner">
       <span class="ct-banner-icon" aria-hidden="true">\u2764</span>
       <span class="ct-banner-text">
-        <strong>${escapeHtml(displayName)}</strong> raised
+        <strong>${escapeHtml(bannerName)}</strong> raised
         <strong class="ct-amount">${escapeHtml(formatMoney(row.amountMinor, currency))}</strong> for
         ${row.charityUrl
           ? `<a href="${escapeHtml(row.charityUrl)}" target="_blank" rel="noopener"><strong>${escapeHtml(row.charityName)}</strong></a>`
           : `<strong>${escapeHtml(row.charityName)}</strong>`}
-        during ${escapeHtml(eventName)}
+        during ${escapeHtml(eventName)}${escapeHtml(across)}
       </span>
       <button type="button" class="ct-copy" data-text="${escapeHtml(bannerText)}" title="Copy this line to share">Copy</button>
     </div>` : '';
@@ -9764,9 +9773,24 @@ function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
       <header class="aff-members-header">
         <h3 class="section-title" style="margin:0;">Our Total</h3>
       </header>
+      ${combinedNote}
       ${showBanner ? banner : `<p class="ct-readonly">Nothing recorded for ${escapeHtml(eventName)} yet. Your main CID or a manager can add what you raised here.</p>`}
     </section>`;
   }
+
+  // Combine controls, only for someone running more than one sim.
+  const combineHtml = others.length ? `
+          <div class="ct-combine ct-field-full">
+            <div class="ct-combine-h">Combine with your other ${others.length === 1 ? 'sim' : 'sims'} <span class="ct-opt">one total, shared and shown on each</span></div>
+            ${others.map(o => `<label class="ct-toggle">
+              <input type="checkbox" name="combineWith" value="${escapeHtml(o.key)}" ${combinedKeys.has(o.key) ? 'checked' : ''} />
+              <span>${escapeHtml(o.displayName)}</span>
+            </label>`).join('')}
+            <label class="ct-field ct-combine-name" ${combined ? '' : 'hidden'}>Combined name
+              <input type="text" name="combinedName" maxlength="80"
+                value="${escapeHtml(combined?.name || charityCommonName([displayName, ...others.map(o => o.displayName)]))}" />
+            </label>
+          </div>` : '';
 
   return `
     <section class="card aff-members-card ct-card">
@@ -9774,6 +9798,7 @@ function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
         <h3 class="section-title" style="margin:0;">Our Total</h3>
         <span style="font-size:11px;color:var(--muted);">Did you raise money while you flew?</span>
       </header>
+      ${combinedNote}
 
       <form id="charityForm" class="ct-form" data-for="${escapeHtml(entityType || '')}">
         <label class="ct-toggle">
@@ -9804,6 +9829,7 @@ function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
             <input type="checkbox" name="showPublic" ${showPublic ? 'checked' : ''} />
             <span>Show money raised to the public <span class="ct-opt">on your card on the Teams &amp; Affiliates page</span></span>
           </label>
+          ${combineHtml}
         </div>
 
         <div class="ct-actions">
@@ -9848,6 +9874,60 @@ async function resolveCharityGroup(cid, kind) {
   };
 }
 
+/* Combined totals: one figure shared by several sims run by the same
+   people (e.g. two affiliates under one manager). Written to every member's
+   row so each sim's page, card and history read it as their own; the
+   dashboard counts it once. */
+function charityCombined(row) {
+  if (!row?.combined) return null;
+  try {
+    const c = JSON.parse(row.combined);
+    return c && Array.isArray(c.groups) && c.groups.length > 1 ? c : null;
+  } catch (e) { return null; }
+}
+
+function charityAcross(combined) {
+  const n = combined.groups.length;
+  return n === 2 ? 'across both sims' : `across all ${n} sims`;
+}
+
+// "A and B" / "A, B and C".
+function joinNames(names) {
+  return names.length < 2 ? (names[0] || '') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+}
+
+// What the sims' names share: "Fly UK - A320 Sim" + "Fly UK - Home Sim" ->
+// "Fly UK". Cut back to a whole word, so "Fly UK - A320" + "Fly UK - A330"
+// gives "Fly UK" rather than "Fly UK - A3". Falls back to the names joined.
+function charityCommonName(names) {
+  const first = names[0] || '';
+  let p = first;
+  for (const n of names.slice(1)) {
+    while (p && !n.toLowerCase().startsWith(p.toLowerCase())) p = p.slice(0, -1);
+  }
+  if (p.length < first.length && /\w/.test(first[p.length]) && /\w$/.test(p)) p = p.replace(/\S*$/, '');
+  p = p.replace(/[\s\-–—:|,/&]+$/, '').trim();
+  return p.length >= 2 ? p : joinNames(names);
+}
+
+// Every sim `cid` may set a total for - their team and each affiliate they
+// own or manage. These are what a combined total can span.
+async function editableCharityGroups(cid) {
+  const out = [];
+  const team = await resolveCharityGroup(cid, 'team');
+  if (team?.canEdit && team.entityName) out.push(team);
+  const seen = new Set();
+  for (const a of await resolveUserAffiliates(cid).catch(() => [])) {
+    if (!actsForAffiliate(a)) continue;
+    const name = charityKeyForAffiliate(a);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ entityType: 'affiliate', entityName: name, displayName: a.name || a.callsign, canEdit: true });
+  }
+  out.forEach(g => { g.key = `${g.entityType}:${g.entityName}`; });
+  return out;
+}
+
 // The form's save and the banner's copy button.
 function charityTotalScript() {
   return `<script>
@@ -9858,6 +9938,15 @@ function charityTotalScript() {
       var box = form.querySelector('input[name=raised]');
       var fields = form.querySelector('.ct-fields');
       box.addEventListener('change', function () { fields.hidden = !box.checked; });
+
+      // The combined name only matters once another sim is ticked.
+      var combineBoxes = Array.prototype.slice.call(form.querySelectorAll('input[name=combineWith]'));
+      var combineName = form.querySelector('.ct-combine-name');
+      combineBoxes.forEach(function (b) {
+        b.addEventListener('change', function () {
+          if (combineName) combineName.hidden = !combineBoxes.some(function (x) { return x.checked; });
+        });
+      });
 
       form.addEventListener('submit', async function (e) {
         e.preventDefault();
@@ -9873,6 +9962,8 @@ function charityTotalScript() {
             body: JSON.stringify({
               for: form.dataset.for || '',
               showPublic: !!(form.querySelector('input[name=showPublic]') || {}).checked,
+              combineWith: combineBoxes.filter(function (b) { return b.checked; }).map(function (b) { return b.value; }),
+              combinedName: fd.get('combinedName') || '',
               raised: box.checked,
               charityName: fd.get('charityName') || '',
               charityUrl: fd.get('charityUrl') || '',
@@ -10289,7 +10380,11 @@ app.get('/', async (req, res) => {
     { key: 'airspace', href: '/airspace', label: 'Staffing Overview', desc: 'See which FIRs the route crosses and coordinate coverage',
       icon: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/>' },
     { key: 'world-map', href: '/route-map', label: 'Route Map', desc: 'Explore the full WorldFlight route on an interactive world map',
-      icon: '<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/>' }
+      icon: '<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/>' },
+    { key: 'wf-feedback', href: '/feedback', label: 'WF Feedback', desc: 'Tell us how WorldFlight went and what we should do differently',
+      icon: '<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>' },
+    { key: 'wf-atc-team', href: '/wf-atc-team', label: 'WF ATC Team', desc: 'Meet the controllers who staff WorldFlight',
+      icon: '<path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3Z"/>' }
   ];
   const heroTiles = heroTilePool
     .filter(t => !t.key || isPageVisibleTo(t.key, isAdmin))
@@ -10352,6 +10447,12 @@ app.get('/', async (req, res) => {
     const i = _nsRows.indexOf(nextSector);
     if (i >= 0 && _nsRows[i + 1]) nextSector = _nsRows[i + 1];
   }
+
+  // Not while the schedule is unpublished: the panel names the leg, its
+  // airports, scenery and briefs, which is the route by another door. Same
+  // gate as Schedule Preview below. Dropped here rather than at render so
+  // none of it reaches the page.
+  if (!(isAdmin || isPageEnabled('schedule'))) nextSector = null;
 
   // Departure instant for the sector date. The client formats it to the
   // viewer's own locale; this is only the value and a server-side fallback.
@@ -10471,29 +10572,31 @@ app.get('/', async (req, res) => {
     where: { eventId: activeEventId || null, raised: true, showPublic: true, amountMinor: { not: null } }
   }).catch(() => []) || [];
   const charityByCurrency = {};
-  charityPublic.forEach(r => { charityByCurrency[r.currency] = (charityByCurrency[r.currency] || 0) + r.amountMinor; });
+  // A combined total sits on every member's row - add it once.
+  const countedCombined = new Set();
+  charityPublic.forEach(r => {
+    const combined = charityCombined(r);
+    if (combined) {
+      const sig = combined.groups.map(g => g.key).sort().join('|');
+      if (countedCombined.has(sig)) return;
+      countedCombined.add(sig);
+    }
+    charityByCurrency[r.currency] = (charityByCurrency[r.currency] || 0) + r.amountMinor;
+  });
   const charitySums = Object.entries(charityByCurrency).sort((a, b) => b[1] - a[1]);
   // The same total in each currency we have a rate for, for the selector.
-  // `exact` when nothing was converted - one source currency, asked for in
-  // itself - so only real conversions carry the "approx." marker.
   const charityConverted = {};
   CHARITY_CURRENCIES.forEach(c => {
     const minor = convertCharitySums(charitySums, c);
     if (minor == null) return;
-    charityConverted[c] = {
-      text: formatMoney(minor, c),
-      exact: charitySums.length === 1 && charitySums[0][0] === c
-    };
+    charityConverted[c] = { text: formatMoney(minor, c) };
   });
-  const fxDateLabel = fxRates?.date
-    ? new Date(fxRates.date + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
-    : '';
   // One figure on show, in GBP unless the viewer picks another. Without a
   // rate (fetch down, or an AED total) there is nothing to convert with, so
   // the totals fall back to one figure per currency as raised.
   const charityDefault = charityConverted.GBP ? 'GBP' : null;
   const charityFiguresHtml = charityDefault
-    ? `<span class="db-charity-amount">${charityConverted.GBP.exact ? '' : '≈ '}${escapeHtml(charityConverted.GBP.text)}</span>`
+    ? `<span class="db-charity-amount">${escapeHtml(charityConverted.GBP.text)}</span>`
     : charitySums.map(([c, m]) => `<span class="db-charity-amount">${escapeHtml(formatMoney(m, c))}</span>`).join('<span class="db-charity-sep">+</span>');
 
   const content = `
@@ -10530,9 +10633,7 @@ app.get('/', async (req, res) => {
             <div class="db-charity-figures" id="dbCharityFigures">
               ${charityFiguresHtml}
             </div>
-            <div class="db-charity-sub">raised by ${charityPublic.length} ${charityPublic.length === 1 ? 'team or affiliate' : 'teams &amp; affiliates'} during ${escapeHtml(activeEvent.name || 'WorldFlight')}</div>
-            <div class="db-charity-fx" id="dbCharityFx"${charityDefault && !charityConverted.GBP.exact ? '' : ' hidden'}>Converted at the European Central Bank rate for ${escapeHtml(fxDateLabel)}</div>
-          </div>
+            <div class="db-charity-sub">raised by ${charityPublic.length} ${charityPublic.length === 1 ? 'team or affiliate' : 'teams &amp; affiliates'} during ${escapeHtml(activeEvent.name || 'WorldFlight')}</div>          </div>
           ${charityDefault ? `
           <label class="db-charity-cur">
             <span>Show in</span>
@@ -10546,7 +10647,6 @@ app.get('/', async (req, res) => {
             var CONVERTED = ${JSON.stringify(charityConverted).replace(/</g, '\\u003c')};
             var sel = document.getElementById('dbCharityCurrency');
             var figs = document.getElementById('dbCharityFigures');
-            var fx = document.getElementById('dbCharityFx');
             var KEY = 'wfCharityCurrency';
             function show(code) {
               var c = CONVERTED[code];
@@ -10554,9 +10654,8 @@ app.get('/', async (req, res) => {
               figs.textContent = '';
               var amt = document.createElement('span');
               amt.className = 'db-charity-amount';
-              amt.textContent = (c.exact ? '' : '≈ ') + c.text;
+              amt.textContent = c.text;
               figs.appendChild(amt);
-              fx.hidden = c.exact;
             }
             var saved = '';
             try { saved = localStorage.getItem(KEY) || ''; } catch (e) {}
@@ -10775,8 +10874,6 @@ app.get('/', async (req, res) => {
         background: var(--panel2, #0b1220); color: var(--text, #e2e8f0);
         border: 1px solid var(--border, #1e293b); border-radius: 8px;
       }
-      .db-charity-fx { margin-top: 6px; font-size: 11px; color: var(--muted, #94a3b8); }
-      .db-charity-fx[hidden] { display: none; }
       @media (max-width: 600px) {
         .db-charity-body { flex-wrap: wrap; }
         .db-charity-cur { width: 100%; }
@@ -31450,7 +31547,13 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
     if (!r || r.showPublic === false) return '';
     const e = wfEvents.find(x => x.id === r.eventId);
     const when = e?.year ? ` in ${e.year}` : (e?.name ? ` during ${escapeHtml(e.name)}` : '');
-    return `<div class="wwa-raised"><span aria-hidden="true">❤</span> Raised <strong>${escapeHtml(formatMoney(r.amountMinor, r.currency))}</strong>${when} for ${escapeHtml(r.charityName)}</div>`;
+    const amount = `<strong>${escapeHtml(formatMoney(r.amountMinor, r.currency))}</strong>`;
+    // A total shared by several sims names the group, on each member's card.
+    const combined = charityCombined(r);
+    const text = combined
+      ? `${escapeHtml(combined.name)} raised a total of ${amount}${when} ${charityAcross(combined)} for ${escapeHtml(r.charityName)}`
+      : `Raised ${amount}${when} for ${escapeHtml(r.charityName)}`;
+    return `<div class="wwa-raised"><span aria-hidden="true">❤</span> ${text}</div>`;
   };
 
   const initials = (name) => escapeHtml(String(name || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase());
@@ -47756,25 +47859,60 @@ app.post('/api/charity-total', requireLogin, async (req, res) => {
   }
 
   try {
-    const existing = await prisma.charityTotal.findFirst({
-      where: { entityType, entityName, eventId: activeEventId || null }
-    });
+    const eventId = activeEventId || null;
+    const findRow = (type, name) => prisma.charityTotal.findFirst({ where: { entityType: type, entityName: name, eventId } });
+    const writeRow = async (type, name, data) => {
+      const row = await findRow(type, name);
+      if (row) await prisma.charityTotal.update({ where: { id: row.id }, data });
+      else await prisma.charityTotal.create({ data: { entityType: type, entityName: name, eventId, ...data } });
+    };
+
+    // Which sims this total covers. Only sims the viewer can edit may be
+    // combined - the list comes from their own groups, never the request.
+    const selfKey = `${entityType}:${entityName}`;
+    const editable = await editableCharityGroups(cid);
+    const self = editable.find(g => g.key === selfKey) || { ...group, key: selfKey };
+    const wanted = Array.isArray(req.body?.combineWith) ? req.body.combineWith.map(String) : [];
+    const previous = charityCombined(await findRow(entityType, entityName));
+    let members;
+    if (raised) {
+      members = [self, ...editable.filter(g => g.key !== selfKey && wanted.includes(g.key))];
+    } else {
+      // "Not raising" applies to the whole combination it was part of.
+      const prevKeys = new Set((previous?.groups || []).map(g => g.key));
+      members = [self, ...editable.filter(g => g.key !== selfKey && prevKeys.has(g.key))];
+    }
+    const combined = raised && members.length > 1
+      ? JSON.stringify({
+        name: String(req.body?.combinedName || '').trim().slice(0, 80) || charityCommonName(members.map(m => m.displayName)),
+        groups: members.map(m => ({ key: m.key, name: m.displayName }))
+      })
+      : null;
+
     const data = {
       raised,
       charityName: raised ? charityName : null,
       charityUrl: raised ? charityUrl : null,
       amountMinor: raised ? amountMinor : null,
       currency,
-      showPublic
+      showPublic,
+      combined
     };
-    if (existing) {
-      await prisma.charityTotal.update({ where: { id: existing.id }, data });
-    } else {
-      await prisma.charityTotal.create({
-        data: { entityType, entityName, eventId: activeEventId || null, ...data }
+    for (const m of members) await writeRow(m.entityType, m.entityName, data);
+
+    // A sim taken out of the combination drops the shared figure, or it
+    // would go on showing the whole amount as its own.
+    const memberKeys = new Set(members.map(m => m.key));
+    for (const g of previous?.groups || []) {
+      if (memberKeys.has(g.key)) continue;
+      const target = editable.find(e => e.key === g.key);
+      if (!target) continue;
+      await writeRow(target.entityType, target.entityName, {
+        raised: false, charityName: null, charityUrl: null, amountMinor: null, combined: null
       });
     }
-    console.log('[CHARITY] ' + entityType + ' ' + entityName + ' -> '
+
+    console.log('[CHARITY] ' + members.map(m => m.key).join(' + ') + ' -> '
       + (raised ? formatMoney(amountMinor, currency) + ' for ' + charityName : 'not raising'));
     res.json({ success: true });
   } catch (e) {
@@ -47800,6 +47938,11 @@ app.get('/our-total', requireLogin, async (req, res) => {
   const history = await prisma.charityTotal?.findMany({
     where: { entityType: group.entityType, entityName: group.entityName }
   }).catch(() => []) || [];
+  // The viewer's other sims this total could be combined with.
+  const selfKey = `${group.entityType}:${group.entityName}`;
+  const otherSims = group.canEdit
+    ? (await editableCharityGroups(cid)).filter(g => g.key !== selfKey)
+    : [];
 
   // Newest event first, in the same order as wfEvents (by year).
   const eventOrder = new Map(wfEvents.map((e, i) => [e.id, i]));
@@ -47821,8 +47964,10 @@ app.get('/our-total', requireLogin, async (req, res) => {
         ? `<a href="${escapeHtml(r.charityUrl)}" target="_blank" rel="noopener">${escapeHtml(r.charityName)}</a>`
         : escapeHtml(r.charityName))
       : '<span class="ot-muted">Did not raise</span>';
+    const combined = r.raised ? charityCombined(r) : null;
     return `<tr>
-      <td>${escapeHtml(e?.name || 'Unknown event')}${isCurrent ? ' <span class="ot-current">Current</span>' : ''}</td>
+      <td>${escapeHtml(e?.name || 'Unknown event')}${isCurrent ? ' <span class="ot-current">Current</span>' : ''}${combined
+        ? `<div class="ot-combined">Combined total for ${escapeHtml(joinNames(combined.groups.map(g => g.name)))}</div>` : ''}</td>
       <td>${charity}</td>
       <td class="ot-num">${r.raised && r.amountMinor != null ? escapeHtml(formatMoney(r.amountMinor, r.currency)) : '<span class="ot-muted">—</span>'}</td>
       <td>${r.raised ? (r.showPublic !== false ? 'Shown' : '<span class="ot-muted">Hidden</span>') : '<span class="ot-muted">—</span>'}</td>
@@ -47830,7 +47975,7 @@ app.get('/our-total', requireLogin, async (req, res) => {
   };
 
   const content = `
-    ${charityTotalSection(current, group.displayName, group.canEdit, eventName, group.entityType)}
+    ${charityTotalSection(current, group.displayName, group.canEdit, eventName, group.entityType, otherSims)}
 
     <section class="card aff-members-card ct-card">
       <header class="aff-members-header">
@@ -47849,6 +47994,19 @@ app.get('/our-total', requireLogin, async (req, res) => {
     ${HQ_STYLES}
     <style>
       .ct-field-full { grid-column: 1 / -1; }
+      .ct-combined-note {
+        margin: 12px 0 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.6;
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
+      }
+      .ct-combine {
+        display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+        border: 1px solid var(--border); border-radius: 8px; background: var(--panel2);
+      }
+      .ct-combine-h { font-size: 12px; font-weight: 700; color: var(--text); }
+      .ct-combine-name { max-width: 320px; }
+      .ct-combine-name[hidden] { display: none; }
+      .ot-combined { margin-top: 3px; font-size: 11px; color: var(--muted); }
       .ot-alltime { font-size: 12px; color: var(--muted); }
       .ot-alltime strong { color: #f472b6; }
       .ot-table-wrap { overflow-x: auto; margin-top: 12px; }

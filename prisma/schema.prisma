@@ -822,6 +822,10 @@ model CharityTotal {
   currency    String   @default("GBP")
   // Shown on the group's /teams card. On by default; the main CID can hide it.
   showPublic  Boolean  @default(true)
+  // One total shared by several sims run by the same people (e.g. two
+  // affiliates). JSON { name, groups: [{ key: "type:NAME", name }] }, the
+  // same on every member's row; NULL = this group's own total.
+  combined    String?
   updatedAt   DateTime @default(now()) @updatedAt
 
   @@unique([entityType, entityName, eventId])
