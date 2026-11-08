@@ -9676,6 +9676,40 @@ function formatMoney(amountMinor, code) {
   } catch (e) { return code + ' ' + major.toFixed(currencyDigits(code)); }
 }
 
+// Exchange rates for the dashboard's charity total: the ECB's daily
+// reference rates via Frankfurter (free, no key), EUR-based. Held in memory
+// and refreshed in the background, so the dashboard only ever reads the
+// cache and a slow or failed fetch never holds up a page. AED is not an ECB
+// currency, so it simply has no rate.
+let fxRates = null;   // { date: 'YYYY-MM-DD', rates: { EUR: 1, GBP: 0.83, ... } }
+async function refreshFxRates() {
+  try {
+    const r = await fetch('https://api.frankfurter.dev/v1/latest?base=EUR', { signal: AbortSignal.timeout(15000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (!d?.rates) throw new Error('no rates in response');
+    fxRates = { date: d.date, rates: { ...d.rates, EUR: 1 } };
+  } catch (e) {
+    console.warn('[FX] rate refresh failed:', e.message);
+  }
+}
+refreshFxRates();
+setInterval(refreshFxRates, 6 * 60 * 60 * 1000);
+
+// A set of per-currency totals ([[code, minor], ...]) as one amount in `to`,
+// in minor units. Null when any part has no rate - better no conversion
+// than a total that quietly leaves some of the money out.
+function convertCharitySums(sums, to) {
+  const rates = fxRates?.rates;
+  if (!rates?.[to] || !sums.length) return null;
+  let eur = 0;
+  for (const [code, minor] of sums) {
+    if (!rates[code]) return null;
+    eur += minorToMajor(minor, code) / rates[code];
+  }
+  return Math.round(eur * rates[to] * Math.pow(10, currencyDigits(to)));
+}
+
 // The group a charity total belongs to. Teams key on teamName; an affiliate
 // keys on its group name (falling back to callsign), because a
 // multi-aircraft affiliate is several rows sharing one name.
@@ -10436,6 +10470,21 @@ app.get('/', async (req, res) => {
   const charityByCurrency = {};
   charityPublic.forEach(r => { charityByCurrency[r.currency] = (charityByCurrency[r.currency] || 0) + r.amountMinor; });
   const charitySums = Object.entries(charityByCurrency).sort((a, b) => b[1] - a[1]);
+  // The same total in each currency we have a rate for, for the selector.
+  // `exact` when nothing was converted - one source currency, asked for in
+  // itself - so only real conversions carry the "approx." marker.
+  const charityConverted = {};
+  CHARITY_CURRENCIES.forEach(c => {
+    const minor = convertCharitySums(charitySums, c);
+    if (minor == null) return;
+    charityConverted[c] = {
+      text: formatMoney(minor, c),
+      exact: charitySums.length === 1 && charitySums[0][0] === c
+    };
+  });
+  const fxDateLabel = fxRates?.date
+    ? new Date(fxRates.date + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
+    : '';
 
   const content = `
     <div class="db-page">
@@ -10467,13 +10516,49 @@ app.get('/', async (req, res) => {
         </div>
         <div class="db-charity-body">
           <span class="db-charity-icon" aria-hidden="true">❤</span>
-          <div>
-            <div class="db-charity-figures">
+          <div class="db-charity-main">
+            <div class="db-charity-figures" id="dbCharityFigures">
               ${charitySums.map(([c, m]) => `<span class="db-charity-amount">${escapeHtml(formatMoney(m, c))}</span>`).join('<span class="db-charity-sep">+</span>')}
             </div>
             <div class="db-charity-sub">raised by ${charityPublic.length} ${charityPublic.length === 1 ? 'team or affiliate' : 'teams &amp; affiliates'} during ${escapeHtml(activeEvent.name || 'WorldFlight')}</div>
+            <div class="db-charity-fx" id="dbCharityFx" hidden>Converted at the European Central Bank rate for ${escapeHtml(fxDateLabel)}</div>
           </div>
+          ${Object.keys(charityConverted).length ? `
+          <label class="db-charity-cur">
+            <span>Show in</span>
+            <select id="dbCharityCurrency">
+              <option value="">As raised</option>
+              ${Object.keys(charityConverted).map(c => `<option value="${c}">${c}</option>`).join('')}
+            </select>
+          </label>` : ''}
         </div>
+        ${Object.keys(charityConverted).length ? `<script>
+          (function () {
+            var CONVERTED = ${JSON.stringify(charityConverted).replace(/</g, '\\u003c')};
+            var sel = document.getElementById('dbCharityCurrency');
+            var figs = document.getElementById('dbCharityFigures');
+            var fx = document.getElementById('dbCharityFx');
+            var original = figs.innerHTML;
+            var KEY = 'wfCharityCurrency';
+            function show(code) {
+              var c = CONVERTED[code];
+              if (!c) { figs.innerHTML = original; fx.hidden = true; return; }
+              figs.textContent = '';
+              var amt = document.createElement('span');
+              amt.className = 'db-charity-amount';
+              amt.textContent = (c.exact ? '' : '≈ ') + c.text;
+              figs.appendChild(amt);
+              fx.hidden = c.exact;
+            }
+            var saved = '';
+            try { saved = localStorage.getItem(KEY) || ''; } catch (e) {}
+            if (saved && CONVERTED[saved]) { sel.value = saved; show(saved); }
+            sel.addEventListener('change', function () {
+              try { localStorage.setItem(KEY, sel.value); } catch (e) {}
+              show(sel.value);
+            });
+          })();
+        </script>` : ''}
       </div>` : ''}
 
       ${nextSector ? `
@@ -10674,7 +10759,20 @@ app.get('/', async (req, res) => {
       }
 
       /* Raised for Charity - same pink as the Our Total banner. */
-      .db-charity-body { display: flex; align-items: center; gap: 16px; }
+      .db-charity-body { display: flex; align-items: center; gap: 18px; padding: 22px 24px 24px; }
+      .db-charity-main { flex: 1 1 auto; min-width: 0; }
+      .db-charity-cur { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; font-size: 12px; color: var(--muted, #94a3b8); }
+      .db-charity-cur select {
+        padding: 6px 10px; font-size: 13px; font-family: inherit; cursor: pointer;
+        background: var(--panel2, #0b1220); color: var(--text, #e2e8f0);
+        border: 1px solid var(--border, #1e293b); border-radius: 8px;
+      }
+      .db-charity-fx { margin-top: 6px; font-size: 11px; color: var(--muted, #94a3b8); }
+      .db-charity-fx[hidden] { display: none; }
+      @media (max-width: 600px) {
+        .db-charity-body { flex-wrap: wrap; }
+        .db-charity-cur { width: 100%; }
+      }
       .db-charity-icon { font-size: 30px; color: #f472b6; flex: 0 0 auto; line-height: 1; }
       .db-charity-figures { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
       .db-charity-amount { font-size: 32px; font-weight: 800; color: var(--text, #e2e8f0); line-height: 1.15; }
