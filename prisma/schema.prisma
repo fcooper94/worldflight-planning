@@ -831,3 +831,22 @@ model CharityTotal {
   @@unique([entityType, entityName, eventId])
   @@index([eventId])
 }
+
+// Screenshots users submit for the dashboard gallery (shown outside event
+// time). Stored in the DB like ProfilePhoto, since Railway's disk does not
+// survive a deploy. Nothing is public until an admin approves it.
+model GalleryScreenshot {
+  id          Int       @id @default(autoincrement())
+  cid         Int
+  submittedBy String    // the submitter's name at the time
+  location    String?   // optional, as the submitter typed it
+  mime        String
+  data        Bytes
+  status      String    @default("pending")   // pending | approved | rejected
+  reviewedBy  Int?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([status])
+  @@index([cid])
+}

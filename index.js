@@ -2103,7 +2103,7 @@ const ADMIN_PAGE_KEYS = [
   'wf-schedule', 'official-teams', 'scenery', 'access-management',
   'visited-airports', 'suggestions', 'mailing-list', 'settings',
   'airac', 'test-pilots', 'controller-pack', 'documents-scenery',
-  'wf-challenge', 'feedback'
+  'wf-challenge', 'feedback', 'screenshots'
 ];
 
 const ADMIN_PAGE_LABELS = {
@@ -2120,7 +2120,8 @@ const ADMIN_PAGE_LABELS = {
   'controller-pack': 'Controller Pack',
   'documents-scenery': 'Documents & Scenery',
   'wf-challenge': 'WF Challenge Scoring',
-  'feedback': 'Feedback'
+  'feedback': 'Feedback',
+  'screenshots': 'Screenshot Gallery'
 };
 
 async function loadAdminPermissions() {
@@ -10473,6 +10474,26 @@ app.get('/', async (req, res) => {
   // none of it reaches the page.
   if (!(isAdmin || isPageEnabled('schedule'))) nextSector = null;
 
+  // Next Sector and Schedule Preview are for the event itself: from the
+  // first leg's departure window opening (dep -60) to the last leg's arrival
+  // window closing (arr +60). Before and after, admins included, they stay
+  // off the dashboard.
+  const _legArrMs = (r) => {
+    const toMin = s => { const m = /^(\d{1,2}):?(\d{2})$/.exec(String(s || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+    const dep = toMin(r.dep_time_utc), arr = toMin(r.arr_time_utc);
+    if (arr == null) return _legDepMs(r);
+    return utcInstantMs(r.date_utc, r.arr_time_utc, dep != null && arr < dep ? 1440 : 0);
+  };
+  const _depTimes = _nsRows.map(_legDepMs).filter(ms => ms != null);
+  const _arrTimes = _nsRows.map(_legArrMs).filter(ms => ms != null);
+  const eventLive = _depTimes.length > 0 && _arrTimes.length > 0
+    && _nsNow >= Math.min(..._depTimes) - NS_DEP_WINDOW_MS
+    && _nsNow <= Math.max(..._arrTimes) + NS_DEP_WINDOW_MS;
+  if (!eventLive) nextSector = null;
+
+  // Outside the event the dashboard shows the screenshot gallery instead.
+  const galleryShots = eventLive ? [] : await loadApprovedScreenshots();
+
   // Departure instant for the sector date. The client formats it to the
   // viewer's own locale; this is only the value and a server-side fallback.
   // Dated by when the departure window opens, not the scheduled departure, so
@@ -10625,6 +10646,13 @@ app.get('/', async (req, res) => {
         <div class="db-hero-text">
           <h1 class="db-greeting">${greeting}</h1>
           <p class="db-subtitle">${activeEvent.name || 'No active event'}</p>
+          <div class="db-intro">
+            <div class="db-intro-eyebrow">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></svg>
+              About WorldFlight <span class="db-intro-since">Since 1999</span>
+            </div>
+            <p>Running since 1999, WorldFlight is an annual, week-long charity flight simulation event that brings together virtual pilots, air traffic controllers and aviation enthusiasts from around the world. Flying continuously around the globe on the <a href="https://vatsim.net" target="_blank" rel="noopener">VATSIM</a> network, participants join official simulator teams in raising money for charities while celebrating their shared passion for aviation.</p>
+          </div>
         </div>
       </div>
 
@@ -10683,6 +10711,77 @@ app.get('/', async (req, res) => {
               try { localStorage.setItem(KEY, sel.value); } catch (e) {}
               show(sel.value);
             });
+          })();
+        </script>` : ''}
+      </div>` : ''}
+
+      ${!eventLive ? `
+      <div class="db-section db-gallery">
+        <div class="db-section-header">
+          <h2 class="db-section-title">WorldFlight Gallery</h2>
+          ${galleryShots.length > 1 ? `<span class="db-gal-count" id="dbGalCount">1 / ${galleryShots.length}</span>` : ''}
+        </div>
+        ${galleryShots.length ? `
+        <div class="db-gal-stage" id="dbGallery" tabindex="0" aria-roledescription="carousel" aria-label="WorldFlight screenshots">
+          ${galleryShots.map((s, i) => `
+          <figure class="db-gal-slide${i === 0 ? ' is-active' : ''}" aria-hidden="${i === 0 ? 'false' : 'true'}">
+            <img ${i < 2 ? 'src' : 'data-src'}="/api/screenshots/${s.id}/image"
+              alt="WorldFlight screenshot${s.location ? ' - ' + escapeHtml(s.location) : ''}, submitted by ${escapeHtml(s.submittedBy)}" />
+            <figcaption class="db-gal-cap">
+              <span>Submitted by <strong>${escapeHtml(s.submittedBy)}</strong></span>
+              ${s.location ? `<span class="db-gal-loc"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10c0 7-8 13-8 13s-8-6-8-13a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>${escapeHtml(s.location)}</span>` : ''}
+            </figcaption>
+          </figure>`).join('')}
+          ${galleryShots.length > 1 ? `
+          <button type="button" class="db-gal-arrow db-gal-prev" aria-label="Previous screenshot"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <button type="button" class="db-gal-arrow db-gal-next" aria-label="Next screenshot"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>` : ''}
+        </div>` : `<p class="db-gal-empty">No screenshots in the gallery yet. Flew WorldFlight? Share a shot below.</p>`}
+        <div class="db-gal-foot">
+          <a class="db-gal-submit" href="${user ? '/screenshots/submit' : '/auth/login'}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+            Submit WorldFlight Screenshot
+          </a>
+        </div>
+        ${galleryShots.length > 1 ? `<script>
+          (function () {
+            var stage = document.getElementById('dbGallery');
+            var slides = Array.prototype.slice.call(stage.querySelectorAll('.db-gal-slide'));
+            var count = document.getElementById('dbGalCount');
+            var i = 0, timer = null, paused = false;
+            var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+            // Load an image only when it is next up, so the dashboard does not
+            // pull the whole gallery on every visit.
+            function load(n) {
+              var img = slides[n] && slides[n].querySelector('img[data-src]');
+              if (img) { img.src = img.getAttribute('data-src'); img.removeAttribute('data-src'); }
+            }
+            function go(n) {
+              slides[i].classList.remove('is-active');
+              slides[i].setAttribute('aria-hidden', 'true');
+              i = (n + slides.length) % slides.length;
+              load(i);
+              load((i + 1) % slides.length);
+              slides[i].classList.add('is-active');
+              slides[i].setAttribute('aria-hidden', 'false');
+              count.textContent = (i + 1) + ' / ' + slides.length;
+            }
+            function restart() {
+              clearInterval(timer);
+              if (!reduce && !paused) timer = setInterval(function () { if (!document.hidden) go(i + 1); }, 6000);
+            }
+            stage.querySelector('.db-gal-prev').addEventListener('click', function () { go(i - 1); restart(); });
+            stage.querySelector('.db-gal-next').addEventListener('click', function () { go(i + 1); restart(); });
+            stage.addEventListener('keydown', function (e) {
+              if (e.key === 'ArrowLeft') { go(i - 1); restart(); }
+              if (e.key === 'ArrowRight') { go(i + 1); restart(); }
+            });
+            // Hold still while someone is looking closely.
+            stage.addEventListener('mouseenter', function () { paused = true; restart(); });
+            stage.addEventListener('mouseleave', function () { paused = false; restart(); });
+            stage.addEventListener('focusin', function () { paused = true; restart(); });
+            stage.addEventListener('focusout', function () { paused = false; restart(); });
+            restart();
           })();
         </script>` : ''}
       </div>` : ''}
@@ -10835,7 +10934,7 @@ app.get('/', async (req, res) => {
         </div>
       </div>` : ''}
 
-      ${adminSheetCache.length > 0 && (isAdmin || isPageEnabled('schedule')) ? `
+      ${eventLive && adminSheetCache.length > 0 && (isAdmin || isPageEnabled('schedule')) ? `
       <div class="db-section">
         <div class="db-section-header">
           <h2 class="db-section-title">Schedule Preview</h2>
@@ -10884,6 +10983,51 @@ app.get('/', async (req, res) => {
         gap: 16px;
       }
 
+      /* WorldFlight Gallery - approved screenshots, outside event time. */
+      .db-gal-count { font-size: 12px; color: var(--muted, #94a3b8); font-variant-numeric: tabular-nums; }
+      .db-gal-stage {
+        position: relative; aspect-ratio: 16 / 9; background: #000; overflow: hidden;
+        border-bottom: 1px solid var(--border, rgba(255,255,255,0.07));
+      }
+      .db-gal-stage:focus-visible { outline: 2px solid var(--accent, #38bdf8); outline-offset: -2px; }
+      .db-gal-slide { position: absolute; inset: 0; margin: 0; opacity: 0; transition: opacity 0.6s ease; }
+      .db-gal-slide.is-active { opacity: 1; }
+      .db-gal-slide img { width: 100%; height: 100%; object-fit: contain; display: block; }
+      .db-gal-cap {
+        position: absolute; left: 0; right: 0; bottom: 0;
+        display: flex; justify-content: space-between; align-items: flex-end; gap: 8px 16px; flex-wrap: wrap;
+        padding: 40px 18px 14px; font-size: 13px; color: #f1f5f9;
+        background: linear-gradient(to top, rgba(0,0,0,0.78), rgba(0,0,0,0));
+        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+      }
+      .db-gal-cap strong { color: #fff; }
+      .db-gal-loc { display: inline-flex; align-items: center; gap: 5px; }
+      .db-gal-arrow {
+        position: absolute; top: 50%; transform: translateY(-50%);
+        width: 42px; height: 42px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25);
+        background: rgba(2,6,23,0.55); color: #fff; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; transition: background 0.15s;
+      }
+      .db-gal-arrow:hover, .db-gal-arrow:focus-visible { background: rgba(2,6,23,0.85); outline: none; }
+      .db-gal-prev { left: 14px; }
+      .db-gal-next { right: 14px; }
+      .db-gal-empty { margin: 0; padding: 28px 24px; font-size: 13px; color: var(--muted, #94a3b8); text-align: center; }
+      .db-gal-foot { display: flex; justify-content: center; padding: 16px 24px 18px; }
+      .db-gal-submit {
+        display: inline-flex; align-items: center; gap: 7px; padding: 7px 14px; border-radius: 8px;
+        font-size: 12px; font-weight: 600; text-decoration: none; color: var(--muted, #94a3b8);
+        background: transparent; border: 1px solid var(--border, rgba(255,255,255,0.12));
+        transition: color 0.15s, border-color 0.15s, background 0.15s;
+      }
+      .db-gal-submit:hover {
+        color: var(--accent, #38bdf8); border-color: var(--accent, #38bdf8);
+        background: color-mix(in srgb, var(--accent, #38bdf8) 8%, transparent);
+      }
+      @media (max-width: 600px) {
+        .db-gal-arrow { width: 34px; height: 34px; }
+        .db-gal-cap { font-size: 12px; padding: 30px 12px 10px; }
+      }
+
       /* Raised for Charity - same pink as the Our Total banner. */
       .db-charity-body { display: flex; align-items: center; gap: 18px; padding: 22px 24px 24px; }
       .db-charity-main { flex: 1 1 auto; min-width: 0; }
@@ -10913,6 +11057,38 @@ app.get('/', async (req, res) => {
         color: var(--muted, #94a3b8);
         margin: 4px 0 0;
       }
+      /* The hero is a flex row; let its text column take the full width so
+         the intro panel lines up with the cards below. */
+      .db-hero-text { flex: 1 1 auto; min-width: 0; }
+      .db-intro {
+        margin: 16px 0 0;
+        padding: 14px 18px 15px;
+        border-radius: 12px;
+        border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 22%, var(--border, rgba(255,255,255,0.07)));
+        border-left: 3px solid var(--accent, #38bdf8);
+        background: linear-gradient(135deg,
+          color-mix(in srgb, var(--accent, #38bdf8) 9%, transparent),
+          color-mix(in srgb, var(--accent, #38bdf8) 2%, transparent) 70%);
+      }
+      .db-intro-eyebrow {
+        display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
+        font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--accent, #38bdf8);
+      }
+      .db-intro-since {
+        padding: 2px 8px; border-radius: 999px; letter-spacing: 0.04em;
+        font-size: 10px; font-weight: 700; color: var(--text, #e2e8f0);
+        background: color-mix(in srgb, var(--accent, #38bdf8) 18%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 35%, transparent);
+      }
+      .db-intro p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.7;
+        color: color-mix(in srgb, var(--text, #e2e8f0) 85%, transparent);
+      }
+      .db-intro a { color: var(--accent, #38bdf8); text-decoration: none; font-weight: 600; }
+      .db-intro a:hover { text-decoration: underline; }
 
       .db-stats {
         display: grid;
@@ -28883,6 +29059,7 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
   try {
     staffAccessCount = await prisma.staffAccessRequest.count({ where: { status: 'PENDING' } });
   } catch (e) {}
+  const pendingScreenshots = await prisma.galleryScreenshot?.count({ where: { status: 'pending' } }).catch(() => 0) || 0;
   try {
     const navDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'navdata');
     const info = parseAiracHeader(path.join(navDir, 'earth_fix.dat')) || parseAiracHeader(path.join(navDir, 'earth_awy.dat'));
@@ -28919,7 +29096,8 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
     { key: 'wf-atc-admin', title: 'WF ATC Team', desc: 'Manage the WorldFlight ATC team — add/remove members and view notification preferences.', icon: adminIcons.headphones, href: '/admin/wf-atc', badge: null },
     { key: 'controller-pack', title: 'Controller Pack', desc: 'Generate EuroScope controller pack files for WorldFlight airports.', icon: adminIcons.headphones, href: '/admin/controller-pack', badge: null },
     { key: 'wf-challenge', title: 'WF Challenge Scoring', desc: 'Enter flypast scores and manage the live WF Challenge scoreboard.', icon: adminIcons.star, href: '/admin/wf-challenge', badge: null },
-    { key: 'feedback', title: 'Feedback', desc: 'Post-event feedback: average scores by question and role, every written comment, and a CSV export.', icon: adminIcons.bulb, href: '/admin/feedback', badge: null }
+    { key: 'feedback', title: 'Feedback', desc: 'Post-event feedback: average scores by question and role, every written comment, and a CSV export.', icon: adminIcons.bulb, href: '/admin/feedback', badge: null },
+    { key: 'screenshots', title: 'Screenshot Gallery', desc: 'Approve or reject the screenshots users submit for the dashboard gallery.', icon: adminIcons.image, href: '/admin/screenshots', badge: pendingScreenshots > 0 ? pendingScreenshots : null }
   ];
 
   // Super admins see all sections; granular admins see only their permitted pages
@@ -48049,6 +48227,388 @@ app.get('/our-total', requireLogin, async (req, res) => {
     ${charityTotalScript()}`;
 
   res.send(renderLayout({ title: 'Our Total', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+/* ===== SCREENSHOT GALLERY =====
+   Users submit WorldFlight screenshots; an admin approves them on
+   Admin > Screenshot Gallery; approved ones rotate on the dashboard outside
+   event time. Images live in the DB (GalleryScreenshot). The submit page
+   shrinks and re-encodes in the browser, so a row is a few hundred KB; the
+   server still checks the bytes and strips EXIF, as the page can be skipped. */
+const SCREENSHOT_MAX_BYTES = 8 * 1024 * 1024;
+const SCREENSHOT_MAX_PENDING = 5;   // per CID, so one person cannot flood the queue
+const screenshotUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: SCREENSHOT_MAX_BYTES, files: 1 }
+});
+
+// The real type, from the file's first bytes - never the browser's word.
+function sniffImageMime(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'image/png';
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+// Drop APP1 segments (EXIF / XMP - where a phone puts GPS) from a JPEG.
+// Walks the header markers up to the start of the image data and leaves
+// everything else untouched; anything it does not understand is kept as is.
+function stripJpegExif(buf) {
+  if (buf.length < 4 || buf[0] !== 0xFF || buf[1] !== 0xD8) return buf;
+  const parts = [buf.subarray(0, 2)];
+  let i = 2;
+  while (i + 4 <= buf.length && buf[i] === 0xFF) {
+    const marker = buf[i + 1];
+    if (marker === 0xDA) break;                 // start of scan: image data follows
+    const len = buf.readUInt16BE(i + 2);
+    if (len < 2 || i + 2 + len > buf.length) break;
+    if (marker !== 0xE1) parts.push(buf.subarray(i, i + 2 + len));
+    i += 2 + len;
+  }
+  parts.push(buf.subarray(i));
+  return Buffer.concat(parts);
+}
+
+// Approved screenshots for the dashboard, newest first, without the bytes.
+async function loadApprovedScreenshots(limit = 60) {
+  return await prisma.galleryScreenshot?.findMany({
+    where: { status: 'approved' },
+    select: { id: true, submittedBy: true, location: true },
+    orderBy: { reviewedAt: 'desc' },
+    take: limit
+  }).catch(() => []) || [];
+}
+
+const SCREENSHOT_STATUS_LABEL = { pending: 'Waiting for approval', approved: 'Approved', rejected: 'Not approved' };
+
+app.get('/screenshots/submit', requireLogin, async (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  const isAdmin = isAdminUser(cid);
+  const mine = await prisma.galleryScreenshot?.findMany({
+    where: { cid },
+    select: { id: true, location: true, status: true, createdAt: true },
+    orderBy: { createdAt: 'desc' },
+    take: 20
+  }).catch(() => []) || [];
+
+  const content = `
+    <section class="card ss-card">
+      <h2 style="margin:0 0 6px;">Submit a WorldFlight Screenshot</h2>
+      <p class="ss-lead">Share a shot from your WorldFlight. Once approved it joins the gallery on the dashboard, with your name and, if you add one, where it was taken.</p>
+
+      <form id="ssForm" class="ss-form">
+        <label class="ss-drop" id="ssDrop">
+          <input type="file" id="ssFile" accept="image/jpeg,image/png,image/webp" required />
+          <img id="ssPreview" alt="" hidden />
+          <span class="ss-drop-text" id="ssDropText">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+            <strong>Choose a screenshot</strong>
+            <span>JPEG, PNG or WebP</span>
+          </span>
+        </label>
+        <label class="ss-field">Location <span class="ss-opt">(optional)</span>
+          <input type="text" id="ssLocation" maxlength="80" placeholder="e.g. Approaching Hong Kong, WF2605" />
+        </label>
+        <div class="ss-actions">
+          <button type="submit" class="action-btn primary" id="ssSubmit">Submit screenshot</button>
+          <span class="ss-msg" id="ssMsg" hidden></span>
+        </div>
+      </form>
+    </section>
+
+    ${mine.length ? `
+    <section class="card ss-card">
+      <h3 class="section-title" style="margin:0 0 12px;">Your submissions</h3>
+      <div class="ss-mine">
+        ${mine.map(s => `<div class="ss-mine-item">
+          <img src="/api/screenshots/${s.id}/image" alt="" loading="lazy" />
+          <div class="ss-mine-meta">
+            <span class="ss-status ss-status-${s.status}">${SCREENSHOT_STATUS_LABEL[s.status] || escapeHtml(s.status)}</span>
+            ${s.location ? `<span class="ss-mine-loc">${escapeHtml(s.location)}</span>` : ''}
+            <span class="ss-mine-date">${new Date(s.createdAt).toISOString().slice(0, 10)}</span>
+          </div>
+        </div>`).join('')}
+      </div>
+    </section>` : ''}
+
+    <style>
+      .ss-card { max-width: 760px; margin: 0 auto 20px; padding: 24px; }
+      .ss-lead { margin: 0 0 18px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+      .ss-form { display: flex; flex-direction: column; gap: 16px; }
+      .ss-drop {
+        position: relative; display: flex; align-items: center; justify-content: center;
+        min-height: 220px; border: 2px dashed var(--border); border-radius: 12px;
+        background: var(--panel2); cursor: pointer; overflow: hidden;
+      }
+      .ss-drop:hover { border-color: var(--accent); }
+      .ss-drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+      .ss-drop img { display: block; max-width: 100%; max-height: 420px; }
+      .ss-drop-text { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; pointer-events: none; }
+      /* display rules above would otherwise beat the hidden attribute, leaving
+         the prompt beside the preview once a file is chosen. */
+      .ss-drop-text[hidden], .ss-drop img[hidden] { display: none; }
+      .ss-drop-text strong { color: var(--text); font-size: 14px; }
+      .ss-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+      .ss-field input {
+        padding: 9px 12px; font-size: 13px; font-family: inherit; border-radius: 8px;
+        border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+        text-transform: none; text-align: left;
+      }
+      .ss-field input:focus { outline: none; border-color: var(--accent); }
+      .ss-opt { color: var(--muted); font-weight: 400; }
+      .ss-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .ss-msg { font-size: 13px; }
+      .ss-mine { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+      .ss-mine-item { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel2); }
+      .ss-mine-item img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #000; }
+      .ss-mine-meta { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; font-size: 11px; color: var(--muted); }
+      .ss-status { font-weight: 700; }
+      .ss-status-pending { color: #f59e0b; }
+      .ss-status-approved { color: #4ade80; }
+      .ss-status-rejected { color: #f87171; }
+      .ss-mine-loc { color: var(--text); }
+    </style>
+
+    <script>
+    (function () {
+      var form = document.getElementById('ssForm');
+      var file = document.getElementById('ssFile');
+      var preview = document.getElementById('ssPreview');
+      var dropText = document.getElementById('ssDropText');
+      var msg = document.getElementById('ssMsg');
+      var btn = document.getElementById('ssSubmit');
+
+      file.addEventListener('change', function () {
+        var f = file.files && file.files[0];
+        if (!f) { preview.hidden = true; dropText.hidden = false; return; }
+        preview.src = URL.createObjectURL(f);
+        preview.hidden = false;
+        dropText.hidden = true;
+      });
+
+      // Shrink to 2560px on the long side and re-encode as JPEG. Keeps the
+      // upload small and drops the camera metadata. If the browser cannot do
+      // it, the original goes up and the server checks it anyway.
+      async function shrink(f) {
+        try {
+          var bmp = await createImageBitmap(f);
+          var scale = Math.min(1, 2560 / Math.max(bmp.width, bmp.height));
+          var c = document.createElement('canvas');
+          c.width = Math.round(bmp.width * scale);
+          c.height = Math.round(bmp.height * scale);
+          c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+          var blob = await new Promise(function (r) { c.toBlob(r, 'image/jpeg', 0.88); });
+          return blob || f;
+        } catch (e) { return f; }
+      }
+
+      function say(text, ok) {
+        msg.textContent = text;
+        msg.style.color = ok ? '#4ade80' : '#f87171';
+        msg.hidden = false;
+      }
+
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        var f = file.files && file.files[0];
+        if (!f) { say('Choose a screenshot first.'); return; }
+        btn.disabled = true;
+        msg.hidden = true;
+        try {
+          var img = await shrink(f);
+          var fd = new FormData();
+          fd.append('screenshot', img, 'screenshot.jpg');
+          fd.append('location', document.getElementById('ssLocation').value || '');
+          var r = await fetch('/api/screenshots', { method: 'POST', body: fd, credentials: 'same-origin' });
+          var d = await r.json().catch(function () { return {}; });
+          if (!r.ok) throw new Error(d.error || 'Upload failed');
+          say('Thanks! Your screenshot is waiting for approval.', true);
+          setTimeout(function () { location.reload(); }, 1400);
+        } catch (err) {
+          say(err.message || 'Upload failed');
+          btn.disabled = false;
+        }
+      });
+    })();
+    </script>`;
+
+  res.send(renderLayout({ title: 'Submit a Screenshot', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/api/screenshots', requireLogin, (req, res, next) => {
+  screenshotUpload.single('screenshot')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'That image is too large (8 MB max).' : 'Upload failed: ' + err.message });
+    next();
+  });
+}, async (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  if (!prisma.galleryScreenshot) return res.status(503).json({ error: 'Screenshot uploads are not available yet.' });
+  if (!req.file?.buffer) return res.status(400).json({ error: 'Choose a screenshot to upload.' });
+
+  const mime = sniffImageMime(req.file.buffer);
+  if (!mime) return res.status(400).json({ error: 'That file is not a JPEG, PNG or WebP image.' });
+  const data = mime === 'image/jpeg' ? stripJpegExif(req.file.buffer) : req.file.buffer;
+
+  const pending = await prisma.galleryScreenshot.count({ where: { cid, status: 'pending' } }).catch(() => 0);
+  if (pending >= SCREENSHOT_MAX_PENDING) {
+    return res.status(429).json({ error: `You have ${pending} screenshots waiting for approval - please wait for those to be reviewed first.` });
+  }
+
+  const name = String(user.personal?.name_full || '').trim()
+    || (await prisma.user.findUnique({ where: { cid } }).catch(() => null))?.name
+    || `CID ${cid}`;
+  const location = String(req.body?.location || '').trim().slice(0, 80) || null;
+
+  try {
+    const created = await prisma.galleryScreenshot.create({
+      data: { cid, submittedBy: name.slice(0, 80), location, mime, data }
+    });
+    console.log(`[GALLERY] Screenshot #${created.id} submitted by CID ${cid} (${Math.round(data.length / 1024)} KB)`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[GALLERY] save failed:', e.message);
+    res.status(500).json({ error: 'Could not save your screenshot.' });
+  }
+});
+
+// Approved images are public. Pending and rejected ones only reach the
+// submitter and admins with the gallery permission.
+app.get('/api/screenshots/:id/image', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id || !prisma.galleryScreenshot) return res.status(404).send('Not found');
+  const s = await prisma.galleryScreenshot.findUnique({ where: { id } }).catch(() => null);
+  if (!s) return res.status(404).send('Not found');
+  if (s.status !== 'approved') {
+    const cid = Number(req.session?.user?.data?.cid);
+    if (!cid || (cid !== s.cid && !hasAdminPageAccess(cid, 'screenshots'))) return res.status(404).send('Not found');
+    res.set('Cache-Control', 'private, no-store');
+  } else {
+    res.set('Cache-Control', 'public, max-age=86400');
+  }
+  res.set('Content-Type', s.mime);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.send(Buffer.from(s.data));
+});
+
+app.get('/admin/screenshots', requireAdminPage('screenshots'), async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = isAdminUser(Number(user.cid));
+  const status = ['pending', 'approved', 'rejected'].includes(req.query.status) ? req.query.status : 'pending';
+
+  const [rows, counts] = await Promise.all([
+    prisma.galleryScreenshot?.findMany({
+      where: { status },
+      select: { id: true, cid: true, submittedBy: true, location: true, createdAt: true, reviewedAt: true },
+      orderBy: { createdAt: status === 'pending' ? 'asc' : 'desc' }
+    }).catch(() => []) || [],
+    prisma.galleryScreenshot?.groupBy({ by: ['status'], _count: { _all: true } }).catch(() => []) || []
+  ]);
+  const countOf = (s) => counts.find(c => c.status === s)?._count?._all || 0;
+
+  const actionsFor = (id) => ({
+    pending:  [['approve', 'Approve', 'primary'], ['reject', 'Reject', '']],
+    approved: [['reject', 'Remove from gallery', ''], ['delete', 'Delete', 'danger']],
+    rejected: [['approve', 'Approve', 'primary'], ['delete', 'Delete', 'danger']]
+  }[status].map(([action, label, cls]) =>
+    `<button type="button" class="action-btn ${cls} sa-act" data-id="${id}" data-action="${action}">${label}</button>`).join(''));
+
+  const content = `
+    <section class="card card-full">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:16px;">
+        <div>
+          <h2 style="margin:0 0 4px;">Screenshot Gallery</h2>
+          <p style="margin:0;color:var(--muted);font-size:13px;">Approved screenshots rotate on the dashboard outside event time.</p>
+        </div>
+        <a href="/screenshots/submit" class="action-btn" style="text-decoration:none;">Submit one yourself</a>
+      </div>
+
+      <div class="sa-tabs">
+        ${['pending', 'approved', 'rejected'].map(s => `<a href="/admin/screenshots?status=${s}" class="sa-tab${s === status ? ' is-active' : ''}">${{ pending: 'Pending', approved: 'Approved', rejected: 'Rejected' }[s]} <span>${countOf(s)}</span></a>`).join('')}
+      </div>
+
+      ${rows.length ? `<div class="sa-grid">
+        ${rows.map(s => `<div class="sa-item" id="sa-${s.id}">
+          <a href="/api/screenshots/${s.id}/image" target="_blank" rel="noopener" class="sa-img"><img src="/api/screenshots/${s.id}/image" alt="" loading="lazy" /></a>
+          <div class="sa-meta">
+            <div class="sa-who">${escapeHtml(s.submittedBy)} <span>CID ${s.cid}</span></div>
+            ${s.location ? `<div class="sa-loc">${escapeHtml(s.location)}</div>` : '<div class="sa-loc sa-none">No location</div>'}
+            <div class="sa-date">Submitted ${new Date(s.createdAt).toISOString().slice(0, 16).replace('T', ' ')}z</div>
+          </div>
+          <div class="sa-actions">${actionsFor(s.id)}</div>
+        </div>`).join('')}
+      </div>` : `<p style="color:var(--muted);font-size:13px;margin:20px 0 0;">${status === 'pending' ? 'Nothing waiting for approval.' : 'None here yet.'}</p>`}
+    </section>
+
+    <style>
+      .sa-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+      .sa-tab {
+        padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--muted); text-decoration: none;
+        border-bottom: 2px solid transparent; margin-bottom: -1px;
+      }
+      .sa-tab span { font-size: 11px; color: var(--muted); margin-left: 4px; }
+      .sa-tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+      .sa-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+      .sa-item { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel2); }
+      .sa-img { display: block; background: #000; }
+      .sa-img img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; }
+      .sa-meta { padding: 10px 12px 4px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+      .sa-who { font-weight: 700; font-size: 13px; }
+      .sa-who span { font-weight: 400; color: var(--muted); font-size: 11px; margin-left: 4px; }
+      .sa-loc { color: var(--text); }
+      .sa-none, .sa-date { color: var(--muted); }
+      .sa-actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 12px 12px; margin-top: auto; }
+      .sa-actions .danger { color: #f87171; border-color: rgba(248,113,113,0.4); }
+    </style>
+
+    <script>
+    document.addEventListener('click', async function (e) {
+      var b = e.target.closest('.sa-act');
+      if (!b) return;
+      if (b.dataset.action === 'delete' && !confirm('Delete this screenshot permanently?')) return;
+      var item = document.getElementById('sa-' + b.dataset.id);
+      item.querySelectorAll('button').forEach(function (x) { x.disabled = true; });
+      try {
+        var r = await fetch('/admin/api/screenshots/' + b.dataset.id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ action: b.dataset.action })
+        });
+        if (!r.ok) throw new Error();
+        location.reload();
+      } catch (err) {
+        alert('Could not update that screenshot.');
+        item.querySelectorAll('button').forEach(function (x) { x.disabled = false; });
+      }
+    });
+    </script>`;
+
+  res.send(renderLayout({ title: 'Screenshot Gallery', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+app.post('/admin/api/screenshots/:id', requireAdminPage('screenshots'), async (req, res) => {
+  const id = Number(req.params.id);
+  const action = req.body?.action;
+  const cid = Number(req.session.user.data.cid);
+  if (!id || !['approve', 'reject', 'delete'].includes(action)) return res.status(400).json({ error: 'Bad request' });
+  try {
+    if (action === 'delete') {
+      await prisma.galleryScreenshot.delete({ where: { id } });
+    } else {
+      await prisma.galleryScreenshot.update({
+        where: { id },
+        data: { status: action === 'approve' ? 'approved' : 'rejected', reviewedBy: cid, reviewedAt: new Date() }
+      });
+    }
+    console.log(`[GALLERY] Screenshot #${id} ${action}d by CID ${cid}`);
+    res.json({ success: true });
+  } catch (e) {
+    if (e.code === 'P2025') return res.status(404).json({ error: 'Not found' });
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/feedback', requirePageEnabled('wf-feedback'), async (req, res) => {

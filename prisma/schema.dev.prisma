@@ -786,3 +786,19 @@ model CharityTotal {
   @@unique([entityType, entityName, eventId])
   @@index([eventId])
 }
+
+model GalleryScreenshot {
+  id          Int       @id @default(autoincrement())
+  cid         Int
+  submittedBy String
+  location    String?
+  mime        String
+  data        Bytes
+  status      String    @default("pending")
+  reviewedBy  Int?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([status])
+  @@index([cid])
+}
