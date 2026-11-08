@@ -25989,6 +25989,11 @@ app.get('/team/hq', requireLogin, async (req, res) => {
       }).catch(() => null)
     : null;
 
+  // The route is not public until the schedule page is. Team members are
+  // not admins, so without this the whole running order leaks here while
+  // /schedule itself is hidden. Affiliate HQ and the roster already gate on
+  // this; Team HQ only ever hid the "View full schedule" link.
+  const showSchedule = isAdmin || isPageEnabled('schedule');
   const showAtcRoute = isAdmin || isPageEnabled('atc-route');
   // isAdminUser is deliberately NOT enough for flow/status: any granular grant
   // (scenery, suggestions, …) counts as "admin", and a member with only those
@@ -26043,7 +26048,9 @@ app.get('/team/hq', requireLogin, async (req, res) => {
     teamBookingBySector[`${p[0]}|${p[1]}|${p[2]}`] = b;
   });
   // Only the option this team is on - see legOptionsVisibleTo().
-  const teamLegRows = legOptionsVisibleTo((adminSheetCache || []).filter(r => r.number), 'team', teamCallsigns);
+  const teamLegRows = showSchedule
+    ? legOptionsVisibleTo((adminSheetCache || []).filter(r => r.number), 'team', teamCallsigns)
+    : [];
   const sectorRows = teamLegRows.map(r => ({
     wfRow: r,
     sector: r.number,
@@ -26397,7 +26404,12 @@ app.get('/team/hq', requireLogin, async (req, res) => {
           ${isPageEnabled('schedule') || isAdmin ? `<a href="/schedule" class="aff-schedule-link">View full schedule</a>` : ''}
         </header>
 
-        ${isMultiSlot ? multiSlotTable : !sectorRows.length ? `
+        ${!showSchedule ? `
+          <div class="ot-empty">
+            <div class="ot-empty-title">Route not yet announced</div>
+            <div class="ot-empty-sub">Your sectors and slots will appear here once the schedule is published.</div>
+          </div>
+        ` : isMultiSlot ? multiSlotTable : !sectorRows.length ? `
           <div class="ot-empty">
             <div class="ot-empty-title">No sectors loaded</div>
             <div class="ot-empty-sub">Check back soon — the schedule hasn't been published yet.</div>
