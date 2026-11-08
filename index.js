@@ -9691,10 +9691,12 @@ async function loadCharityTotal(entityType, entityName) {
   }).catch(() => null) ?? null;
 }
 
-// The "Our Total" card, shared by both HQs so they cannot drift. `canEdit`
-// is the main CID (or an admin); everyone else sees the banner only.
-function charityTotalSection(row, displayName, canEdit, eventName) {
+// The "Our Total" card on /our-total, for teams and affiliates alike.
+// `canEdit` is the main CID (or an admin); everyone else sees the banner
+// only. `entityType` tells the save which of the viewer's groups it is for.
+function charityTotalSection(row, displayName, canEdit, eventName, entityType) {
   const raised = !!row?.raised;
+  const showPublic = row?.showPublic !== false;
   const currency = row?.currency || 'GBP';
   const amountMajor = minorToMajor(row?.amountMinor, currency);
   const amountValue = amountMajor == null
@@ -9737,7 +9739,7 @@ function charityTotalSection(row, displayName, canEdit, eventName) {
         <span style="font-size:11px;color:var(--muted);">Did you raise money while you flew?</span>
       </header>
 
-      <form id="charityForm" class="ct-form">
+      <form id="charityForm" class="ct-form" data-for="${escapeHtml(entityType || '')}">
         <label class="ct-toggle">
           <input type="checkbox" name="raised" ${raised ? 'checked' : ''} />
           <span>We raised money for charity during ${escapeHtml(eventName)}</span>
@@ -9762,6 +9764,10 @@ function charityTotalSection(row, displayName, canEdit, eventName) {
                 `<option value="${c}" ${c === currency ? 'selected' : ''}>${c}</option>`).join('')}
             </select>
           </label>
+          <label class="ct-toggle ct-field-full">
+            <input type="checkbox" name="showPublic" ${showPublic ? 'checked' : ''} />
+            <span>Show money raised to the public <span class="ct-opt">on your card on the Teams &amp; Affiliates page</span></span>
+          </label>
         </div>
 
         <div class="ct-actions">
@@ -9774,7 +9780,38 @@ function charityTotalSection(row, displayName, canEdit, eventName) {
     </section>`;
 }
 
-// One handler for both HQs.
+// The group whose charity total `cid` sees and saves, resolved from the
+// session and never from the request, so nobody reaches another operator's
+// total. `kind` ('team' / 'affiliate') picks one for a CID that is both;
+// without it a team wins, as the save always did. Main CID or admin edits.
+async function resolveCharityGroup(cid, kind) {
+  const isAdmin = isAdminUser(cid);
+  if (kind !== 'affiliate') {
+    const teamName = await resolveUserTeamName(cid).catch(() => null);
+    if (teamName) {
+      const upper = String(teamName).trim().toUpperCase();
+      const fleet = (await prisma.officialTeam.findMany().catch(() => []))
+        .filter(t => String(t.teamName || '').trim().toUpperCase() === upper);
+      return {
+        entityType: 'team',
+        entityName: upper,
+        displayName: (fleet.find(t => t.participatingWf26) || fleet[0])?.teamName || upper,
+        canEdit: isAdmin || fleet.some(t => Number(t.mainCid) === cid)
+      };
+    }
+    if (kind === 'team') return null;
+  }
+  const affiliate = await resolveUserAffiliate(cid).catch(() => null);
+  if (!affiliate) return null;
+  return {
+    entityType: 'affiliate',
+    entityName: charityKeyForAffiliate(affiliate),
+    displayName: affiliate.name || affiliate.callsign,
+    canEdit: isAdmin || Number(affiliate.cid) === cid
+  };
+}
+
+// The form's save and the banner's copy button.
 function charityTotalScript() {
   return `<script>
   (function () {
@@ -9797,6 +9834,8 @@ function charityTotalScript() {
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
             body: JSON.stringify({
+              for: form.dataset.for || '',
+              showPublic: !!(form.querySelector('input[name=showPublic]') || {}).checked,
               raised: box.checked,
               charityName: fd.get('charityName') || '',
               charityUrl: fd.get('charityUrl') || '',
@@ -23894,9 +23933,6 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
   // Main CID holders manage members on /affiliates/my-members, so their HQ
   // shows the public-profile editor instead of the Our Members table.
   const isMainHolder = !!(affiliate && !readOnly && Number(affiliate.cid) === cid);
-  // Our Total: the main CID sets it, the rest of the affiliate sees it.
-  const charityRow = await loadCharityTotal('affiliate', charityKeyForAffiliate(affiliate));
-  const charityEventName = (wfEvents.find(e => e.id === activeEventId)?.name) || 'WorldFlight';
 
   const profilePhotoRow = affiliate
     ? await prisma.profilePhoto.findUnique({
@@ -24415,7 +24451,6 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
       ${affFleetCard}
 
       ${affiliate ? `
-      ${affiliate ? charityTotalSection(charityRow, affiliate.name || affiliate.callsign, isMainHolder || isAdmin, charityEventName) : ''}
 
       <section class="card aff-schedule-card">
         <header class="aff-schedule-header">
@@ -24554,7 +24589,6 @@ app.get('/affiliates/hq', requireLogin, async (req, res) => {
     </div>
 
     ${HQ_STYLES}
-    ${charityTotalScript()}
 
     <script>
       // Which affiliate this HQ is showing. Sent with every write so the
@@ -26373,9 +26407,6 @@ app.get('/team/hq', requireLogin, async (req, res) => {
     const p = String(b.slotKey).split('|');
     teamBookingBySector[`${p[0]}|${p[1]}|${p[2]}`] = b;
   });
-  // Our Total: the main CID sets it, everyone on the team sees the banner.
-  const charityRow = await loadCharityTotal('team', teamNameUpper);
-  const charityEventName = (wfEvents.find(e => e.id === activeEventId)?.name) || 'WorldFlight';
 
   // Only the option this team is on - see legOptionsVisibleTo().
   const teamLegRows = showSchedule
@@ -26728,7 +26759,6 @@ app.get('/team/hq', requireLogin, async (req, res) => {
       </div>
       ` : ''}
 
-      ${charityTotalSection(charityRow, displayName, isMainHolder || isAdmin, charityEventName)}
 
       <section class="card aff-schedule-card">
         <header class="aff-schedule-header">
@@ -26844,7 +26874,6 @@ app.get('/team/hq', requireLogin, async (req, res) => {
     </div>
 
     ${HQ_STYLES}
-    ${charityTotalScript()}
 
 
 
@@ -31254,6 +31283,19 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
   ]);
   const hasPhoto = new Set(photoMeta.map(p => `${p.entityType}:${p.entityId}`));
 
+  // This event's charity totals the group chose to show publicly, keyed like
+  // the cards below: uppercase teamName, or the affiliate's group key.
+  const charityRows = await prisma.charityTotal?.findMany({
+    where: { eventId: activeEventId || null, raised: true, showPublic: true }
+  }).catch(() => []) || [];
+  const raisedByGroup = new Map(charityRows
+    .filter(r => r.charityName && r.amountMinor != null)
+    .map(r => [`${r.entityType}:${r.entityName}`, r]));
+  const raisedLine = (type, key) => {
+    const r = raisedByGroup.get(`${type}:${key}`);
+    return r ? `<div class="wwa-raised"><span aria-hidden="true">❤</span> Raised <strong>${escapeHtml(formatMoney(r.amountMinor, r.currency))}</strong> for ${escapeHtml(r.charityName)}</div>` : '';
+  };
+
   const initials = (name) => escapeHtml(String(name || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase());
 
   // Badge shows the joining year — no year set means no badge at all.
@@ -31298,7 +31340,7 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
   const anyActiveAffiliate = affiliates.some(a => a.participatingWf26);
   const globeSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></svg>`;
 
-  const card = (type, id, name, facts, description, website, badge) => {
+  const card = (type, id, name, facts, description, website, badge, raised = '') => {
     const shownFacts = facts.filter(f => f[1] != null && f[1] !== '');
     const factsHtml = shownFacts.map(f => `
           <div class="wwa-fact">
@@ -31310,7 +31352,7 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
       : `<div class="wwa-photo-placeholder">${initials(name)}</div>`;
     // The card shows a clamped bio; the modal gets the whole profile.
     const profile = JSON.stringify({
-      type, name, badge: badge || '', photo: photoHtml, facts: factsHtml,
+      type, name, badge: badge || '', photo: photoHtml, facts: factsHtml + raised,
       description: description || '', website: website || ''
     }).replace(/'/g, '&#39;');
 
@@ -31324,6 +31366,7 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
       <div class="wwa-body">
         <div class="wwa-name">${escapeHtml(name)}</div>
         <div class="wwa-facts">${factsHtml}</div>
+        ${raised}
         ${description ? `<p class="wwa-desc">${escapeHtml(description)}</p>` : ''}
         <div class="wwa-card-foot">
           ${website ? `<a class="wwa-site" href="${escapeHtml(website)}" target="_blank" rel="noopener">
@@ -31373,7 +31416,8 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
             ['Country', a.country],
             ['Main CID', a.mainCid]
           ];
-        return card('team', p.id, p.teamName, facts, p.description, p.website, badgeFor(p.sinceYear));
+        return card('team', p.id, p.teamName, facts, p.description, p.website, badgeFor(p.sinceYear),
+          raisedLine('team', String(p.teamName || '').trim().toUpperCase()));
       }).join('')}
     </div>` : '<p style="color:var(--muted);font-size:13px;">No official teams registered yet.</p>'}
 
@@ -31441,7 +31485,8 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
               ['Sim Type', pr.simType],
               ...(pr.maskName ? [] : [['Main CID', pr.cid]])
             ];
-          return card('affiliate', pr.id, pr.name || pr.callsign, facts, pr.description, pr.website, badgeFor(pr.sinceYear));
+          return card('affiliate', pr.id, pr.name || pr.callsign, facts, pr.description, pr.website, badgeFor(pr.sinceYear),
+            raisedLine('affiliate', charityKeyForAffiliate(pr)));
         }).join('');
       })()}
     </div>` : '<p style="color:var(--muted);font-size:13px;">No WF affiliates registered yet.</p>'}
@@ -31603,6 +31648,21 @@ app.get('/teams', requirePageEnabled('who-we-are'), async (req, res) => {
       border-top: 1px solid var(--border);
       margin-top: 2px;
     }
+    /* Charity total the group chose to show (Our Total). Same pink as the
+       banner on their Our Total page. */
+    .wwa-raised {
+      margin-top: 10px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      border: 1px solid color-mix(in srgb, #f472b6 35%, var(--border));
+      background: color-mix(in srgb, #f472b6 8%, transparent);
+    }
+    .wwa-raised > span:first-child { color: #f472b6; margin-right: 2px; }
+    .wwa-raised strong { color: #f472b6; }
+    [data-theme="light"] .wwa-raised > span:first-child,
+    [data-theme="light"] .wwa-raised strong { color: #be185d; }
     .wwa-fact {
       display: flex;
       justify-content: space-between;
@@ -47000,6 +47060,28 @@ async function loadSectorNotices() {
 
 /* ===== WF FEEDBACK: reading the results ===== */
 
+// Themes for the written answers, matched on word starts ("organis" catches
+// organisation and organised). A keyword match, not a reading: it gives the
+// summary chart its shape, and the responses themselves carry the detail.
+const FEEDBACK_THEMES = [
+  ['website',      'Planning website',        ['website', 'site', 'portal', 'web', 'page', 'map']],
+  ['comms',        'Communication',           ['comm', 'coms', 'discord', 'brief', 'notice', 'announce', 'email', 'info']],
+  ['atc',          'ATC & coverage',          ['atc', 'controller', 'controlling', 'coverage', 'staffing', 'staffed', 'frequenc', 'handover', 'handoff']],
+  ['booking',      'Bookings & TCTs',         ['book', 'slot', 'tct', 'connect time', 'connection time']],
+  ['routes',       'Routes & flight plans',   ['route', 'routing', 'simbrief', 'flight plan', 'fpl', 'split']],
+  ['destinations', 'Destinations & airports', ['airport', 'destination', 'region', 'island', 'continent', 'countr', 'cities', 'city']],
+  ['scenery',      'Scenery & charts',        ['scenery', 'chart', 'document', 'docs']],
+  ['organisation', 'Organisation & timing',   ['organis', 'organiz', 'schedule', 'timing', 'delay', 'late', 'on time', 'smooth']],
+  ['coordination', 'vACC / FIR coordination', ['vacc', 'division', 'coordinat', 'fir', 'neighbour', 'neighbor']],
+  ['teams',        'Teams & affiliates',      ['affiliate', 'team']],
+  ['streams',      'Streams',                 ['stream', 'twitch', 'youtube', 'commentary', 'camera', 'broadcast']],
+  ['traffic',      'Traffic & pilots',        ['traffic', 'congest', 'holding', 'separation', 'pilot']]
+].map(([key, label, words]) => ({ key, label, re: new RegExp('\\b(' + words.join('|') + ')', 'i') }));
+
+function feedbackThemesIn(text) {
+  return text ? FEEDBACK_THEMES.filter(t => t.re.test(text)).map(t => t.key) : [];
+}
+
 // Rows for the active event, with ratings already parsed.
 async function loadFeedback() {
   const rows = await prisma.wfFeedback?.findMany({
@@ -47045,7 +47127,111 @@ app.get('/admin/feedback', requireAdminPage('feedback'), async (req, res) => {
     </div>`;
   };
 
-  const comments = rows.filter(r => r.liked || r.improve || r.comments);
+  // Every question that has an answer, folded into three bands - 1-2 poor,
+  // 3 neutral, 4-5 good - for the highest/lowest lists and the spread chart.
+  const allQuestions = [
+    { key: 'overall', label: 'Overall experience', subset: rows, get: r => r.overall },
+    ...FEEDBACK_SHARED.map(q => ({ ...q, subset: rows, get: r => r.parsed[q.key] })),
+    ...FEEDBACK_ROLES.flatMap(role => (FEEDBACK_BY_ROLE[role.key] || []).map(q => ({
+      ...q, role: role.label, subset: rows.filter(r => r.role === role.key), get: r => r.parsed[q.key]
+    })))
+  ];
+  const scored = allQuestions.map(q => {
+    const vals = q.subset.map(q.get).map(Number).filter(n => n >= 1 && n <= 5);
+    if (!vals.length) return null;
+    const poor = vals.filter(v => v <= 2).length;
+    const neutral = vals.filter(v => v === 3).length;
+    const good = vals.filter(v => v >= 4).length;
+    return { label: q.label, role: q.role || null, n: vals.length, avg: avg(vals), poor, neutral, good,
+      net: (good - poor) / vals.length };
+  }).filter(Boolean);
+
+  // Split the ranked list so a question never sits in both columns.
+  const byAvg = [...scored].sort((a, b) => b.avg - a.avg || b.n - a.n);
+  const topCount = Math.min(3, Math.ceil(byAvg.length / 2));
+  const highest = byAvg.slice(0, topCount);
+  const lowest = byAvg.slice(topCount).slice(-3).reverse();
+  const spread = [...scored].sort((a, b) => b.net - a.net || b.avg - a.avg);
+
+  // Themes in the written answers: "Worked well" against "Do differently".
+  // "Also" is counted for the response filter but not in the chart - it is
+  // neither praise nor a request.
+  const themeCounts = Object.fromEntries(FEEDBACK_THEMES.map(t => [t.key, { ...t, liked: 0, improve: 0 }]));
+  const rowThemes = new Map();
+  rows.forEach(r => {
+    const liked = feedbackThemesIn(r.liked), improve = feedbackThemesIn(r.improve);
+    liked.forEach(k => themeCounts[k].liked++);
+    improve.forEach(k => themeCounts[k].improve++);
+    rowThemes.set(r.id, [...new Set([...liked, ...improve, ...feedbackThemesIn(r.comments)])]);
+  });
+  const themes = Object.values(themeCounts)
+    .filter(t => t.liked || t.improve)
+    .sort((a, b) => (b.liked + b.improve) - (a.liked + a.improve) || b.improve - a.improve);
+  const themeMax = Math.max(1, ...themes.map(t => Math.max(t.liked, t.improve)));
+
+  const scoreCls = (v) => v == null ? 'none' : v >= 4 ? 'good' : v >= 3 ? 'ok' : 'poor';
+  const listItem = (q) => `<div class="fba-li">
+      <span class="fba-li-q">${escapeHtml(q.label)}${q.role ? ` <span class="fba-li-role">${escapeHtml(q.role)}</span>` : ''}</span>
+      <span class="fba-li-score fba-${scoreCls(q.avg)}-text">${q.avg.toFixed(1)}</span>
+      <span class="fba-li-n">${q.n} ${q.n === 1 ? 'answer' : 'answers'}</span>
+    </div>`;
+
+  // Centred on neutral: poor extends left of the axis, good to the right, and
+  // neutral straddles it. Each half of the track is 100%.
+  const spreadRow = (q) => {
+    const half = (c) => (c / q.n) * 50;
+    const pW = half(q.poor), nW = half(q.neutral), gW = half(q.good);
+    const seg = (cls, left, width) => width > 0
+      ? `<span class="fba-seg fba-seg-${cls}" style="left:${left.toFixed(2)}%;width:calc(${width.toFixed(2)}% - 2px)"></span>` : '';
+    const tip = `${q.label}${q.role ? ' (' + q.role + ')' : ''}: ${q.good} good, ${q.neutral} neutral, ${q.poor} poor - ${q.n} ${q.n === 1 ? 'answer' : 'answers'}, average ${q.avg.toFixed(1)}`;
+    return `<div class="fba-sp-row" data-tip="${escapeHtml(tip)}" tabindex="0">
+      <div class="fba-sp-q">${escapeHtml(q.label)}${q.role ? ` <span class="fba-li-role">${escapeHtml(q.role)}</span>` : ''}</div>
+      <div class="fba-sp-track">
+        ${seg('poor', 50 - nW / 2 - pW, pW)}${seg('neutral', 50 - nW / 2, nW)}${seg('good', 50 + nW / 2, gW)}
+      </div>
+      <div class="fba-sp-pct">${Math.round((q.good / q.n) * 100)}%</div>
+      <div class="fba-n">${q.n}</div>
+    </div>`;
+  };
+
+  const themeRow = (t) => {
+    const w = (c) => Math.round((c / themeMax) * 100);
+    const tip = `${t.label}: ${t.liked} in "worked well", ${t.improve} in "do differently"`;
+    return `<button type="button" class="fba-th-row" data-theme="${t.key}" data-tip="${escapeHtml(tip)}">
+      <span class="fba-th-side fba-th-left">
+        ${t.improve ? `<span class="fba-th-v">${t.improve}</span><span class="fba-th-bar fba-seg-poor" style="width:${w(t.improve)}%"></span>` : ''}
+      </span>
+      <span class="fba-th-label">${escapeHtml(t.label)}</span>
+      <span class="fba-th-side fba-th-right">
+        ${t.liked ? `<span class="fba-th-bar fba-seg-good" style="width:${w(t.liked)}%"></span><span class="fba-th-v">${t.liked}</span>` : ''}
+      </span>
+    </button>`;
+  };
+
+  const roleLabel = (key) => FEEDBACK_ROLES.find(x => x.key === key)?.label || key;
+  const responseCard = (r) => {
+    const snippet = r.liked || r.improve || r.comments || '';
+    const answered = feedbackKeysFor(r.role)
+      .map(k => ({ q: feedbackQuestion(k), v: Number(r.parsed[k]) }))
+      .filter(x => x.q && x.v >= 1 && x.v <= 5);
+    return `<details class="fba-comment fba-resp" data-themes="${(rowThemes.get(r.id) || []).join(' ')}">
+      <summary class="fba-comment-head">
+        <span class="fba-tag">${escapeHtml(roleLabel(r.role))}</span>
+        ${r.overall != null ? `<span class="fba-tag fba-tag-score">${r.overall}/5</span>` : ''}
+        <span class="fba-snippet${snippet ? '' : ' is-empty'}">${snippet ? escapeHtml(snippet) : 'Scores only - no written comments'}</span>
+        <span class="fba-when">${new Date(r.createdAt).toISOString().slice(0, 16).replace('T', ' ')}z</span>
+        <svg class="fba-chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div class="fba-resp-body">
+        ${answered.length ? `<div class="fba-resp-scores">
+          ${answered.map(x => `<div class="fba-resp-score"><span>${escapeHtml(x.q.label)}</span><strong class="fba-${scoreCls(x.v)}-text">${x.v}/5</strong></div>`).join('')}
+        </div>` : ''}
+        ${r.liked ? `<p><strong>Worked well:</strong> ${escapeHtml(r.liked)}</p>` : ''}
+        ${r.improve ? `<p><strong>Do differently:</strong> ${escapeHtml(r.improve)}</p>` : ''}
+        ${r.comments ? `<p><strong>Also:</strong> ${escapeHtml(r.comments)}</p>` : ''}
+      </div>
+    </details>`;
+  };
 
   const content = `
     <section class="card card-full">
@@ -47069,6 +47255,45 @@ app.get('/admin/feedback', requireAdminPage('feedback'), async (req, res) => {
         </div>`).join('')}
       </div>
 
+      <div class="fba-viz">
+        <h3 class="fba-h">Summary</h3>
+        <div class="fba-split">
+          <div class="fba-card">
+            <div class="fba-card-h"><span class="fba-dot fba-seg-good"></span>Doing well <span>highest average score</span></div>
+            ${highest.length ? highest.map(listItem).join('') : '<p class="fba-card-empty">No scores yet.</p>'}
+          </div>
+          <div class="fba-card">
+            <div class="fba-card-h"><span class="fba-dot fba-seg-poor"></span>Room to improve <span>lowest average score</span></div>
+            ${lowest.length ? lowest.map(listItem).join('') : '<p class="fba-card-empty">Not enough questions answered to compare yet.</p>'}
+          </div>
+        </div>
+
+        <div class="fba-chart">
+          <div class="fba-chart-head">
+            <div class="fba-chart-title">Score spread by question</div>
+            <div class="fba-legend">
+              <span><i class="fba-seg-poor"></i>Poor (1–2)</span>
+              <span><i class="fba-seg-neutral"></i>Neutral (3)</span>
+              <span><i class="fba-seg-good"></i>Good (4–5)</span>
+            </div>
+          </div>
+          <div class="fba-sp-row fba-sp-head"><div class="fba-sp-q">Question</div><div class="fba-sp-track fba-sp-axis"><span>← poor</span><span>good →</span></div><div class="fba-sp-pct">Good</div><div class="fba-n">n</div></div>
+          ${spread.map(spreadRow).join('')}
+        </div>
+
+        <div class="fba-chart">
+          <div class="fba-chart-head">
+            <div class="fba-chart-title">What people wrote about</div>
+            <div class="fba-legend">
+              <span><i class="fba-seg-poor"></i>Do differently</span>
+              <span><i class="fba-seg-good"></i>Worked well</span>
+            </div>
+          </div>
+          <p class="fba-chart-note">Themes are matched from keywords in the written answers, so read the responses for the detail. Click a theme to show only the responses that mention it.</p>
+          ${themes.length ? themes.map(themeRow).join('') : '<p class="fba-card-empty">No themes picked up from the written answers yet.</p>'}
+        </div>
+      </div>
+
       <h3 class="fba-h">Everyone</h3>
       <div class="fba-table">
         <div class="fba-row fba-head"><div class="fba-q">Question</div><div class="fba-bar"></div><div class="fba-score">Avg</div><div class="fba-n">n</div></div>
@@ -47085,22 +47310,75 @@ app.get('/admin/feedback', requireAdminPage('feedback'), async (req, res) => {
           </div>`;
       }).join('')}
 
-      <h3 class="fba-h">Comments <span>${comments.length}</span></h3>
-      ${!comments.length ? `<p style="color:var(--muted);font-size:13px;">Nobody left a written comment.</p>` : `
-        <div class="fba-comments">
-          ${comments.map(r => `<div class="fba-comment">
-            <div class="fba-comment-head">
-              <span class="fba-tag">${escapeHtml(FEEDBACK_ROLES.find(x => x.key === r.role)?.label || r.role)}</span>
-              ${r.overall != null ? `<span class="fba-tag fba-tag-score">${r.overall}/5</span>` : ''}
-              <span class="fba-when">${new Date(r.createdAt).toISOString().slice(0, 16).replace('T', ' ')}z</span>
-            </div>
-            ${r.liked ? `<p><strong>Worked well:</strong> ${escapeHtml(r.liked)}</p>` : ''}
-            ${r.improve ? `<p><strong>Do differently:</strong> ${escapeHtml(r.improve)}</p>` : ''}
-            ${r.comments ? `<p><strong>Also:</strong> ${escapeHtml(r.comments)}</p>` : ''}
-          </div>`).join('')}
-        </div>`}
+      <div class="fba-resp-bar">
+        <h3 class="fba-h">Responses <span>${rows.length}</span></h3>
+        <div class="fba-resp-tools">
+          <span class="fba-filter" id="fbaFilter" hidden>Mentioning <strong id="fbaFilterName"></strong> <button type="button" class="fba-link" id="fbaFilterClear">Clear</button></span>
+          <button type="button" class="fba-link" id="fbaExpandAll">Expand all</button>
+          <button type="button" class="fba-link" id="fbaCollapseAll">Collapse all</button>
+        </div>
+      </div>
+      <div class="fba-comments" id="fbaResponses">
+        ${rows.map(responseCard).join('')}
+      </div>
       `}
     </section>
+
+    <div class="fba-tip" id="fbaTip" role="tooltip" hidden></div>
+
+    <script>
+    (function () {
+      var list = document.getElementById('fbaResponses');
+      if (!list) return;
+      var cards = Array.prototype.slice.call(list.querySelectorAll('.fba-resp'));
+      function visible() { return cards.filter(function (c) { return !c.hidden; }); }
+      document.getElementById('fbaExpandAll').addEventListener('click', function () { visible().forEach(function (c) { c.open = true; }); });
+      document.getElementById('fbaCollapseAll').addEventListener('click', function () { cards.forEach(function (c) { c.open = false; }); });
+
+      // Theme rows filter the response list; clicking the active theme again
+      // (or Clear) shows everything.
+      var filterBar = document.getElementById('fbaFilter');
+      var filterName = document.getElementById('fbaFilterName');
+      var active = null;
+      function applyFilter(key, label) {
+        active = key;
+        document.querySelectorAll('.fba-th-row').forEach(function (b) { b.classList.toggle('is-active', b.dataset.theme === key); });
+        cards.forEach(function (c) {
+          c.hidden = !!key && (' ' + c.dataset.themes + ' ').indexOf(' ' + key + ' ') === -1;
+          if (key && !c.hidden) c.open = true;
+        });
+        filterBar.hidden = !key;
+        filterName.textContent = label || '';
+        if (key) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      document.querySelectorAll('.fba-th-row').forEach(function (b) {
+        b.addEventListener('click', function () {
+          if (active === b.dataset.theme) applyFilter(null);
+          else applyFilter(b.dataset.theme, b.querySelector('.fba-th-label').textContent);
+        });
+      });
+      document.getElementById('fbaFilterClear').addEventListener('click', function () { applyFilter(null); });
+
+      // One tooltip for every chart row: follows the pointer, and sits under
+      // the row when it is reached by keyboard.
+      var tip = document.getElementById('fbaTip');
+      function show(el, x, y) {
+        tip.textContent = el.dataset.tip;
+        tip.hidden = false;
+        var w = tip.offsetWidth, h = tip.offsetHeight;
+        var left = Math.min(Math.max(8, x + 14), window.innerWidth - w - 8);
+        var top = y + 18 + h > window.innerHeight ? y - h - 12 : y + 18;
+        tip.style.left = left + 'px';
+        tip.style.top = top + 'px';
+      }
+      document.querySelectorAll('.fba-viz [data-tip]').forEach(function (el) {
+        el.addEventListener('mousemove', function (e) { show(el, e.clientX, e.clientY); });
+        el.addEventListener('mouseleave', function () { tip.hidden = true; });
+        el.addEventListener('focus', function () { var r = el.getBoundingClientRect(); show(el, r.left + r.width / 2, r.bottom - 10); });
+        el.addEventListener('blur', function () { tip.hidden = true; });
+      });
+    })();
+    </script>
 
     <style>
       .fba-counts { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }
@@ -47143,9 +47421,107 @@ app.get('/admin/feedback', requireAdminPage('feedback'), async (req, res) => {
       .fba-comment p { margin: 0 0 6px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
       .fba-comment p:last-child { margin-bottom: 0; }
       .fba-comment strong { color: var(--muted); font-weight: 600; }
+
+      /* Summary charts. Poor / neutral / good is a diverging scale (two poles
+         and a gray midpoint), validated for colour-blind separation in both
+         themes. Figures sit beside every bar, so colour never carries a
+         number on its own. */
+      .fba-viz { --fb-poor: #e66767; --fb-neutral: #4b5563; --fb-good: #3987e5; --fb-axis: #334155; }
+      [data-theme="light"] .fba-viz { --fb-poor: #d03b3b; --fb-neutral: #a8a29e; --fb-good: #2a78d6; --fb-axis: #cbd5e1; }
+      .fba-seg-poor { background: var(--fb-poor); }
+      .fba-seg-neutral { background: var(--fb-neutral); }
+      .fba-seg-good { background: var(--fb-good); }
+      .fba-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .fba-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--panel2); }
+      .fba-card-h { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+      .fba-card-h > span:last-child { font-size: 11px; font-weight: 400; color: var(--muted); }
+      .fba-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+      .fba-card-empty { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+      .fba-li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: baseline; padding: 6px 0; }
+      .fba-li + .fba-li { border-top: 1px solid var(--border); }
+      .fba-li-q { font-size: 13px; min-width: 0; }
+      .fba-li-role {
+        font-size: 10px; font-weight: 600; color: var(--muted); padding: 1px 6px; margin-left: 4px;
+        border: 1px solid var(--border); border-radius: 999px; white-space: nowrap;
+      }
+      .fba-li-score { font-size: 15px; font-weight: 700; }
+      .fba-li-n { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+      .fba-chart { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+      .fba-chart-head { display: flex; justify-content: space-between; align-items: center; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 8px; }
+      .fba-chart-title { font-size: 13px; font-weight: 700; }
+      .fba-chart-note { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+      .fba-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+      .fba-legend span { display: inline-flex; align-items: center; gap: 6px; }
+      .fba-legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+      .fba-sp-row {
+        display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) 44px 30px;
+        gap: 12px; align-items: center; padding: 5px 4px; border-radius: 6px;
+      }
+      .fba-sp-row:not(.fba-sp-head):hover, .fba-sp-row:focus-visible { background: color-mix(in srgb, var(--text) 5%, transparent); outline: none; }
+      .fba-sp-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); }
+      .fba-sp-q { font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fba-sp-track { position: relative; height: 14px; }
+      .fba-sp-track:not(.fba-sp-axis)::before {
+        content: ''; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--fb-axis);
+      }
+      .fba-sp-axis { display: flex; justify-content: space-between; height: auto; text-transform: none; letter-spacing: 0; }
+      .fba-seg { position: absolute; top: 0; bottom: 0; margin-left: 1px; border-radius: 4px; }
+      .fba-sp-pct { font-size: 12px; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+
+      .fba-th-row {
+        display: grid; grid-template-columns: minmax(0, 1fr) 170px minmax(0, 1fr); gap: 10px; align-items: center;
+        width: 100%; padding: 5px 4px; border: 0; border-radius: 6px; background: none; color: var(--text);
+        font-family: inherit; cursor: pointer; text-align: left;
+      }
+      .fba-th-row:hover, .fba-th-row:focus-visible { background: color-mix(in srgb, var(--text) 5%, transparent); outline: none; }
+      .fba-th-row.is-active { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+      .fba-th-side { display: flex; align-items: center; gap: 6px; height: 14px; }
+      .fba-th-left { justify-content: flex-end; }
+      .fba-th-bar { display: block; height: 100%; min-width: 4px; border-radius: 4px; }
+      .fba-th-v { font-size: 12px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+      .fba-th-label { font-size: 12px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+      .fba-tip {
+        position: fixed; z-index: 1000; max-width: 300px; padding: 7px 10px; border-radius: 8px;
+        background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+        font-size: 12px; line-height: 1.5; box-shadow: 0 6px 20px rgba(0,0,0,0.35); pointer-events: none;
+      }
+      .fba-tip[hidden] { display: none; }
+
+      /* Responses: one line each, click to expand. */
+      .fba-resp-bar { display: flex; justify-content: space-between; align-items: baseline; gap: 8px 16px; flex-wrap: wrap; }
+      .fba-resp-tools { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--muted); }
+      .fba-filter strong { color: var(--text); }
+      .fba-filter[hidden] { display: none; }
+      .fba-link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+      .fba-link:hover { text-decoration: underline; }
+      .fba-resp { padding: 0; }
+      .fba-resp[hidden] { display: none; }
+      .fba-resp > summary { list-style: none; cursor: pointer; padding: 10px 14px; margin: 0; flex-wrap: nowrap; }
+      .fba-resp > summary::-webkit-details-marker { display: none; }
+      .fba-resp > summary:hover { background: color-mix(in srgb, var(--text) 4%, transparent); border-radius: 10px; }
+      .fba-snippet { flex: 1 1 auto; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fba-snippet.is-empty { color: var(--muted); font-style: italic; }
+      .fba-resp .fba-when { margin-left: 0; white-space: nowrap; }
+      .fba-chev { flex: 0 0 auto; color: var(--muted); transition: transform 0.15s; }
+      .fba-resp[open] .fba-chev { transform: rotate(180deg); }
+      .fba-resp[open] .fba-snippet { visibility: hidden; }
+      .fba-resp-body { padding: 4px 14px 12px; border-top: 1px solid var(--border); }
+      .fba-resp-scores { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 4px 18px; margin: 8px 0 12px; }
+      .fba-resp-score { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 3px 0; }
+      .fba-resp-score span { color: var(--muted); }
+      .fba-resp-body p { margin-top: 6px; }
+
       @media (max-width: 720px) {
         .fba-row { grid-template-columns: minmax(0, 1fr) 54px 40px; }
         .fba-bar { display: none; }
+        .fba-split { grid-template-columns: minmax(0, 1fr); }
+        .fba-sp-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) 40px; }
+        .fba-sp-row .fba-n { display: none; }
+        .fba-th-row { grid-template-columns: minmax(0, 1fr) 110px minmax(0, 1fr); }
+        .fba-resp .fba-when { display: none; }
       }
     </style>`;
 
@@ -47194,32 +47570,17 @@ app.get('/admin/feedback.csv', requireAdminPage('feedback'), async (req, res) =>
 // the public profile.
 app.post('/api/charity-total', requireLogin, async (req, res) => {
   const cid = Number(req.session?.user?.data?.cid);
-  const isAdmin = isAdminUser(cid);
-
-  let entityType = null;
-  let entityName = null;
-
-  const teamName = await resolveUserTeamName(cid).catch(() => null);
-  if (teamName) {
-    const fleet = await prisma.officialTeam.findMany({ where: { teamName } }).catch(() => []);
-    const owns = fleet.some(t => Number(t.mainCid) === cid);
-    if (!owns && !isAdmin) {
-      return res.status(403).json({ error: 'Only the team main CID can set the charity total.' });
-    }
-    entityType = 'team';
-    entityName = String(teamName).trim().toUpperCase();
-  } else {
-    const affiliate = await resolveUserAffiliate(cid).catch(() => null);
-    if (!affiliate) return res.status(403).json({ error: 'You are not linked to a team or affiliate.' });
-    if (Number(affiliate.cid) !== cid && !isAdmin) {
-      return res.status(403).json({ error: 'Only the affiliate main CID can set the charity total.' });
-    }
-    entityType = 'affiliate';
-    entityName = charityKeyForAffiliate(affiliate);
+  const kind = ['team', 'affiliate'].includes(req.body?.for) ? req.body.for : null;
+  const group = await resolveCharityGroup(cid, kind);
+  if (!group) return res.status(403).json({ error: 'You are not linked to a team or affiliate.' });
+  if (!group.canEdit) {
+    return res.status(403).json({ error: `Only the ${group.entityType} main CID can set the charity total.` });
   }
+  const { entityType, entityName } = group;
   if (!entityName) return res.status(400).json({ error: 'Could not work out which group this is for.' });
 
   const raised = req.body?.raised === true;
+  const showPublic = req.body?.showPublic !== false;
   const currency = CHARITY_CURRENCIES.includes(String(req.body?.currency || '').toUpperCase())
     ? String(req.body.currency).toUpperCase()
     : 'GBP';
@@ -47246,7 +47607,8 @@ app.post('/api/charity-total', requireLogin, async (req, res) => {
       charityName: raised ? charityName : null,
       charityUrl: raised ? charityUrl : null,
       amountMinor: raised ? amountMinor : null,
-      currency
+      currency,
+      showPublic
     };
     if (existing) {
       await prisma.charityTotal.update({ where: { id: existing.id }, data });
@@ -47262,6 +47624,95 @@ app.post('/api/charity-total', requireLogin, async (req, res) => {
     console.error('[CHARITY] save failed:', e.message);
     res.status(500).json({ error: 'Could not save your total.' });
   }
+});
+
+// Our Total: this event's charity total, and every past one, for the
+// viewer's team or affiliate. Linked from both sidebar sections with ?for=
+// so a CID on a team and an affiliate reaches each.
+app.get('/our-total', requireLogin, async (req, res) => {
+  const user = req.session.user.data;
+  const cid = Number(user.cid);
+  const isAdmin = isAdminUser(cid);
+  const kind = ['team', 'affiliate'].includes(req.query.for) ? req.query.for : null;
+  const group = await resolveCharityGroup(cid, kind);
+  if (!group?.entityName) return renderForbidden(req, res, 'Our Total is for WF teams and affiliates.');
+
+  const evt = wfEvents.find(e => e.id === activeEventId);
+  const eventName = evt?.name || 'WorldFlight';
+  const current = await loadCharityTotal(group.entityType, group.entityName);
+  const history = await prisma.charityTotal?.findMany({
+    where: { entityType: group.entityType, entityName: group.entityName }
+  }).catch(() => []) || [];
+
+  // Newest event first, in the same order as wfEvents (by year).
+  const eventOrder = new Map(wfEvents.map((e, i) => [e.id, i]));
+  history.sort((a, b) => (eventOrder.get(a.eventId) ?? 1e9) - (eventOrder.get(b.eventId) ?? 1e9));
+
+  // Each currency totals on its own - adding pounds to euros means nothing.
+  const totals = {};
+  history.forEach(r => {
+    if (!r.raised || r.amountMinor == null) return;
+    totals[r.currency] = (totals[r.currency] || 0) + r.amountMinor;
+  });
+  const totalsText = Object.entries(totals).map(([c, m]) => formatMoney(m, c)).join(' · ');
+
+  const historyRow = (r) => {
+    const e = wfEvents.find(x => x.id === r.eventId);
+    const isCurrent = r.eventId === activeEventId;
+    const charity = r.raised && r.charityName
+      ? (r.charityUrl
+        ? `<a href="${escapeHtml(r.charityUrl)}" target="_blank" rel="noopener">${escapeHtml(r.charityName)}</a>`
+        : escapeHtml(r.charityName))
+      : '<span class="ot-muted">Did not raise</span>';
+    return `<tr>
+      <td>${escapeHtml(e?.name || 'Unknown event')}${isCurrent ? ' <span class="ot-current">Current</span>' : ''}</td>
+      <td>${charity}</td>
+      <td class="ot-num">${r.raised && r.amountMinor != null ? escapeHtml(formatMoney(r.amountMinor, r.currency)) : '<span class="ot-muted">—</span>'}</td>
+      <td>${r.raised ? (r.showPublic !== false ? 'Shown' : '<span class="ot-muted">Hidden</span>') : '<span class="ot-muted">—</span>'}</td>
+    </tr>`;
+  };
+
+  const content = `
+    ${charityTotalSection(current, group.displayName, group.canEdit, eventName, group.entityType)}
+
+    <section class="card aff-members-card ct-card">
+      <header class="aff-members-header">
+        <h3 class="section-title" style="margin:0;">Past Totals</h3>
+        ${totalsText ? `<span class="ot-alltime">Raised in total: <strong>${escapeHtml(totalsText)}</strong></span>` : ''}
+      </header>
+      ${history.length ? `
+        <div class="ot-table-wrap">
+          <table class="ot-table">
+            <thead><tr><th>Event</th><th>Charity</th><th class="ot-num">Raised</th><th>Public</th></tr></thead>
+            <tbody>${history.map(historyRow).join('')}</tbody>
+          </table>
+        </div>` : `<p class="ot-muted" style="margin:12px 0 0;font-size:13px;">Nothing recorded yet. Each WorldFlight's total will build up here once it is saved.</p>`}
+    </section>
+
+    ${HQ_STYLES}
+    <style>
+      .ct-field-full { grid-column: 1 / -1; }
+      .ot-alltime { font-size: 12px; color: var(--muted); }
+      .ot-alltime strong { color: #f472b6; }
+      .ot-table-wrap { overflow-x: auto; margin-top: 12px; }
+      .ot-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .ot-table th {
+        text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.4px; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--border);
+      }
+      .ot-table td { padding: 10px; border-bottom: 1px solid var(--border); }
+      .ot-table tr:last-child td { border-bottom: 0; }
+      .ot-table a { color: var(--accent); }
+      .ot-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .ot-muted { color: var(--muted); }
+      .ot-current {
+        font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px; margin-left: 6px;
+        background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+      }
+    </style>
+    ${charityTotalScript()}`;
+
+  res.send(renderLayout({ title: 'Our Total', user, isAdmin, content, layoutClass: 'dashboard-full' }));
 });
 
 app.get('/feedback', requirePageEnabled('wf-feedback'), async (req, res) => {

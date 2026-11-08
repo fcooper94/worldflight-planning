@@ -820,6 +820,8 @@ model CharityTotal {
   charityUrl  String?
   amountMinor Int?
   currency    String   @default("GBP")
+  // Shown on the group's /teams card. On by default; the main CID can hide it.
+  showPublic  Boolean  @default(true)
   updatedAt   DateTime @default(now()) @updatedAt
 
   @@unique([entityType, entityName, eventId])

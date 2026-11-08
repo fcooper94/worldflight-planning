@@ -779,6 +779,7 @@ model CharityTotal {
   charityUrl  String?
   amountMinor Int?
   currency    String   @default("GBP")
+  showPublic  Boolean  @default(true)
   updatedAt   DateTime @default(now()) @updatedAt
 
   @@unique([entityType, entityName, eventId])
