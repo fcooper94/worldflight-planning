@@ -776,3 +776,27 @@ model PersonalRosterLeg {
   @@unique([eventId, sectorNumber, cid])
   @@index([cid, eventId])
 }
+
+// Post-event feedback. Open to anyone, no login, and more than one response
+// per person is allowed - so treat every field as untrusted and keep the
+// caps on the server. cid is only filled in when the submitter happened to
+// be signed in; it is not required and not asked for.
+//
+// Scores other than `overall` live in `ratings` as JSON ({ key: 1-5 }),
+// because which questions apply depends on the role answering and a column
+// per question would be mostly nulls.
+model WfFeedback {
+  id        Int      @id @default(autoincrement())
+  eventId   Int?
+  role      String   // 'pilot' | 'atc' | 'staff' | 'viewer'
+  overall   Int?     // 1-5, the headline score
+  ratings   String   @default("{}")
+  liked     String?
+  improve   String?
+  comments  String?
+  cid       Int?
+  createdAt DateTime @default(now())
+
+  @@index([eventId])
+  @@index([role])
+}

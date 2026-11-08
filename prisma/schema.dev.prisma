@@ -752,3 +752,19 @@ model PersonalRosterLeg {
   @@unique([eventId, sectorNumber, cid])
   @@index([cid, eventId])
 }
+
+model WfFeedback {
+  id        Int      @id @default(autoincrement())
+  eventId   Int?
+  role      String
+  overall   Int?
+  ratings   String   @default("{}")
+  liked     String?
+  improve   String?
+  comments  String?
+  cid       Int?
+  createdAt DateTime @default(now())
+
+  @@index([eventId])
+  @@index([role])
+}

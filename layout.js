@@ -107,6 +107,10 @@ export default function renderLayout({
         <span class="icon">${icons.bulb}</span>
         <span class="label">Suggest Airport</span>
       </a>` : ''}
+      ${pv('wf-feedback') ? `<a href="/feedback" class="nav-item" data-tooltip="WF Feedback">
+        <span class="icon">${icons.megaphone}</span>
+        <span class="label">WF Feedback</span>
+      </a>` : ''}
     </div>
 
     ${pv('who-we-are') || pv('wf-atc-team') ? `<div class="nav-section">

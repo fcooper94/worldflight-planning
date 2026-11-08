@@ -831,13 +831,15 @@ io.use((socket, next) => {
 /* ===== PAGE VISIBILITY (GLOBAL) ===== */
 // Every key the Page Visibility admin panel offers must be listed here, or the
 // save is rejected with a 400 and the toggle silently fails.
-const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'airspace', 'sector-planning', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions', 'atc-route', 'worldflight-challenge', 'vatcan-codes', 'who-we-are', 'wf-atc-team', 'request-atc', 'requested-atc', 'wf-atc-hub', 'route-alternatives'];
+const PAGE_KEYS = ['schedule', 'world-map', 'my-slots', 'atc', 'suggest-airport', 'arrival-info', 'departure-info', 'airspace', 'sector-planning', 'fake-pilots', 'wf-portal-banner', 'flow-restrictions', 'atc-route', 'worldflight-challenge', 'vatcan-codes', 'who-we-are', 'wf-atc-team', 'request-atc', 'requested-atc', 'wf-atc-hub', 'route-alternatives', 'wf-feedback'];
 
 // Per-key default mode used when no DB row exists yet. Most keys default to
 // 'visible'; ATC Route defaults to 'hidden' because routes are typically
 // released before they're confirmed with controllers.
 const PAGE_DEFAULT_MODE = {
   'atc-route': 'hidden',
+  // Feedback opens when you decide to collect it, not the moment it ships.
+  'wf-feedback': 'hidden',
   // Route alternatives start admin-only: while a leg's destination is still
   // undecided, publishing both options would give the pending decision away.
   'route-alternatives': 'admin-only'
@@ -2082,7 +2084,7 @@ const ADMIN_PAGE_KEYS = [
   'wf-schedule', 'official-teams', 'scenery', 'access-management',
   'visited-airports', 'suggestions', 'mailing-list', 'settings',
   'airac', 'test-pilots', 'controller-pack', 'documents-scenery',
-  'wf-challenge'
+  'wf-challenge', 'feedback'
 ];
 
 const ADMIN_PAGE_LABELS = {
@@ -2098,7 +2100,8 @@ const ADMIN_PAGE_LABELS = {
   'test-pilots': 'Test Pilot Data',
   'controller-pack': 'Controller Pack',
   'documents-scenery': 'Documents & Scenery',
-  'wf-challenge': 'WF Challenge Scoring'
+  'wf-challenge': 'WF Challenge Scoring',
+  'feedback': 'Feedback'
 };
 
 async function loadAdminPermissions() {
@@ -9620,6 +9623,74 @@ const TZ_PICKER_SCRIPT = `<script>
 
 // Epoch ms for a UTC date + HH:MM, offset by addMin. Returns null when
 // either part is unparseable, which callers treat as "do not convert".
+/* ===== WF FEEDBACK =====
+   Post-event feedback. Which questions apply depends on the role answering;
+   the shared block is asked of everyone. One definition drives the form, the
+   server-side validation, the admin summary and the CSV, so a question can
+   be added in one place. Keys are stored in WfFeedback.ratings as JSON. */
+const FEEDBACK_ROLES = [
+  { key: 'pilot',  label: 'Pilot',                 blurb: 'You flew one or more sectors.' },
+  { key: 'atc',    label: 'ATC',                   blurb: 'You controlled during the event.' },
+  { key: 'staff',  label: 'vACC / Division Staff', blurb: 'You helped organise or coordinate coverage.' },
+  { key: 'viewer', label: 'Viewer',                blurb: 'You followed along without flying or controlling.' }
+];
+
+// Asked of everyone, whatever they picked.
+const FEEDBACK_SHARED = [
+  { key: 'website', label: 'The new planning website', hint: 'planning.worldflight.center \u2014 finding what you needed, how it worked.' },
+  { key: 'comms',   label: 'Communication from the WorldFlight team', hint: 'Briefings, Discord, notices before and during the event.' },
+  { key: 'organisation', label: 'How well the event was organised overall', hint: 'Timings, handovers between sectors, keeping to the schedule.' }
+];
+
+const FEEDBACK_BY_ROLE = {
+  pilot: [
+    { key: 'briefs',      label: 'Finding pilot briefings, charts and scenery', hint: 'Airport portals, documents, scenery links.' },
+    { key: 'booking',     label: 'Booking a slot and the connection time (TCT)', hint: 'Finding a slot, understanding your TCT, connecting on time.' },
+    { key: 'atcService',  label: 'ATC coverage and service', hint: 'Availability, clarity of instructions, handling of the group.' },
+    { key: 'routes',      label: 'Routes and flight planning', hint: 'The published routes, SimBrief integration, any route splits.' }
+  ],
+  atc: [
+    { key: 'coordination', label: 'Coordination with neighbouring sectors', hint: 'Handovers, agreements, staffing either side of you.' },
+    { key: 'sectorFiles',  label: 'Sector files and the controller pack', hint: 'Availability, accuracy, how easy it was to set up.' },
+    { key: 'flowMgmt',     label: 'Flow restrictions and slot management', hint: 'Whether the rates and TCTs kept the traffic workable.' },
+    { key: 'pilotStandard', label: 'Pilot standard and compliance', hint: 'Following instructions, correct flight plans, on-time departures.' }
+  ],
+  staff: [
+    { key: 'wfCoordination', label: 'Coordination with the WorldFlight team', hint: 'Responsiveness, clarity, how decisions were communicated.' },
+    { key: 'sectorPlanning', label: 'Sector planning and route agreement', hint: 'Agreeing routes and flow with the other side of each leg.' },
+    { key: 'staffingInfo',   label: 'Staffing information and timings', hint: 'Knowing when your airspace was needed and for how long.' },
+    { key: 'atcRequests',    label: 'The ATC request process', hint: 'Asking for WF ATC support and getting positions covered.' }
+  ],
+  viewer: [
+    { key: 'streams',   label: 'Streams and live coverage', hint: 'Commentary, cameras, keeping up with where the flight was.' },
+    { key: 'following', label: 'Following the flight on the site', hint: 'Route map, schedule, live traffic.' }
+  ]
+};
+
+// Every rating key that can legitimately arrive, for validating a response
+// and for walking the summary.
+function feedbackKeysFor(role) {
+  return [...FEEDBACK_SHARED, ...(FEEDBACK_BY_ROLE[role] || [])].map(q => q.key);
+}
+function feedbackQuestion(key) {
+  const all = [...FEEDBACK_SHARED, ...Object.values(FEEDBACK_BY_ROLE).flat()];
+  return all.find(q => q.key === key) || null;
+}
+
+// A crude in-memory throttle. The form takes no login, so this is the only
+// thing standing between it and a script; it is deliberately generous
+// enough that a household behind one address can all reply.
+const feedbackHits = new Map();   // ip -> number[] (timestamps)
+function feedbackRateLimited(ip) {
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000;
+  const recent = (feedbackHits.get(ip) || []).filter(t => now - t < windowMs);
+  recent.push(now);
+  feedbackHits.set(ip, recent);
+  if (feedbackHits.size > 5000) feedbackHits.clear();   // bounded
+  return recent.length > 8;
+}
+
 function utcInstantMs(dateUtc, hhmm, addMin = 0) {
   const d = parseServerDate(dateUtc);
   const m = /^(\d{1,2}):?(\d{2})$/.exec(String(hhmm || ''));
@@ -28294,7 +28365,8 @@ app.get('/admin/control-panel', requireAdmin, async (req, res) => {
     { key: 'test-pilots', title: 'Test Pilot Data', desc: 'Generate fake pilot departures at WF airports for testing.', icon: adminIcons.flask, href: '/admin/test-pilots', badge: null },
     { key: 'wf-atc-admin', title: 'WF ATC Team', desc: 'Manage the WorldFlight ATC team — add/remove members and view notification preferences.', icon: adminIcons.headphones, href: '/admin/wf-atc', badge: null },
     { key: 'controller-pack', title: 'Controller Pack', desc: 'Generate EuroScope controller pack files for WorldFlight airports.', icon: adminIcons.headphones, href: '/admin/controller-pack', badge: null },
-    { key: 'wf-challenge', title: 'WF Challenge Scoring', desc: 'Enter flypast scores and manage the live WF Challenge scoreboard.', icon: adminIcons.star, href: '/admin/wf-challenge', badge: null }
+    { key: 'wf-challenge', title: 'WF Challenge Scoring', desc: 'Enter flypast scores and manage the live WF Challenge scoreboard.', icon: adminIcons.star, href: '/admin/wf-challenge', badge: null },
+    { key: 'feedback', title: 'Feedback', desc: 'Post-event feedback: average scores by question and role, every written comment, and a CSV export.', icon: adminIcons.bulb, href: '/admin/feedback', badge: null }
   ];
 
   // Super admins see all sections; granular admins see only their permitted pages
@@ -37895,7 +37967,8 @@ app.get('/admin/settings', requireAdmin, async (req, res) => {
         { key: 'vatcan-codes',    label: 'VATCAN Codes',      icon: '🎧', desc: 'Per-sector VATCAN booking-plugin event IDs (under sidebar "WF ATC" category). Controllers paste these into the VATCAN plugin to see live slot data.' },
         { key: 'request-atc',    label: 'Request ATC',       icon: '📡', desc: 'FIR managers can request WF ATC (HitSquad) support for sectors where local coverage is unavailable.' },
         { key: 'requested-atc',  label: 'Requested ATC',     icon: '📡', desc: 'WF ATC members view and claim ATC support requests from FIR managers.' },
-        { key: 'wf-atc-hub',     label: 'WF ATC Hub',       icon: '🎧', desc: 'Per-sector briefing for WF ATC: route map, frequencies, bookings, flow and sector files.' }
+        { key: 'wf-atc-hub',     label: 'WF ATC Hub',       icon: '🎧', desc: 'Per-sector briefing for WF ATC: route map, frequencies, bookings, flow and sector files.' },
+        { key: 'wf-feedback',    label: 'WF Feedback',      icon: '💬', desc: 'Post-event feedback form at /feedback. Open to anyone with the link, no sign-in, and more than one response per person is allowed. Read the results under Admin \u2192 Feedback. Starts hidden \u2014 turn it on when you want to collect.' }
       ]
     },
     {
@@ -46662,6 +46735,510 @@ async function loadSectorNotices() {
   }
   return byWf;
 }
+
+/* ===== WF FEEDBACK: reading the results ===== */
+
+// Rows for the active event, with ratings already parsed.
+async function loadFeedback() {
+  const rows = await prisma.wfFeedback?.findMany({
+    where: { eventId: activeEventId || undefined },
+    orderBy: { createdAt: 'desc' }
+  }).catch(() => []) || [];
+  return rows.map(r => {
+    let ratings = {};
+    try { ratings = JSON.parse(r.ratings || '{}') || {}; } catch (e) {}
+    return { ...r, parsed: ratings };
+  });
+}
+
+app.get('/admin/feedback', requireAdminPage('feedback'), async (req, res) => {
+  const user = req.session.user.data;
+  const isAdmin = true;
+  const rows = await loadFeedback();
+  const evt = wfEvents.find(e => e.id === activeEventId);
+
+  const byRole = {};
+  FEEDBACK_ROLES.forEach(r => { byRole[r.key] = 0; });
+  rows.forEach(r => { byRole[r.role] = (byRole[r.role] || 0) + 1; });
+
+  // Average a score across the rows that answered it. A question nobody
+  // answered shows as a dash rather than zero.
+  const avg = (vals) => vals.length
+    ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10
+    : null;
+  const overallVals = rows.map(r => r.overall).filter(n => n != null);
+  const overallAvg = avg(overallVals);
+
+  // Shared questions over everyone; role questions over that role only.
+  const summaryRow = (q, subset) => {
+    const vals = subset.map(r => r.parsed[q.key]).filter(n => n != null);
+    const a = avg(vals);
+    const pct = a != null ? Math.round(((a - 1) / 4) * 100) : 0;
+    const cls = a == null ? 'none' : a >= 4 ? 'good' : a >= 3 ? 'ok' : 'poor';
+    return `<div class="fba-row">
+      <div class="fba-q">${escapeHtml(q.label)}</div>
+      <div class="fba-bar"><span class="fba-fill fba-${cls}" style="width:${pct}%"></span></div>
+      <div class="fba-score fba-${cls}-text">${a == null ? '\u2014' : a.toFixed(1)}</div>
+      <div class="fba-n">${vals.length}</div>
+    </div>`;
+  };
+
+  const comments = rows.filter(r => r.liked || r.improve || r.comments);
+
+  const content = `
+    <section class="card card-full">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px;">
+        <div>
+          <h2 style="margin:0 0 4px;">Feedback \u2014 ${escapeHtml(evt?.name || 'WorldFlight')}</h2>
+          <p style="margin:0;color:var(--muted);font-size:13px;">
+            ${rows.length} response${rows.length === 1 ? '' : 's'}${overallAvg != null ? ' \u00b7 overall ' + overallAvg.toFixed(1) + ' / 5' : ''}
+          </p>
+        </div>
+        <a href="/admin/feedback.csv" class="action-btn" download style="text-decoration:none;">Export CSV</a>
+      </div>
+
+      ${!rows.length ? `<div class="ot-empty"><div class="ot-empty-title">No responses yet</div>
+        <div class="ot-empty-sub">They will appear here as people fill the form in.</div></div>` : `
+
+      <div class="fba-counts">
+        ${FEEDBACK_ROLES.map(r => `<div class="fba-count">
+          <span class="fba-count-n">${byRole[r.key] || 0}</span>
+          <span class="fba-count-l">${escapeHtml(r.label)}</span>
+        </div>`).join('')}
+      </div>
+
+      <h3 class="fba-h">Everyone</h3>
+      <div class="fba-table">
+        <div class="fba-row fba-head"><div class="fba-q">Question</div><div class="fba-bar"></div><div class="fba-score">Avg</div><div class="fba-n">n</div></div>
+        ${summaryRow({ key: 'overall', label: 'Overall experience' }, rows.map(r => ({ parsed: { overall: r.overall } })))}
+        ${FEEDBACK_SHARED.map(q => summaryRow(q, rows)).join('')}
+      </div>
+
+      ${FEEDBACK_ROLES.map(role => {
+        const subset = rows.filter(r => r.role === role.key);
+        if (!subset.length) return '';
+        return `<h3 class="fba-h">${escapeHtml(role.label)} <span>${subset.length}</span></h3>
+          <div class="fba-table">
+            ${(FEEDBACK_BY_ROLE[role.key] || []).map(q => summaryRow(q, subset)).join('')}
+          </div>`;
+      }).join('')}
+
+      <h3 class="fba-h">Comments <span>${comments.length}</span></h3>
+      ${!comments.length ? `<p style="color:var(--muted);font-size:13px;">Nobody left a written comment.</p>` : `
+        <div class="fba-comments">
+          ${comments.map(r => `<div class="fba-comment">
+            <div class="fba-comment-head">
+              <span class="fba-tag">${escapeHtml(FEEDBACK_ROLES.find(x => x.key === r.role)?.label || r.role)}</span>
+              ${r.overall != null ? `<span class="fba-tag fba-tag-score">${r.overall}/5</span>` : ''}
+              <span class="fba-when">${new Date(r.createdAt).toISOString().slice(0, 16).replace('T', ' ')}z</span>
+            </div>
+            ${r.liked ? `<p><strong>Worked well:</strong> ${escapeHtml(r.liked)}</p>` : ''}
+            ${r.improve ? `<p><strong>Do differently:</strong> ${escapeHtml(r.improve)}</p>` : ''}
+            ${r.comments ? `<p><strong>Also:</strong> ${escapeHtml(r.comments)}</p>` : ''}
+          </div>`).join('')}
+        </div>`}
+      `}
+    </section>
+
+    <style>
+      .fba-counts { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }
+      .fba-count {
+        flex: 1 1 120px; padding: 12px 14px; border-radius: 10px;
+        border: 1px solid var(--border); background: var(--panel2);
+      }
+      .fba-count-n { display: block; font-size: 22px; font-weight: 700; color: var(--accent); }
+      .fba-count-l { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+      .fba-h {
+        margin: 26px 0 10px; font-size: 12px; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent);
+      }
+      .fba-h span { color: var(--muted); font-weight: 500; }
+      .fba-table { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+      .fba-row {
+        display: grid; grid-template-columns: minmax(0, 1fr) 160px 54px 44px;
+        gap: 12px; align-items: center; padding: 9px 14px;
+      }
+      .fba-row + .fba-row { border-top: 1px solid var(--border); }
+      .fba-head { background: var(--panel2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); }
+      .fba-q { font-size: 13px; min-width: 0; }
+      .fba-bar { height: 6px; border-radius: 999px; background: rgba(148,163,184,0.18); overflow: hidden; }
+      .fba-fill { display: block; height: 100%; border-radius: inherit; }
+      .fba-good { background: #4ade80; } .fba-good-text { color: #4ade80; }
+      .fba-ok { background: #f59e0b; } .fba-ok-text { color: #f59e0b; }
+      .fba-poor { background: #f87171; } .fba-poor-text { color: #f87171; }
+      .fba-none { background: transparent; } .fba-none-text { color: var(--muted); }
+      .fba-score { font-size: 14px; font-weight: 700; text-align: right; }
+      .fba-n { font-size: 11px; color: var(--muted); text-align: right; }
+      .fba-comments { display: flex; flex-direction: column; gap: 10px; }
+      .fba-comment { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel2); }
+      .fba-comment-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; flex-wrap: wrap; }
+      .fba-tag {
+        font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+        background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+      }
+      .fba-tag-score { background: rgba(74,222,128,0.15); color: #4ade80; }
+      .fba-when { font-size: 11px; color: var(--muted); margin-left: auto; }
+      .fba-comment p { margin: 0 0 6px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+      .fba-comment p:last-child { margin-bottom: 0; }
+      .fba-comment strong { color: var(--muted); font-weight: 600; }
+      @media (max-width: 720px) {
+        .fba-row { grid-template-columns: minmax(0, 1fr) 54px 40px; }
+        .fba-bar { display: none; }
+      }
+    </style>`;
+
+  res.send(renderLayout({ title: 'Feedback', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+// Every response, one row each, with a column per question so it can be
+// pivoted in a spreadsheet.
+app.get('/admin/feedback.csv', requireAdminPage('feedback'), async (req, res) => {
+  const rows = await loadFeedback();
+  const keys = [...new Set([
+    ...FEEDBACK_SHARED.map(q => q.key),
+    ...Object.values(FEEDBACK_BY_ROLE).flat().map(q => q.key)
+  ])];
+
+  const cell = (v) => {
+    const t = v == null ? '' : String(v);
+    return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  };
+  const headers = ['Submitted (UTC)', 'Role', 'Overall',
+    ...keys.map(k => feedbackQuestion(k)?.label || k),
+    'Worked well', 'Do differently', 'Anything else'];
+
+  const lines = [headers.map(cell).join(',')];
+  for (const r of rows) {
+    lines.push([
+      new Date(r.createdAt).toISOString().slice(0, 19).replace('T', ' '),
+      FEEDBACK_ROLES.find(x => x.key === r.role)?.label || r.role,
+      r.overall == null ? '' : r.overall,
+      ...keys.map(k => r.parsed[k] == null ? '' : r.parsed[k]),
+      r.liked || '', r.improve || '', r.comments || ''
+    ].map(cell).join(','));
+  }
+
+  const evt = wfEvents.find(e => e.id === activeEventId);
+  const slug = String(evt?.name || 'worldflight').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${slug}-feedback.csv"`);
+  res.send('\uFEFF' + lines.join('\r\n') + '\r\n');
+});
+
+/* ===== WF FEEDBACK: the form ===== */
+app.get('/feedback', requirePageEnabled('wf-feedback'), async (req, res) => {
+  const user = req.session?.user?.data || null;
+  const cid = Number(user?.cid) || null;
+  const isAdmin = isAdminUser(cid);
+  const evt = wfEvents.find(e => e.id === activeEventId);
+  const eventName = evt?.name || 'WorldFlight';
+
+  // Every block is rendered and the role toggles which are shown, so
+  // changing role keeps whatever has already been answered.
+  const scale = (key) => [1, 2, 3, 4, 5].map(n =>
+    `<label class="fb-dot"><input type="radio" name="${key}" value="${n}" /><span>${n}</span></label>`
+  ).join('');
+
+  const questionRow = (q) => `
+    <div class="fb-q">
+      <div class="fb-q-text">
+        <span class="fb-q-label">${escapeHtml(q.label)}</span>
+        ${q.hint ? `<span class="fb-q-hint">${escapeHtml(q.hint)}</span>` : ''}
+      </div>
+      <div class="fb-scale" role="radiogroup" aria-label="${escapeHtml(q.label)}">${scale(q.key)}</div>
+    </div>`;
+
+  const content = `
+    <div class="fb-wrap">
+      <section class="card fb-card">
+        <h2 class="fb-title">${escapeHtml(eventName)} Feedback</h2>
+        <p class="fb-intro">Tell us how it went. Every answer helps us plan the next one, and it takes about two minutes. Nothing here is required \u2014 skip anything that does not apply.</p>
+
+        <form id="fbForm" autocomplete="off">
+          <div class="fb-section">
+            <h3 class="fb-section-title">How did you take part?</h3>
+            <div class="fb-roles">
+              ${FEEDBACK_ROLES.map(r => `
+                <label class="fb-role">
+                  <input type="radio" name="role" value="${r.key}" />
+                  <span><strong>${escapeHtml(r.label)}</strong><em>${escapeHtml(r.blurb)}</em></span>
+                </label>`).join('')}
+            </div>
+          </div>
+
+          <div id="fbRest" hidden>
+            <div class="fb-section">
+              <h3 class="fb-section-title">Overall</h3>
+              <div class="fb-q fb-q-overall">
+                <div class="fb-q-text">
+                  <span class="fb-q-label">Your overall ${escapeHtml(eventName)} experience</span>
+                  <span class="fb-q-hint">1 = poor, 5 = excellent.</span>
+                </div>
+                <div class="fb-scale" role="radiogroup" aria-label="Overall experience">${scale('overall')}</div>
+              </div>
+            </div>
+
+            <div class="fb-section">
+              <h3 class="fb-section-title">The event</h3>
+              ${FEEDBACK_SHARED.map(questionRow).join('')}
+            </div>
+
+            ${Object.entries(FEEDBACK_BY_ROLE).map(([role, qs]) => `
+              <div class="fb-section fb-role-block" data-role="${role}" hidden>
+                <h3 class="fb-section-title">${escapeHtml(FEEDBACK_ROLES.find(r => r.key === role).label)} questions</h3>
+                ${qs.map(questionRow).join('')}
+              </div>`).join('')}
+
+            <div class="fb-section">
+              <h3 class="fb-section-title">In your words</h3>
+              <label class="fb-text">What worked well?
+                <textarea name="liked" rows="3" maxlength="2000" placeholder="Anything you would want kept exactly as it was."></textarea>
+              </label>
+              <label class="fb-text">What should we do differently next year?
+                <textarea name="improve" rows="3" maxlength="2000" placeholder="Be blunt \u2014 this is the useful bit."></textarea>
+              </label>
+              <label class="fb-text">Anything else?
+                <textarea name="comments" rows="3" maxlength="2000" placeholder="Optional."></textarea>
+              </label>
+            </div>
+
+            <!-- Not shown to people. Bots fill it in; the server drops those. -->
+            <div class="fb-hp" aria-hidden="true">
+              <label>Website<input type="text" name="website_url" tabindex="-1" autocomplete="off" /></label>
+            </div>
+
+            <div id="fbMsg" class="fb-msg" hidden></div>
+            <div class="fb-actions">
+              <button type="submit" class="action-btn primary" id="fbSubmit">Send feedback</button>
+              <span class="fb-note">No sign-in needed. We do not record who you are.</span>
+            </div>
+          </div>
+        </form>
+
+        <div id="fbThanks" class="fb-thanks" hidden>
+          <div class="fb-thanks-tick">\u2713</div>
+          <h3>Thank you</h3>
+          <p>Your feedback has been recorded. If you think of something else, you are welcome to send another response.</p>
+          <button type="button" class="action-btn" id="fbAgain">Send another</button>
+        </div>
+      </section>
+    </div>
+
+    <style>
+      .fb-wrap { max-width: 860px; margin: 0 auto; }
+      .fb-card { padding: 28px; }
+      .fb-title { margin: 0 0 6px; }
+      .fb-intro { margin: 0 0 24px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+      .fb-section { margin-bottom: 26px; }
+      .fb-section-title {
+        margin: 0 0 12px; font-size: 12px; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent);
+      }
+      .fb-roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+      .fb-role {
+        display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+        padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
+        background: var(--panel2); transition: border-color .15s, background .15s;
+      }
+      .fb-role:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+      .fb-role:has(input:checked) {
+        border-color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 8%, var(--panel2));
+      }
+      .fb-role input { margin-top: 3px; }
+      .fb-role strong { display: block; font-size: 13px; color: var(--text); }
+      .fb-role em { display: block; font-style: normal; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+      .fb-q {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 18px; flex-wrap: wrap; padding: 11px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .fb-q:last-child { border-bottom: none; }
+      .fb-q-overall { border-bottom: none; padding-top: 0; }
+      .fb-q-text { min-width: 0; flex: 1 1 320px; }
+      .fb-q-label { display: block; font-size: 13px; color: var(--text); }
+      .fb-q-hint { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+
+      .fb-scale { display: flex; gap: 6px; flex: 0 0 auto; }
+      .fb-dot input { position: absolute; opacity: 0; pointer-events: none; }
+      .fb-dot span {
+        display: flex; align-items: center; justify-content: center;
+        width: 34px; height: 34px; border-radius: 8px; cursor: pointer;
+        border: 1px solid var(--border); background: var(--panel2);
+        font-size: 13px; font-weight: 600; color: var(--muted);
+        transition: border-color .12s, background .12s, color .12s;
+      }
+      .fb-dot span:hover { border-color: var(--accent); color: var(--text); }
+      .fb-dot input:checked + span {
+        border-color: var(--accent); color: #fff;
+        background: var(--accent);
+      }
+      .fb-dot input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+      .fb-text { display: block; font-size: 13px; color: var(--text); margin-bottom: 14px; }
+      .fb-text textarea {
+        width: 100%; margin-top: 6px; padding: 10px 12px; resize: vertical;
+        background: var(--panel2); color: var(--text); font-family: inherit;
+        border: 1px solid var(--border); border-radius: 8px; font-size: 13px; line-height: 1.6;
+      }
+      .fb-text textarea:focus { outline: none; border-color: var(--accent); }
+
+      /* Off-screen rather than display:none, so bots that skip hidden
+         fields still fill it in. */
+      .fb-hp { position: absolute; left: -9999px; height: 0; overflow: hidden; }
+
+      .fb-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+      .fb-note { font-size: 11px; color: var(--muted); }
+      .fb-msg { margin-bottom: 12px; font-size: 13px; color: var(--danger, #f87171); }
+      .fb-thanks { text-align: center; padding: 40px 20px; }
+      .fb-thanks-tick {
+        width: 52px; height: 52px; margin: 0 auto 14px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center; font-size: 26px;
+        background: rgba(74,222,128,0.15); color: #4ade80;
+      }
+      .fb-thanks h3 { margin: 0 0 6px; }
+      .fb-thanks p { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+      @media (max-width: 640px) {
+        .fb-card { padding: 20px 16px; }
+        .fb-q { align-items: flex-start; }
+      }
+    </style>
+
+    <script>
+      (function () {
+        var form = document.getElementById('fbForm');
+        var rest = document.getElementById('fbRest');
+        var msg = document.getElementById('fbMsg');
+        var btn = document.getElementById('fbSubmit');
+        var thanks = document.getElementById('fbThanks');
+
+        // Reveal the rest of the form once a role is picked, and show only
+        // that role\u2019s block.
+        form.addEventListener('change', function (e) {
+          if (e.target.name !== 'role') return;
+          rest.hidden = false;
+          var role = e.target.value;
+          form.querySelectorAll('.fb-role-block').forEach(function (b) {
+            b.hidden = b.dataset.role !== role;
+          });
+        });
+
+        form.addEventListener('submit', async function (e) {
+          e.preventDefault();
+          var data = new FormData(form);
+          var role = data.get('role');
+          if (!role) { msg.textContent = 'Pick how you took part first.'; msg.hidden = false; return; }
+
+          var ratings = {};
+          form.querySelectorAll('.fb-role-block:not([hidden]) input[type=radio]:checked, .fb-section input[type=radio]:checked').forEach(function (i) {
+            if (i.name === 'role' || i.name === 'overall') return;
+            ratings[i.name] = Number(i.value);
+          });
+
+          btn.disabled = true;
+          btn.textContent = 'Sending...';
+          msg.hidden = true;
+          try {
+            var r = await fetch('/api/feedback', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                role: role,
+                overall: data.get('overall') ? Number(data.get('overall')) : null,
+                ratings: ratings,
+                liked: data.get('liked') || '',
+                improve: data.get('improve') || '',
+                comments: data.get('comments') || '',
+                website_url: data.get('website_url') || ''
+              })
+            });
+            var d = await r.json().catch(function () { return {}; });
+            if (!r.ok) {
+              msg.textContent = d.error || 'Something went wrong \u2014 please try again.';
+              msg.hidden = false;
+              btn.disabled = false; btn.textContent = 'Send feedback';
+              return;
+            }
+            form.hidden = true;
+            thanks.hidden = false;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          } catch (err) {
+            msg.textContent = 'Something went wrong \u2014 please try again.';
+            msg.hidden = false;
+            btn.disabled = false; btn.textContent = 'Send feedback';
+          }
+        });
+
+        document.getElementById('fbAgain').addEventListener('click', function () {
+          form.reset();
+          form.hidden = false;
+          rest.hidden = true;
+          thanks.hidden = true;
+          form.querySelectorAll('.fb-role-block').forEach(function (b) { b.hidden = true; });
+          btn.disabled = false; btn.textContent = 'Send feedback';
+        });
+      })();
+    </script>`;
+
+  res.send(renderLayout({ title: 'Feedback', user, isAdmin, content, layoutClass: 'dashboard-full' }));
+});
+
+// Open submission: no login, more than one response allowed. Everything is
+// clamped here because none of it can be trusted.
+app.post('/api/feedback', requirePageEnabled('wf-feedback'), async (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  if (feedbackRateLimited(ip)) {
+    return res.status(429).json({ error: 'That is a lot of feedback in one go \u2014 try again shortly.' });
+  }
+
+  // Honeypot: a human never sees the field, so anything in it is a bot.
+  // Answer 200 so it does not learn anything from the response.
+  if (String(req.body?.website_url || '').trim()) return res.json({ success: true });
+
+  const role = String(req.body?.role || '').trim();
+  if (!FEEDBACK_ROLES.some(r => r.key === role)) {
+    return res.status(400).json({ error: 'Pick how you took part.' });
+  }
+
+  const score = (v) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 1 && n <= 5 ? n : null;
+  };
+  const text = (v) => String(v || '').trim().slice(0, 2000) || null;
+
+  // Only keys that belong to this role are kept, so a crafted body cannot
+  // stuff arbitrary data into the JSON column.
+  const allowed = new Set(feedbackKeysFor(role));
+  const ratings = {};
+  const raw = (req.body && typeof req.body.ratings === 'object' && req.body.ratings) || {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!allowed.has(k)) continue;
+    const n = score(v);
+    if (n != null) ratings[k] = n;
+  }
+
+  try {
+    await prisma.wfFeedback.create({
+      data: {
+        eventId: activeEventId || null,
+        role,
+        overall: score(req.body?.overall),
+        ratings: JSON.stringify(ratings),
+        liked: text(req.body?.liked),
+        improve: text(req.body?.improve),
+        comments: text(req.body?.comments),
+        // Only if they happen to be signed in; never asked for.
+        cid: Number(req.session?.user?.data?.cid) || null
+      }
+    });
+    console.log('[FEEDBACK] ' + role + ' response recorded');
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[FEEDBACK] save failed:', e.message);
+    res.status(500).json({ error: 'Could not save your feedback.' });
+  }
+});
 
 app.get('/sector-notices', requireAdmin, async (req, res) => {
   const user = req.session.user.data;
